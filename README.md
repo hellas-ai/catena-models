@@ -89,6 +89,15 @@ nix develop --command cargo run --release -- \
   "The capital of France is" --max-new-tokens 20
 ```
 
+Normal inference compiles the complete checked-in `src/catena/qwen3.hex` and
+does not generate its 48-layer entrypoint in Rust. If the layer/weight ABI is
+changed, explicitly regenerate that entrypoint once and review the resulting
+source diff:
+
+```bash
+nix develop --command cargo run --release -- --generate-entrypoint
+```
+
 For a fixed-length performance run that continues through EOS:
 
 ```bash

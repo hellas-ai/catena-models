@@ -6,14 +6,21 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use catena_qwen3::{model::Model, spec::EOS_TOKEN_ID, tokenizer::QwenTokenizer};
+use catena_qwen3::{
+    catena::generated_model_source, model::Model, spec::EOS_TOKEN_ID, tokenizer::QwenTokenizer,
+};
 use clap::Parser;
 
 #[derive(Debug, Parser)]
 #[command(about = "Greedy text generation with Qwen3-30B-A3B-Base BF16 on Catena/HIP")]
 struct Args {
     /// Text prefix to continue.
-    prompt: String,
+    #[arg(required_unless_present = "generate_entrypoint")]
+    prompt: Option<String>,
+
+    /// Regenerate the explicit entrypoint in src/catena/qwen3.hex, then exit.
+    #[arg(long, conflicts_with = "prompt")]
+    generate_entrypoint: bool,
 
     /// Directory containing model.safetensors and tokenizer.json.
     #[arg(long, default_value = "models/Qwen3-30B-A3B-Base")]
@@ -30,8 +37,19 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    if args.generate_entrypoint {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/catena/qwen3.hex");
+        std::fs::write(&path, generated_model_source())?;
+        println!("regenerated {}", path.display());
+        return Ok(());
+    }
+
+    let prompt = args
+        .prompt
+        .as_deref()
+        .expect("clap requires a prompt unless entrypoint generation was selected");
     let tokenizer = QwenTokenizer::open(args.model_dir.join("tokenizer.json"))?;
-    let mut tokens = tokenizer.encode(&args.prompt)?;
+    let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
         !tokens.is_empty(),
         "the prompt encoded to an empty token prefix"

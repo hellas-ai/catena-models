@@ -2,7 +2,10 @@ use std::fmt::Write;
 
 use crate::spec::{NUM_LAYERS, TENSORS_PER_LAYER, WEIGHT_COUNT};
 
-pub const MODEL_CORE_SOURCE: &str = include_str!("catena/qwen3.hex");
+/// Complete checked-in Catena program used by normal inference.
+pub const MODEL_SOURCE: &str = include_str!("catena/qwen3.hex");
+
+const ENTRYPOINT_MARKER: &str = "# Explicit 48-layer Qwen3-30B-A3B composition.";
 
 const LAYER_WEIGHT_NAMES: [&str; TENSORS_PER_LAYER] = [
     "input-norm",
@@ -19,12 +22,20 @@ const LAYER_WEIGHT_NAMES: [&str; TENSORS_PER_LAYER] = [
     "expert-down-weight",
 ];
 
-/// Generate the explicit 48-layer linear-use composition. Keeping this
-/// mechanical ABI out of the handwritten Catena source makes the layer kernel
-/// readable while retaining compile-time ownership checking for every weight.
-pub fn model_source() -> String {
-    let mut source = String::from(MODEL_CORE_SOURCE);
-    source.push_str("\n# Explicit 48-layer Qwen3-30B-A3B composition.\n");
+/// Regenerate the complete Catena source, including the explicit 48-layer
+/// linear-use composition.
+///
+/// Normal inference uses [`MODEL_SOURCE`] directly. This function exists only
+/// for the opt-in `--generate-entrypoint` maintenance command.
+pub fn generated_model_source() -> String {
+    let core = MODEL_SOURCE
+        .split_once(ENTRYPOINT_MARKER)
+        .map_or(MODEL_SOURCE, |(core, _entrypoint)| core)
+        .trim_end();
+    let mut source = String::from(core);
+    source.push_str("\n\n");
+    source.push_str(ENTRYPOINT_MARKER);
+    source.push('\n');
     source.push_str("(def program qwen3 :\n  {\n");
     for ty in [
         "    (cap.ref mem)\n", // tokens
@@ -101,9 +112,8 @@ mod tests {
 
     #[test]
     fn entrypoint_has_all_layers_and_inputs() {
-        let source = model_source();
-        let entrypoint = source
-            .split("# Explicit 48-layer Qwen3-30B-A3B composition.")
+        let entrypoint = MODEL_SOURCE
+            .split(ENTRYPOINT_MARKER)
             .nth(1)
             .expect("entrypoint marker");
         assert_eq!(
@@ -122,14 +132,16 @@ mod tests {
     }
 
     #[test]
+    fn checked_in_entrypoint_matches_generator() {
+        assert_eq!(MODEL_SOURCE, generated_model_source());
+    }
+
+    #[test]
     fn gpu_program_compiles_when_requested() -> Result<()> {
         if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
             return Ok(());
         }
-        let source = model_source();
-        let mut sources = stdlib::sources().collect::<Vec<&str>>();
-        sources.push(source.as_str());
-        Runtime::from_sources(sources, GpuDialect::Hip)?;
+        Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)?;
         Ok(())
     }
 }

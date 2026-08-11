@@ -3630,3 +3630,1629 @@
     qwen3.free-f32-before [logits-after-normalized.])
   [.logits-after-normalized]
 ))
+
+# Explicit 48-layer Qwen3-30B-A3B composition.
+(def program qwen3 :
+  {
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.own mem)
+    (u64 val)
+    (u64 val)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+  }
+  ->
+  {(cap.own mem) (cap.own mem) (cap.own mem)}
+= ([tokens rope cache token-capacity cache-start embed-weight layer-00-input-norm layer-00-q-weight layer-00-k-weight layer-00-v-weight layer-00-o-weight layer-00-q-norm layer-00-k-norm layer-00-post-norm layer-00-router-weight layer-00-expert-gate-weight layer-00-expert-up-weight layer-00-expert-down-weight layer-01-input-norm layer-01-q-weight layer-01-k-weight layer-01-v-weight layer-01-o-weight layer-01-q-norm layer-01-k-norm layer-01-post-norm layer-01-router-weight layer-01-expert-gate-weight layer-01-expert-up-weight layer-01-expert-down-weight layer-02-input-norm layer-02-q-weight layer-02-k-weight layer-02-v-weight layer-02-o-weight layer-02-q-norm layer-02-k-norm layer-02-post-norm layer-02-router-weight layer-02-expert-gate-weight layer-02-expert-up-weight layer-02-expert-down-weight layer-03-input-norm layer-03-q-weight layer-03-k-weight layer-03-v-weight layer-03-o-weight layer-03-q-norm layer-03-k-norm layer-03-post-norm layer-03-router-weight layer-03-expert-gate-weight layer-03-expert-up-weight layer-03-expert-down-weight layer-04-input-norm layer-04-q-weight layer-04-k-weight layer-04-v-weight layer-04-o-weight layer-04-q-norm layer-04-k-norm layer-04-post-norm layer-04-router-weight layer-04-expert-gate-weight layer-04-expert-up-weight layer-04-expert-down-weight layer-05-input-norm layer-05-q-weight layer-05-k-weight layer-05-v-weight layer-05-o-weight layer-05-q-norm layer-05-k-norm layer-05-post-norm layer-05-router-weight layer-05-expert-gate-weight layer-05-expert-up-weight layer-05-expert-down-weight layer-06-input-norm layer-06-q-weight layer-06-k-weight layer-06-v-weight layer-06-o-weight layer-06-q-norm layer-06-k-norm layer-06-post-norm layer-06-router-weight layer-06-expert-gate-weight layer-06-expert-up-weight layer-06-expert-down-weight layer-07-input-norm layer-07-q-weight layer-07-k-weight layer-07-v-weight layer-07-o-weight layer-07-q-norm layer-07-k-norm layer-07-post-norm layer-07-router-weight layer-07-expert-gate-weight layer-07-expert-up-weight layer-07-expert-down-weight layer-08-input-norm layer-08-q-weight layer-08-k-weight layer-08-v-weight layer-08-o-weight layer-08-q-norm layer-08-k-norm layer-08-post-norm layer-08-router-weight layer-08-expert-gate-weight layer-08-expert-up-weight layer-08-expert-down-weight layer-09-input-norm layer-09-q-weight layer-09-k-weight layer-09-v-weight layer-09-o-weight layer-09-q-norm layer-09-k-norm layer-09-post-norm layer-09-router-weight layer-09-expert-gate-weight layer-09-expert-up-weight layer-09-expert-down-weight layer-10-input-norm layer-10-q-weight layer-10-k-weight layer-10-v-weight layer-10-o-weight layer-10-q-norm layer-10-k-norm layer-10-post-norm layer-10-router-weight layer-10-expert-gate-weight layer-10-expert-up-weight layer-10-expert-down-weight layer-11-input-norm layer-11-q-weight layer-11-k-weight layer-11-v-weight layer-11-o-weight layer-11-q-norm layer-11-k-norm layer-11-post-norm layer-11-router-weight layer-11-expert-gate-weight layer-11-expert-up-weight layer-11-expert-down-weight layer-12-input-norm layer-12-q-weight layer-12-k-weight layer-12-v-weight layer-12-o-weight layer-12-q-norm layer-12-k-norm layer-12-post-norm layer-12-router-weight layer-12-expert-gate-weight layer-12-expert-up-weight layer-12-expert-down-weight layer-13-input-norm layer-13-q-weight layer-13-k-weight layer-13-v-weight layer-13-o-weight layer-13-q-norm layer-13-k-norm layer-13-post-norm layer-13-router-weight layer-13-expert-gate-weight layer-13-expert-up-weight layer-13-expert-down-weight layer-14-input-norm layer-14-q-weight layer-14-k-weight layer-14-v-weight layer-14-o-weight layer-14-q-norm layer-14-k-norm layer-14-post-norm layer-14-router-weight layer-14-expert-gate-weight layer-14-expert-up-weight layer-14-expert-down-weight layer-15-input-norm layer-15-q-weight layer-15-k-weight layer-15-v-weight layer-15-o-weight layer-15-q-norm layer-15-k-norm layer-15-post-norm layer-15-router-weight layer-15-expert-gate-weight layer-15-expert-up-weight layer-15-expert-down-weight layer-16-input-norm layer-16-q-weight layer-16-k-weight layer-16-v-weight layer-16-o-weight layer-16-q-norm layer-16-k-norm layer-16-post-norm layer-16-router-weight layer-16-expert-gate-weight layer-16-expert-up-weight layer-16-expert-down-weight layer-17-input-norm layer-17-q-weight layer-17-k-weight layer-17-v-weight layer-17-o-weight layer-17-q-norm layer-17-k-norm layer-17-post-norm layer-17-router-weight layer-17-expert-gate-weight layer-17-expert-up-weight layer-17-expert-down-weight layer-18-input-norm layer-18-q-weight layer-18-k-weight layer-18-v-weight layer-18-o-weight layer-18-q-norm layer-18-k-norm layer-18-post-norm layer-18-router-weight layer-18-expert-gate-weight layer-18-expert-up-weight layer-18-expert-down-weight layer-19-input-norm layer-19-q-weight layer-19-k-weight layer-19-v-weight layer-19-o-weight layer-19-q-norm layer-19-k-norm layer-19-post-norm layer-19-router-weight layer-19-expert-gate-weight layer-19-expert-up-weight layer-19-expert-down-weight layer-20-input-norm layer-20-q-weight layer-20-k-weight layer-20-v-weight layer-20-o-weight layer-20-q-norm layer-20-k-norm layer-20-post-norm layer-20-router-weight layer-20-expert-gate-weight layer-20-expert-up-weight layer-20-expert-down-weight layer-21-input-norm layer-21-q-weight layer-21-k-weight layer-21-v-weight layer-21-o-weight layer-21-q-norm layer-21-k-norm layer-21-post-norm layer-21-router-weight layer-21-expert-gate-weight layer-21-expert-up-weight layer-21-expert-down-weight layer-22-input-norm layer-22-q-weight layer-22-k-weight layer-22-v-weight layer-22-o-weight layer-22-q-norm layer-22-k-norm layer-22-post-norm layer-22-router-weight layer-22-expert-gate-weight layer-22-expert-up-weight layer-22-expert-down-weight layer-23-input-norm layer-23-q-weight layer-23-k-weight layer-23-v-weight layer-23-o-weight layer-23-q-norm layer-23-k-norm layer-23-post-norm layer-23-router-weight layer-23-expert-gate-weight layer-23-expert-up-weight layer-23-expert-down-weight layer-24-input-norm layer-24-q-weight layer-24-k-weight layer-24-v-weight layer-24-o-weight layer-24-q-norm layer-24-k-norm layer-24-post-norm layer-24-router-weight layer-24-expert-gate-weight layer-24-expert-up-weight layer-24-expert-down-weight layer-25-input-norm layer-25-q-weight layer-25-k-weight layer-25-v-weight layer-25-o-weight layer-25-q-norm layer-25-k-norm layer-25-post-norm layer-25-router-weight layer-25-expert-gate-weight layer-25-expert-up-weight layer-25-expert-down-weight layer-26-input-norm layer-26-q-weight layer-26-k-weight layer-26-v-weight layer-26-o-weight layer-26-q-norm layer-26-k-norm layer-26-post-norm layer-26-router-weight layer-26-expert-gate-weight layer-26-expert-up-weight layer-26-expert-down-weight layer-27-input-norm layer-27-q-weight layer-27-k-weight layer-27-v-weight layer-27-o-weight layer-27-q-norm layer-27-k-norm layer-27-post-norm layer-27-router-weight layer-27-expert-gate-weight layer-27-expert-up-weight layer-27-expert-down-weight layer-28-input-norm layer-28-q-weight layer-28-k-weight layer-28-v-weight layer-28-o-weight layer-28-q-norm layer-28-k-norm layer-28-post-norm layer-28-router-weight layer-28-expert-gate-weight layer-28-expert-up-weight layer-28-expert-down-weight layer-29-input-norm layer-29-q-weight layer-29-k-weight layer-29-v-weight layer-29-o-weight layer-29-q-norm layer-29-k-norm layer-29-post-norm layer-29-router-weight layer-29-expert-gate-weight layer-29-expert-up-weight layer-29-expert-down-weight layer-30-input-norm layer-30-q-weight layer-30-k-weight layer-30-v-weight layer-30-o-weight layer-30-q-norm layer-30-k-norm layer-30-post-norm layer-30-router-weight layer-30-expert-gate-weight layer-30-expert-up-weight layer-30-expert-down-weight layer-31-input-norm layer-31-q-weight layer-31-k-weight layer-31-v-weight layer-31-o-weight layer-31-q-norm layer-31-k-norm layer-31-post-norm layer-31-router-weight layer-31-expert-gate-weight layer-31-expert-up-weight layer-31-expert-down-weight layer-32-input-norm layer-32-q-weight layer-32-k-weight layer-32-v-weight layer-32-o-weight layer-32-q-norm layer-32-k-norm layer-32-post-norm layer-32-router-weight layer-32-expert-gate-weight layer-32-expert-up-weight layer-32-expert-down-weight layer-33-input-norm layer-33-q-weight layer-33-k-weight layer-33-v-weight layer-33-o-weight layer-33-q-norm layer-33-k-norm layer-33-post-norm layer-33-router-weight layer-33-expert-gate-weight layer-33-expert-up-weight layer-33-expert-down-weight layer-34-input-norm layer-34-q-weight layer-34-k-weight layer-34-v-weight layer-34-o-weight layer-34-q-norm layer-34-k-norm layer-34-post-norm layer-34-router-weight layer-34-expert-gate-weight layer-34-expert-up-weight layer-34-expert-down-weight layer-35-input-norm layer-35-q-weight layer-35-k-weight layer-35-v-weight layer-35-o-weight layer-35-q-norm layer-35-k-norm layer-35-post-norm layer-35-router-weight layer-35-expert-gate-weight layer-35-expert-up-weight layer-35-expert-down-weight layer-36-input-norm layer-36-q-weight layer-36-k-weight layer-36-v-weight layer-36-o-weight layer-36-q-norm layer-36-k-norm layer-36-post-norm layer-36-router-weight layer-36-expert-gate-weight layer-36-expert-up-weight layer-36-expert-down-weight layer-37-input-norm layer-37-q-weight layer-37-k-weight layer-37-v-weight layer-37-o-weight layer-37-q-norm layer-37-k-norm layer-37-post-norm layer-37-router-weight layer-37-expert-gate-weight layer-37-expert-up-weight layer-37-expert-down-weight layer-38-input-norm layer-38-q-weight layer-38-k-weight layer-38-v-weight layer-38-o-weight layer-38-q-norm layer-38-k-norm layer-38-post-norm layer-38-router-weight layer-38-expert-gate-weight layer-38-expert-up-weight layer-38-expert-down-weight layer-39-input-norm layer-39-q-weight layer-39-k-weight layer-39-v-weight layer-39-o-weight layer-39-q-norm layer-39-k-norm layer-39-post-norm layer-39-router-weight layer-39-expert-gate-weight layer-39-expert-up-weight layer-39-expert-down-weight layer-40-input-norm layer-40-q-weight layer-40-k-weight layer-40-v-weight layer-40-o-weight layer-40-q-norm layer-40-k-norm layer-40-post-norm layer-40-router-weight layer-40-expert-gate-weight layer-40-expert-up-weight layer-40-expert-down-weight layer-41-input-norm layer-41-q-weight layer-41-k-weight layer-41-v-weight layer-41-o-weight layer-41-q-norm layer-41-k-norm layer-41-post-norm layer-41-router-weight layer-41-expert-gate-weight layer-41-expert-up-weight layer-41-expert-down-weight layer-42-input-norm layer-42-q-weight layer-42-k-weight layer-42-v-weight layer-42-o-weight layer-42-q-norm layer-42-k-norm layer-42-post-norm layer-42-router-weight layer-42-expert-gate-weight layer-42-expert-up-weight layer-42-expert-down-weight layer-43-input-norm layer-43-q-weight layer-43-k-weight layer-43-v-weight layer-43-o-weight layer-43-q-norm layer-43-k-norm layer-43-post-norm layer-43-router-weight layer-43-expert-gate-weight layer-43-expert-up-weight layer-43-expert-down-weight layer-44-input-norm layer-44-q-weight layer-44-k-weight layer-44-v-weight layer-44-o-weight layer-44-q-norm layer-44-k-norm layer-44-post-norm layer-44-router-weight layer-44-expert-gate-weight layer-44-expert-up-weight layer-44-expert-down-weight layer-45-input-norm layer-45-q-weight layer-45-k-weight layer-45-v-weight layer-45-o-weight layer-45-q-norm layer-45-k-norm layer-45-post-norm layer-45-router-weight layer-45-expert-gate-weight layer-45-expert-up-weight layer-45-expert-down-weight layer-46-input-norm layer-46-q-weight layer-46-k-weight layer-46-v-weight layer-46-o-weight layer-46-q-norm layer-46-k-norm layer-46-post-norm layer-46-router-weight layer-46-expert-gate-weight layer-46-expert-up-weight layer-46-expert-down-weight layer-47-input-norm layer-47-q-weight layer-47-k-weight layer-47-v-weight layer-47-o-weight layer-47-q-norm layer-47-k-norm layer-47-post-norm layer-47-router-weight layer-47-expert-gate-weight layer-47-expert-up-weight layer-47-expert-down-weight final-norm lm-head.]
+  ([.tokens] mem.cast.u64 [sequence _token-buffer.])
+  ([.sequence] :.forget [sequence-value.])
+  ({[.tokens] [.embed-weight]} qwen3.embedding [hidden-00.])
+  ({
+    [.hidden-00]
+    [.rope]
+    [.sequence-value]
+    [.cache]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000000)
+    [.layer-00-input-norm]
+    [.layer-00-q-weight]
+    [.layer-00-k-weight]
+    [.layer-00-v-weight]
+    [.layer-00-o-weight]
+    [.layer-00-q-norm]
+    [.layer-00-k-norm]
+    [.layer-00-post-norm]
+    [.layer-00-router-weight]
+    [.layer-00-expert-gate-weight]
+    [.layer-00-expert-up-weight]
+    [.layer-00-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-01 cache-01.])
+  ({
+    [.hidden-01]
+    [.rope]
+    [.sequence-value]
+    [.cache-01]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000001)
+    [.layer-01-input-norm]
+    [.layer-01-q-weight]
+    [.layer-01-k-weight]
+    [.layer-01-v-weight]
+    [.layer-01-o-weight]
+    [.layer-01-q-norm]
+    [.layer-01-k-norm]
+    [.layer-01-post-norm]
+    [.layer-01-router-weight]
+    [.layer-01-expert-gate-weight]
+    [.layer-01-expert-up-weight]
+    [.layer-01-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-02 cache-02.])
+  ({
+    [.hidden-02]
+    [.rope]
+    [.sequence-value]
+    [.cache-02]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000002)
+    [.layer-02-input-norm]
+    [.layer-02-q-weight]
+    [.layer-02-k-weight]
+    [.layer-02-v-weight]
+    [.layer-02-o-weight]
+    [.layer-02-q-norm]
+    [.layer-02-k-norm]
+    [.layer-02-post-norm]
+    [.layer-02-router-weight]
+    [.layer-02-expert-gate-weight]
+    [.layer-02-expert-up-weight]
+    [.layer-02-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-03 cache-03.])
+  ({
+    [.hidden-03]
+    [.rope]
+    [.sequence-value]
+    [.cache-03]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000003)
+    [.layer-03-input-norm]
+    [.layer-03-q-weight]
+    [.layer-03-k-weight]
+    [.layer-03-v-weight]
+    [.layer-03-o-weight]
+    [.layer-03-q-norm]
+    [.layer-03-k-norm]
+    [.layer-03-post-norm]
+    [.layer-03-router-weight]
+    [.layer-03-expert-gate-weight]
+    [.layer-03-expert-up-weight]
+    [.layer-03-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-04 cache-04.])
+  ({
+    [.hidden-04]
+    [.rope]
+    [.sequence-value]
+    [.cache-04]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000004)
+    [.layer-04-input-norm]
+    [.layer-04-q-weight]
+    [.layer-04-k-weight]
+    [.layer-04-v-weight]
+    [.layer-04-o-weight]
+    [.layer-04-q-norm]
+    [.layer-04-k-norm]
+    [.layer-04-post-norm]
+    [.layer-04-router-weight]
+    [.layer-04-expert-gate-weight]
+    [.layer-04-expert-up-weight]
+    [.layer-04-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-05 cache-05.])
+  ({
+    [.hidden-05]
+    [.rope]
+    [.sequence-value]
+    [.cache-05]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000005)
+    [.layer-05-input-norm]
+    [.layer-05-q-weight]
+    [.layer-05-k-weight]
+    [.layer-05-v-weight]
+    [.layer-05-o-weight]
+    [.layer-05-q-norm]
+    [.layer-05-k-norm]
+    [.layer-05-post-norm]
+    [.layer-05-router-weight]
+    [.layer-05-expert-gate-weight]
+    [.layer-05-expert-up-weight]
+    [.layer-05-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-06 cache-06.])
+  ({
+    [.hidden-06]
+    [.rope]
+    [.sequence-value]
+    [.cache-06]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000006)
+    [.layer-06-input-norm]
+    [.layer-06-q-weight]
+    [.layer-06-k-weight]
+    [.layer-06-v-weight]
+    [.layer-06-o-weight]
+    [.layer-06-q-norm]
+    [.layer-06-k-norm]
+    [.layer-06-post-norm]
+    [.layer-06-router-weight]
+    [.layer-06-expert-gate-weight]
+    [.layer-06-expert-up-weight]
+    [.layer-06-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-07 cache-07.])
+  ({
+    [.hidden-07]
+    [.rope]
+    [.sequence-value]
+    [.cache-07]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000007)
+    [.layer-07-input-norm]
+    [.layer-07-q-weight]
+    [.layer-07-k-weight]
+    [.layer-07-v-weight]
+    [.layer-07-o-weight]
+    [.layer-07-q-norm]
+    [.layer-07-k-norm]
+    [.layer-07-post-norm]
+    [.layer-07-router-weight]
+    [.layer-07-expert-gate-weight]
+    [.layer-07-expert-up-weight]
+    [.layer-07-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-08 cache-08.])
+  ({
+    [.hidden-08]
+    [.rope]
+    [.sequence-value]
+    [.cache-08]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000008)
+    [.layer-08-input-norm]
+    [.layer-08-q-weight]
+    [.layer-08-k-weight]
+    [.layer-08-v-weight]
+    [.layer-08-o-weight]
+    [.layer-08-q-norm]
+    [.layer-08-k-norm]
+    [.layer-08-post-norm]
+    [.layer-08-router-weight]
+    [.layer-08-expert-gate-weight]
+    [.layer-08-expert-up-weight]
+    [.layer-08-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-09 cache-09.])
+  ({
+    [.hidden-09]
+    [.rope]
+    [.sequence-value]
+    [.cache-09]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000009)
+    [.layer-09-input-norm]
+    [.layer-09-q-weight]
+    [.layer-09-k-weight]
+    [.layer-09-v-weight]
+    [.layer-09-o-weight]
+    [.layer-09-q-norm]
+    [.layer-09-k-norm]
+    [.layer-09-post-norm]
+    [.layer-09-router-weight]
+    [.layer-09-expert-gate-weight]
+    [.layer-09-expert-up-weight]
+    [.layer-09-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-10 cache-10.])
+  ({
+    [.hidden-10]
+    [.rope]
+    [.sequence-value]
+    [.cache-10]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000A)
+    [.layer-10-input-norm]
+    [.layer-10-q-weight]
+    [.layer-10-k-weight]
+    [.layer-10-v-weight]
+    [.layer-10-o-weight]
+    [.layer-10-q-norm]
+    [.layer-10-k-norm]
+    [.layer-10-post-norm]
+    [.layer-10-router-weight]
+    [.layer-10-expert-gate-weight]
+    [.layer-10-expert-up-weight]
+    [.layer-10-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-11 cache-11.])
+  ({
+    [.hidden-11]
+    [.rope]
+    [.sequence-value]
+    [.cache-11]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000B)
+    [.layer-11-input-norm]
+    [.layer-11-q-weight]
+    [.layer-11-k-weight]
+    [.layer-11-v-weight]
+    [.layer-11-o-weight]
+    [.layer-11-q-norm]
+    [.layer-11-k-norm]
+    [.layer-11-post-norm]
+    [.layer-11-router-weight]
+    [.layer-11-expert-gate-weight]
+    [.layer-11-expert-up-weight]
+    [.layer-11-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-12 cache-12.])
+  ({
+    [.hidden-12]
+    [.rope]
+    [.sequence-value]
+    [.cache-12]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000C)
+    [.layer-12-input-norm]
+    [.layer-12-q-weight]
+    [.layer-12-k-weight]
+    [.layer-12-v-weight]
+    [.layer-12-o-weight]
+    [.layer-12-q-norm]
+    [.layer-12-k-norm]
+    [.layer-12-post-norm]
+    [.layer-12-router-weight]
+    [.layer-12-expert-gate-weight]
+    [.layer-12-expert-up-weight]
+    [.layer-12-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-13 cache-13.])
+  ({
+    [.hidden-13]
+    [.rope]
+    [.sequence-value]
+    [.cache-13]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000D)
+    [.layer-13-input-norm]
+    [.layer-13-q-weight]
+    [.layer-13-k-weight]
+    [.layer-13-v-weight]
+    [.layer-13-o-weight]
+    [.layer-13-q-norm]
+    [.layer-13-k-norm]
+    [.layer-13-post-norm]
+    [.layer-13-router-weight]
+    [.layer-13-expert-gate-weight]
+    [.layer-13-expert-up-weight]
+    [.layer-13-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-14 cache-14.])
+  ({
+    [.hidden-14]
+    [.rope]
+    [.sequence-value]
+    [.cache-14]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000E)
+    [.layer-14-input-norm]
+    [.layer-14-q-weight]
+    [.layer-14-k-weight]
+    [.layer-14-v-weight]
+    [.layer-14-o-weight]
+    [.layer-14-q-norm]
+    [.layer-14-k-norm]
+    [.layer-14-post-norm]
+    [.layer-14-router-weight]
+    [.layer-14-expert-gate-weight]
+    [.layer-14-expert-up-weight]
+    [.layer-14-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-15 cache-15.])
+  ({
+    [.hidden-15]
+    [.rope]
+    [.sequence-value]
+    [.cache-15]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000000F)
+    [.layer-15-input-norm]
+    [.layer-15-q-weight]
+    [.layer-15-k-weight]
+    [.layer-15-v-weight]
+    [.layer-15-o-weight]
+    [.layer-15-q-norm]
+    [.layer-15-k-norm]
+    [.layer-15-post-norm]
+    [.layer-15-router-weight]
+    [.layer-15-expert-gate-weight]
+    [.layer-15-expert-up-weight]
+    [.layer-15-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-16 cache-16.])
+  ({
+    [.hidden-16]
+    [.rope]
+    [.sequence-value]
+    [.cache-16]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000010)
+    [.layer-16-input-norm]
+    [.layer-16-q-weight]
+    [.layer-16-k-weight]
+    [.layer-16-v-weight]
+    [.layer-16-o-weight]
+    [.layer-16-q-norm]
+    [.layer-16-k-norm]
+    [.layer-16-post-norm]
+    [.layer-16-router-weight]
+    [.layer-16-expert-gate-weight]
+    [.layer-16-expert-up-weight]
+    [.layer-16-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-17 cache-17.])
+  ({
+    [.hidden-17]
+    [.rope]
+    [.sequence-value]
+    [.cache-17]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000011)
+    [.layer-17-input-norm]
+    [.layer-17-q-weight]
+    [.layer-17-k-weight]
+    [.layer-17-v-weight]
+    [.layer-17-o-weight]
+    [.layer-17-q-norm]
+    [.layer-17-k-norm]
+    [.layer-17-post-norm]
+    [.layer-17-router-weight]
+    [.layer-17-expert-gate-weight]
+    [.layer-17-expert-up-weight]
+    [.layer-17-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-18 cache-18.])
+  ({
+    [.hidden-18]
+    [.rope]
+    [.sequence-value]
+    [.cache-18]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000012)
+    [.layer-18-input-norm]
+    [.layer-18-q-weight]
+    [.layer-18-k-weight]
+    [.layer-18-v-weight]
+    [.layer-18-o-weight]
+    [.layer-18-q-norm]
+    [.layer-18-k-norm]
+    [.layer-18-post-norm]
+    [.layer-18-router-weight]
+    [.layer-18-expert-gate-weight]
+    [.layer-18-expert-up-weight]
+    [.layer-18-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-19 cache-19.])
+  ({
+    [.hidden-19]
+    [.rope]
+    [.sequence-value]
+    [.cache-19]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000013)
+    [.layer-19-input-norm]
+    [.layer-19-q-weight]
+    [.layer-19-k-weight]
+    [.layer-19-v-weight]
+    [.layer-19-o-weight]
+    [.layer-19-q-norm]
+    [.layer-19-k-norm]
+    [.layer-19-post-norm]
+    [.layer-19-router-weight]
+    [.layer-19-expert-gate-weight]
+    [.layer-19-expert-up-weight]
+    [.layer-19-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-20 cache-20.])
+  ({
+    [.hidden-20]
+    [.rope]
+    [.sequence-value]
+    [.cache-20]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000014)
+    [.layer-20-input-norm]
+    [.layer-20-q-weight]
+    [.layer-20-k-weight]
+    [.layer-20-v-weight]
+    [.layer-20-o-weight]
+    [.layer-20-q-norm]
+    [.layer-20-k-norm]
+    [.layer-20-post-norm]
+    [.layer-20-router-weight]
+    [.layer-20-expert-gate-weight]
+    [.layer-20-expert-up-weight]
+    [.layer-20-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-21 cache-21.])
+  ({
+    [.hidden-21]
+    [.rope]
+    [.sequence-value]
+    [.cache-21]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000015)
+    [.layer-21-input-norm]
+    [.layer-21-q-weight]
+    [.layer-21-k-weight]
+    [.layer-21-v-weight]
+    [.layer-21-o-weight]
+    [.layer-21-q-norm]
+    [.layer-21-k-norm]
+    [.layer-21-post-norm]
+    [.layer-21-router-weight]
+    [.layer-21-expert-gate-weight]
+    [.layer-21-expert-up-weight]
+    [.layer-21-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-22 cache-22.])
+  ({
+    [.hidden-22]
+    [.rope]
+    [.sequence-value]
+    [.cache-22]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000016)
+    [.layer-22-input-norm]
+    [.layer-22-q-weight]
+    [.layer-22-k-weight]
+    [.layer-22-v-weight]
+    [.layer-22-o-weight]
+    [.layer-22-q-norm]
+    [.layer-22-k-norm]
+    [.layer-22-post-norm]
+    [.layer-22-router-weight]
+    [.layer-22-expert-gate-weight]
+    [.layer-22-expert-up-weight]
+    [.layer-22-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-23 cache-23.])
+  ({
+    [.hidden-23]
+    [.rope]
+    [.sequence-value]
+    [.cache-23]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000017)
+    [.layer-23-input-norm]
+    [.layer-23-q-weight]
+    [.layer-23-k-weight]
+    [.layer-23-v-weight]
+    [.layer-23-o-weight]
+    [.layer-23-q-norm]
+    [.layer-23-k-norm]
+    [.layer-23-post-norm]
+    [.layer-23-router-weight]
+    [.layer-23-expert-gate-weight]
+    [.layer-23-expert-up-weight]
+    [.layer-23-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-24 cache-24.])
+  ({
+    [.hidden-24]
+    [.rope]
+    [.sequence-value]
+    [.cache-24]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000018)
+    [.layer-24-input-norm]
+    [.layer-24-q-weight]
+    [.layer-24-k-weight]
+    [.layer-24-v-weight]
+    [.layer-24-o-weight]
+    [.layer-24-q-norm]
+    [.layer-24-k-norm]
+    [.layer-24-post-norm]
+    [.layer-24-router-weight]
+    [.layer-24-expert-gate-weight]
+    [.layer-24-expert-up-weight]
+    [.layer-24-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-25 cache-25.])
+  ({
+    [.hidden-25]
+    [.rope]
+    [.sequence-value]
+    [.cache-25]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000019)
+    [.layer-25-input-norm]
+    [.layer-25-q-weight]
+    [.layer-25-k-weight]
+    [.layer-25-v-weight]
+    [.layer-25-o-weight]
+    [.layer-25-q-norm]
+    [.layer-25-k-norm]
+    [.layer-25-post-norm]
+    [.layer-25-router-weight]
+    [.layer-25-expert-gate-weight]
+    [.layer-25-expert-up-weight]
+    [.layer-25-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-26 cache-26.])
+  ({
+    [.hidden-26]
+    [.rope]
+    [.sequence-value]
+    [.cache-26]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001A)
+    [.layer-26-input-norm]
+    [.layer-26-q-weight]
+    [.layer-26-k-weight]
+    [.layer-26-v-weight]
+    [.layer-26-o-weight]
+    [.layer-26-q-norm]
+    [.layer-26-k-norm]
+    [.layer-26-post-norm]
+    [.layer-26-router-weight]
+    [.layer-26-expert-gate-weight]
+    [.layer-26-expert-up-weight]
+    [.layer-26-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-27 cache-27.])
+  ({
+    [.hidden-27]
+    [.rope]
+    [.sequence-value]
+    [.cache-27]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001B)
+    [.layer-27-input-norm]
+    [.layer-27-q-weight]
+    [.layer-27-k-weight]
+    [.layer-27-v-weight]
+    [.layer-27-o-weight]
+    [.layer-27-q-norm]
+    [.layer-27-k-norm]
+    [.layer-27-post-norm]
+    [.layer-27-router-weight]
+    [.layer-27-expert-gate-weight]
+    [.layer-27-expert-up-weight]
+    [.layer-27-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-28 cache-28.])
+  ({
+    [.hidden-28]
+    [.rope]
+    [.sequence-value]
+    [.cache-28]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001C)
+    [.layer-28-input-norm]
+    [.layer-28-q-weight]
+    [.layer-28-k-weight]
+    [.layer-28-v-weight]
+    [.layer-28-o-weight]
+    [.layer-28-q-norm]
+    [.layer-28-k-norm]
+    [.layer-28-post-norm]
+    [.layer-28-router-weight]
+    [.layer-28-expert-gate-weight]
+    [.layer-28-expert-up-weight]
+    [.layer-28-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-29 cache-29.])
+  ({
+    [.hidden-29]
+    [.rope]
+    [.sequence-value]
+    [.cache-29]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001D)
+    [.layer-29-input-norm]
+    [.layer-29-q-weight]
+    [.layer-29-k-weight]
+    [.layer-29-v-weight]
+    [.layer-29-o-weight]
+    [.layer-29-q-norm]
+    [.layer-29-k-norm]
+    [.layer-29-post-norm]
+    [.layer-29-router-weight]
+    [.layer-29-expert-gate-weight]
+    [.layer-29-expert-up-weight]
+    [.layer-29-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-30 cache-30.])
+  ({
+    [.hidden-30]
+    [.rope]
+    [.sequence-value]
+    [.cache-30]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001E)
+    [.layer-30-input-norm]
+    [.layer-30-q-weight]
+    [.layer-30-k-weight]
+    [.layer-30-v-weight]
+    [.layer-30-o-weight]
+    [.layer-30-q-norm]
+    [.layer-30-k-norm]
+    [.layer-30-post-norm]
+    [.layer-30-router-weight]
+    [.layer-30-expert-gate-weight]
+    [.layer-30-expert-up-weight]
+    [.layer-30-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-31 cache-31.])
+  ({
+    [.hidden-31]
+    [.rope]
+    [.sequence-value]
+    [.cache-31]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000001F)
+    [.layer-31-input-norm]
+    [.layer-31-q-weight]
+    [.layer-31-k-weight]
+    [.layer-31-v-weight]
+    [.layer-31-o-weight]
+    [.layer-31-q-norm]
+    [.layer-31-k-norm]
+    [.layer-31-post-norm]
+    [.layer-31-router-weight]
+    [.layer-31-expert-gate-weight]
+    [.layer-31-expert-up-weight]
+    [.layer-31-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-32 cache-32.])
+  ({
+    [.hidden-32]
+    [.rope]
+    [.sequence-value]
+    [.cache-32]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000020)
+    [.layer-32-input-norm]
+    [.layer-32-q-weight]
+    [.layer-32-k-weight]
+    [.layer-32-v-weight]
+    [.layer-32-o-weight]
+    [.layer-32-q-norm]
+    [.layer-32-k-norm]
+    [.layer-32-post-norm]
+    [.layer-32-router-weight]
+    [.layer-32-expert-gate-weight]
+    [.layer-32-expert-up-weight]
+    [.layer-32-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-33 cache-33.])
+  ({
+    [.hidden-33]
+    [.rope]
+    [.sequence-value]
+    [.cache-33]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000021)
+    [.layer-33-input-norm]
+    [.layer-33-q-weight]
+    [.layer-33-k-weight]
+    [.layer-33-v-weight]
+    [.layer-33-o-weight]
+    [.layer-33-q-norm]
+    [.layer-33-k-norm]
+    [.layer-33-post-norm]
+    [.layer-33-router-weight]
+    [.layer-33-expert-gate-weight]
+    [.layer-33-expert-up-weight]
+    [.layer-33-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-34 cache-34.])
+  ({
+    [.hidden-34]
+    [.rope]
+    [.sequence-value]
+    [.cache-34]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000022)
+    [.layer-34-input-norm]
+    [.layer-34-q-weight]
+    [.layer-34-k-weight]
+    [.layer-34-v-weight]
+    [.layer-34-o-weight]
+    [.layer-34-q-norm]
+    [.layer-34-k-norm]
+    [.layer-34-post-norm]
+    [.layer-34-router-weight]
+    [.layer-34-expert-gate-weight]
+    [.layer-34-expert-up-weight]
+    [.layer-34-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-35 cache-35.])
+  ({
+    [.hidden-35]
+    [.rope]
+    [.sequence-value]
+    [.cache-35]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000023)
+    [.layer-35-input-norm]
+    [.layer-35-q-weight]
+    [.layer-35-k-weight]
+    [.layer-35-v-weight]
+    [.layer-35-o-weight]
+    [.layer-35-q-norm]
+    [.layer-35-k-norm]
+    [.layer-35-post-norm]
+    [.layer-35-router-weight]
+    [.layer-35-expert-gate-weight]
+    [.layer-35-expert-up-weight]
+    [.layer-35-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-36 cache-36.])
+  ({
+    [.hidden-36]
+    [.rope]
+    [.sequence-value]
+    [.cache-36]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000024)
+    [.layer-36-input-norm]
+    [.layer-36-q-weight]
+    [.layer-36-k-weight]
+    [.layer-36-v-weight]
+    [.layer-36-o-weight]
+    [.layer-36-q-norm]
+    [.layer-36-k-norm]
+    [.layer-36-post-norm]
+    [.layer-36-router-weight]
+    [.layer-36-expert-gate-weight]
+    [.layer-36-expert-up-weight]
+    [.layer-36-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-37 cache-37.])
+  ({
+    [.hidden-37]
+    [.rope]
+    [.sequence-value]
+    [.cache-37]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000025)
+    [.layer-37-input-norm]
+    [.layer-37-q-weight]
+    [.layer-37-k-weight]
+    [.layer-37-v-weight]
+    [.layer-37-o-weight]
+    [.layer-37-q-norm]
+    [.layer-37-k-norm]
+    [.layer-37-post-norm]
+    [.layer-37-router-weight]
+    [.layer-37-expert-gate-weight]
+    [.layer-37-expert-up-weight]
+    [.layer-37-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-38 cache-38.])
+  ({
+    [.hidden-38]
+    [.rope]
+    [.sequence-value]
+    [.cache-38]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000026)
+    [.layer-38-input-norm]
+    [.layer-38-q-weight]
+    [.layer-38-k-weight]
+    [.layer-38-v-weight]
+    [.layer-38-o-weight]
+    [.layer-38-q-norm]
+    [.layer-38-k-norm]
+    [.layer-38-post-norm]
+    [.layer-38-router-weight]
+    [.layer-38-expert-gate-weight]
+    [.layer-38-expert-up-weight]
+    [.layer-38-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-39 cache-39.])
+  ({
+    [.hidden-39]
+    [.rope]
+    [.sequence-value]
+    [.cache-39]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000027)
+    [.layer-39-input-norm]
+    [.layer-39-q-weight]
+    [.layer-39-k-weight]
+    [.layer-39-v-weight]
+    [.layer-39-o-weight]
+    [.layer-39-q-norm]
+    [.layer-39-k-norm]
+    [.layer-39-post-norm]
+    [.layer-39-router-weight]
+    [.layer-39-expert-gate-weight]
+    [.layer-39-expert-up-weight]
+    [.layer-39-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-40 cache-40.])
+  ({
+    [.hidden-40]
+    [.rope]
+    [.sequence-value]
+    [.cache-40]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000028)
+    [.layer-40-input-norm]
+    [.layer-40-q-weight]
+    [.layer-40-k-weight]
+    [.layer-40-v-weight]
+    [.layer-40-o-weight]
+    [.layer-40-q-norm]
+    [.layer-40-k-norm]
+    [.layer-40-post-norm]
+    [.layer-40-router-weight]
+    [.layer-40-expert-gate-weight]
+    [.layer-40-expert-up-weight]
+    [.layer-40-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-41 cache-41.])
+  ({
+    [.hidden-41]
+    [.rope]
+    [.sequence-value]
+    [.cache-41]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x0000000000000029)
+    [.layer-41-input-norm]
+    [.layer-41-q-weight]
+    [.layer-41-k-weight]
+    [.layer-41-v-weight]
+    [.layer-41-o-weight]
+    [.layer-41-q-norm]
+    [.layer-41-k-norm]
+    [.layer-41-post-norm]
+    [.layer-41-router-weight]
+    [.layer-41-expert-gate-weight]
+    [.layer-41-expert-up-weight]
+    [.layer-41-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-42 cache-42.])
+  ({
+    [.hidden-42]
+    [.rope]
+    [.sequence-value]
+    [.cache-42]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002A)
+    [.layer-42-input-norm]
+    [.layer-42-q-weight]
+    [.layer-42-k-weight]
+    [.layer-42-v-weight]
+    [.layer-42-o-weight]
+    [.layer-42-q-norm]
+    [.layer-42-k-norm]
+    [.layer-42-post-norm]
+    [.layer-42-router-weight]
+    [.layer-42-expert-gate-weight]
+    [.layer-42-expert-up-weight]
+    [.layer-42-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-43 cache-43.])
+  ({
+    [.hidden-43]
+    [.rope]
+    [.sequence-value]
+    [.cache-43]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002B)
+    [.layer-43-input-norm]
+    [.layer-43-q-weight]
+    [.layer-43-k-weight]
+    [.layer-43-v-weight]
+    [.layer-43-o-weight]
+    [.layer-43-q-norm]
+    [.layer-43-k-norm]
+    [.layer-43-post-norm]
+    [.layer-43-router-weight]
+    [.layer-43-expert-gate-weight]
+    [.layer-43-expert-up-weight]
+    [.layer-43-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-44 cache-44.])
+  ({
+    [.hidden-44]
+    [.rope]
+    [.sequence-value]
+    [.cache-44]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002C)
+    [.layer-44-input-norm]
+    [.layer-44-q-weight]
+    [.layer-44-k-weight]
+    [.layer-44-v-weight]
+    [.layer-44-o-weight]
+    [.layer-44-q-norm]
+    [.layer-44-k-norm]
+    [.layer-44-post-norm]
+    [.layer-44-router-weight]
+    [.layer-44-expert-gate-weight]
+    [.layer-44-expert-up-weight]
+    [.layer-44-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-45 cache-45.])
+  ({
+    [.hidden-45]
+    [.rope]
+    [.sequence-value]
+    [.cache-45]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002D)
+    [.layer-45-input-norm]
+    [.layer-45-q-weight]
+    [.layer-45-k-weight]
+    [.layer-45-v-weight]
+    [.layer-45-o-weight]
+    [.layer-45-q-norm]
+    [.layer-45-k-norm]
+    [.layer-45-post-norm]
+    [.layer-45-router-weight]
+    [.layer-45-expert-gate-weight]
+    [.layer-45-expert-up-weight]
+    [.layer-45-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-46 cache-46.])
+  ({
+    [.hidden-46]
+    [.rope]
+    [.sequence-value]
+    [.cache-46]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002E)
+    [.layer-46-input-norm]
+    [.layer-46-q-weight]
+    [.layer-46-k-weight]
+    [.layer-46-v-weight]
+    [.layer-46-o-weight]
+    [.layer-46-q-norm]
+    [.layer-46-k-norm]
+    [.layer-46-post-norm]
+    [.layer-46-router-weight]
+    [.layer-46-expert-gate-weight]
+    [.layer-46-expert-up-weight]
+    [.layer-46-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-47 cache-47.])
+  ({
+    [.hidden-47]
+    [.rope]
+    [.sequence-value]
+    [.cache-47]
+    [.token-capacity]
+    [.cache-start]
+    (const.u64.0x000000000000002F)
+    [.layer-47-input-norm]
+    [.layer-47-q-weight]
+    [.layer-47-k-weight]
+    [.layer-47-v-weight]
+    [.layer-47-o-weight]
+    [.layer-47-q-norm]
+    [.layer-47-k-norm]
+    [.layer-47-post-norm]
+    [.layer-47-router-weight]
+    [.layer-47-expert-gate-weight]
+    [.layer-47-expert-up-weight]
+    [.layer-47-expert-down-weight]
+  } qwen3.cached-decoder-layer [hidden-48 cache-48.])
+  ([.hidden-48] qwen3.rms-inv [final-inverse.])
+  ({
+    [.hidden-48]
+    [.final-norm]
+    [.lm-head]
+    [.final-inverse]
+    [.sequence-value]
+  } qwen3.final-logits [logits.])
+  ({[.final-inverse] [.logits]} qwen3.free-f32-before [logits-after-inverse.])
+  ({[.hidden-48] [.logits-after-inverse]} qwen3.free-f32-before [final-logits.])
+  ([.final-logits] mem.cast.f32 [logit-count logit-buffer.])
+  (const.u64.0x0000000000000001 u64.name [one.])
+  {
+    [.logit-buffer]
+    [.logit-count]
+    [.one]
+  } materializec.borrow-argmax-f32 [logits-after-argmax next-token-buffer.]
+  {
+    [.cache-48]
+    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)
+    ({[.one] [.next-token-buffer]} buf.to-mem)
+  }
+))

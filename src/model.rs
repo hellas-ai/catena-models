@@ -8,7 +8,7 @@ use catena_lang::{
 };
 
 use crate::{
-    catena::model_source,
+    catena::MODEL_SOURCE,
     checkpoint::Checkpoint,
     rope,
     spec::{
@@ -26,11 +26,9 @@ pub struct Model {
 impl Model {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
         let model_dir = model_dir.as_ref();
-        let model_source = model_source();
-        let mut sources = stdlib::sources().collect::<Vec<&str>>();
-        sources.push(model_source.as_str());
-        let runtime = Runtime::from_sources(sources, GpuDialect::Hip)
-            .context("failed to compile the Qwen3 Catena GPU program")?;
+        let runtime =
+            Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)
+                .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open(model_dir)?;
         let mut weights = Vec::with_capacity(WEIGHT_COUNT);
         for spec in weight_specs() {
