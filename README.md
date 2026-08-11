@@ -11,6 +11,17 @@ The scripts assume the Nix development environment; invoke them with
 
 ## Setup
 
+The Catena compiler dependency is pinned to the private
+`hellas-ai/exploratory-catena` repository. Configure an SSH key with access to
+that GitHub repository before fetching or building dependencies:
+
+```bash
+nix develop --command cargo fetch
+```
+
+Cargo fetches the compiler automatically; the local `smollm2-catena-fork`
+symlink used during development is not required.
+
 Download the original BF16 Hugging Face checkpoint (about 61 GB):
 
 ```bash
