@@ -89,5 +89,7 @@ The current exploratory compiler fork produces the known continuation and
 reaches 10.95 tok/s over 99 cached tokens. Three 999-cached-token runs reached
 9.90, 9.81, and 9.88 tok/s, a 9.88 tok/s median. That is 51.9% of the recorded
 matched llama.cpp 19.03 tok/s baseline. A later llama.cpp sample reached 20.74
-tok/s, so the denominator and EOS protocol caveat are documented in
-[`PERFORMANCE_V3.md`](PERFORMANCE_V3.md).
+tok/s. The retained techniques are summarized in
+[`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md); detailed measurements,
+rejected experiments, and the EOS protocol caveat are documented in
+[`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
