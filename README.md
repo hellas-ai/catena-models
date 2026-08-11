@@ -1,8 +1,10 @@
 # Qwen3-30B-A3B-Base reference runners
 
 Local BF16 inference for the base (non-instruct) `Qwen3-30B-A3B-Base`
-checkpoint through Transformers and llama.cpp. There is deliberately no Catena
-implementation yet.
+checkpoint through Transformers, llama.cpp, and an exploratory Catena/HIP
+implementation. The Catena path executes all 48 layers, uses a persistent KV
+cache, and performs greedy generation directly from the original BF16
+safetensors.
 
 The scripts assume the Nix development environment; invoke them with
 `nix develop --command` as shown below.
@@ -68,3 +70,24 @@ Transformers reported generated token IDs
 load took 125.41 seconds; the table records the repeated run used for the split
 prompt/cached timings. The llama.cpp run used full ROCm offload with
 `amdgpu.gttsize=98304`; Transformers used the flake's CPU-only PyTorch 2.11.0.
+
+### Catena
+
+```bash
+nix develop --command cargo run --release -- \
+  "The capital of France is" --max-new-tokens 20
+```
+
+For a fixed-length performance run that continues through EOS:
+
+```bash
+nix develop --command cargo run --release -- \
+  "The capital of France is" --max-new-tokens 1000 --ignore-eos
+```
+
+The current exploratory compiler fork produces the known continuation and
+reaches 10.95 tok/s over 99 cached tokens. Three 999-cached-token runs reached
+9.90, 9.81, and 9.88 tok/s, a 9.88 tok/s median. That is 51.9% of the recorded
+matched llama.cpp 19.03 tok/s baseline. A later llama.cpp sample reached 20.74
+tok/s, so the denominator and EOS protocol caveat are documented in
+[`PERFORMANCE_V3.md`](PERFORMANCE_V3.md).
