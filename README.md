@@ -101,6 +101,13 @@ memory. Measured loads reached weight readiness in 2.72--2.84 seconds.
 Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
 `--model-dir` still selects the directory containing `tokenizer.json`.
 
+RoPE is also part of the Catena program rather than a model-specific Rust
+input. Each invocation materializes only its current absolute-position range,
+using exact F32 inverse-frequency constants and deterministic range-reduced
+sine/cosine polynomials, then reuses that owned table across all 48 layers.
+The generated table differs from the previous host `sinf`/`cosf` values by at
+most `4.92e-7` across the complete 32,768-position context.
+
 Normal inference compiles the complete checked-in `src/catena/qwen3.hex` and
 does not generate its 48-layer entrypoint in Rust. If the layer/weight ABI is
 changed, explicitly regenerate that entrypoint once and review the resulting

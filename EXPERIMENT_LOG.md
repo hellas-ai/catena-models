@@ -76,6 +76,43 @@ repack/upload and duplicate allocation. This mode is specific to the tested
 HIP unified-memory APU for now; discrete hardware must benchmark registered
 host access against an ordinary device upload.
 
+## Catena-owned deterministic RoPE construction (kept)
+
+The first implementation generated each call's absolute-position RoPE rows in
+Rust with host `powf`, `cos`, and `sin`, uploaded the F32 table, and supplied it
+as a `cap.ref mem` model input. This made the executable ABI depend on
+model-specific host code and placed those bits outside Catena's numerical
+contract.
+
+The retained implementation removes that input. The Catena entrypoint derives
+the sequence length from the token buffer, materializes
+`[cos(sequence, 64), sin(sequence, 64)]`, passes the owned allocation through
+all 48 layers, and frees it after the last consumer. Decode therefore creates
+one 128-element table row; prefill creates only its current range. Previously
+rotated keys remain in the persistent KV cache as before.
+
+The 64 inverse frequencies are embedded with the exact F32 bits produced by
+the old host `1_000_000^(-2 * pair / 128)` calculation, avoiding a runtime
+`pow` approximation. Sine and cosine share a three-part Cody-Waite pi/2 range
+reduction and fixed fdlibm-derived degree-13/14 kernel polynomials. No native
+GPU transcendental or fast-math operation is used. A gated GPU test compares
+all 4,194,304 table values across the complete 32,768-position context with
+the previous host implementation. Maximum absolute error measured `4.92e-7`
+for sine and `4.17e-7` for cosine, below the `1e-6` test bound.
+
+The eight-token known continuation remained exactly
+` Paris. Which of the following options correctly`. Three 99-cached-token
+runs measured 10.42, 10.43, and 10.35 tok/s, a 10.42 tok/s median. This is
+54.8% of the matched 19.03 tok/s llama.cpp baseline. It is 4.6% below the
+earlier single 10.92 tok/s registered-GGUF sample, so eliminating the small
+per-call allocation/kernel is a possible later optimization; the current
+change prioritizes a self-contained model ABI and explicit numerics.
+
+The operation graph is deterministic within Catena's existing F32 primitive
+contract, but cross-dialect bit identity has not yet been measured. The full
+table GPU test must be run on each supported dialect before making that wider
+claim.
+
 ## Materialized MoE activation (kept)
 
 Qwen3-30B-A3B activates eight experts per token. The first implementation

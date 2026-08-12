@@ -39,7 +39,6 @@ pub fn generated_model_source() -> String {
     source.push_str("(def program qwen3 :\n  {\n");
     for ty in [
         "    (cap.ref mem)\n", // tokens
-        "    (cap.ref mem)\n", // RoPE
         "    (cap.own mem)\n", // cache
         "    (u64 val)\n",     // cache capacity
         "    (u64 val)\n",     // cache start
@@ -49,14 +48,14 @@ pub fn generated_model_source() -> String {
     for _ in 0..WEIGHT_COUNT {
         source.push_str("    (cap.ref mem)\n");
     }
-    source.push_str("  }\n  ->\n  {(cap.own mem) (cap.own mem) (cap.own mem)}\n= ([tokens rope cache token-capacity cache-start embed-weight");
+    source.push_str("  }\n  ->\n  {(cap.own mem) (cap.own mem) (cap.own mem)}\n= ([tokens cache token-capacity cache-start embed-weight");
     for layer in 0..NUM_LAYERS {
         for name in LAYER_WEIGHT_NAMES {
             write!(source, " layer-{layer:02}-{name}").unwrap();
         }
     }
     source.push_str(" final-norm lm-head.]\n");
-    source.push_str("  ([.tokens] mem.cast.u64 [sequence _token-buffer.])\n  ([.sequence] :.forget [sequence-value.])\n  ({[.tokens] [.embed-weight]} qwen3.embedding [hidden-00.])\n");
+    source.push_str("  ([.tokens] mem.cast.u64 [sequence _token-buffer.])\n  ([.sequence] :.forget [sequence-value.])\n  ({[.cache-start] [.sequence-value]} qwen3.rope-table [rope.])\n  ({[.tokens] [.embed-weight]} qwen3.embedding [hidden-00.])\n");
 
     for layer in 0..NUM_LAYERS {
         let cache_in = if layer == 0 {
@@ -98,7 +97,7 @@ pub fn generated_model_source() -> String {
         "  ({{[.hidden-{NUM_LAYERS:02}] [.logits-after-inverse]}} qwen3.free-f32-before [final-logits.])"
     )
     .unwrap();
-    source.push_str("  ([.final-logits] mem.cast.f32 [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  } materializec.borrow-argmax-f32 [logits-after-argmax next-token-buffer.]\n  {\n");
+    source.push_str("  ({[.rope] [.final-logits]} qwen3.free-f32-before [final-logits-after-rope.])\n  ([.final-logits-after-rope] mem.cast.f32 [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  } materializec.borrow-argmax-f32 [logits-after-argmax next-token-buffer.]\n  {\n");
     writeln!(source, "    [.cache-{NUM_LAYERS:02}]").unwrap();
     source.push_str("    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)\n    ({[.one] [.next-token-buffer]} buf.to-mem)\n  }\n))\n");
     source
@@ -108,7 +107,11 @@ pub fn generated_model_source() -> String {
 mod tests {
     use super::*;
     use anyhow::Result;
-    use catena_lang::{codegen::GpuDialect, runtime::Runtime, stdlib};
+    use catena_lang::{
+        codegen::GpuDialect,
+        runtime::{Runtime, Value},
+        stdlib,
+    };
 
     #[test]
     fn entrypoint_has_all_layers_and_inputs() {
@@ -118,7 +121,7 @@ mod tests {
             .expect("entrypoint marker");
         assert_eq!(
             entrypoint.matches("(cap.ref mem)").count(),
-            2 + WEIGHT_COUNT
+            1 + WEIGHT_COUNT
         );
         assert_eq!(
             entrypoint.matches("qwen3.cached-decoder-layer").count(),
@@ -141,7 +144,36 @@ mod tests {
         if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
             return Ok(());
         }
-        Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)?;
+        let runtime =
+            Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)?;
+        let sequence = crate::spec::MAX_POSITION_EMBEDDINGS;
+        let [output] =
+            runtime.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;
+        let Value::MemOwn(output) = output else {
+            anyhow::bail!("qwen3.rope-table returned non-owned memory: {output:?}");
+        };
+        let actual = output.try_to_f32_vec()?;
+        let half_dim = crate::spec::ROPE_HALF_DIM;
+        let plane_len = sequence * half_dim;
+        assert_eq!(actual.len(), 2 * plane_len);
+        let mut max_sine_error = 0.0_f32;
+        let mut max_cosine_error = 0.0_f32;
+        for position in 0..sequence {
+            for pair in 0..half_dim {
+                let exponent = (2 * pair) as f32 / crate::spec::HEAD_DIM as f32;
+                let frequency = crate::spec::ROPE_THETA.powf(-exponent);
+                let angle = position as f32 * frequency;
+                let index = position * half_dim + pair;
+                max_cosine_error = max_cosine_error.max((actual[index] - angle.cos()).abs());
+                max_sine_error =
+                    max_sine_error.max((actual[plane_len + index] - angle.sin()).abs());
+            }
+        }
+        eprintln!(
+            "full-context Catena RoPE maximum absolute error: sin={max_sine_error:e}, cos={max_cosine_error:e}"
+        );
+        assert!(max_sine_error <= 1.0e-6, "sine error is too large");
+        assert!(max_cosine_error <= 1.0e-6, "cosine error is too large");
         Ok(())
     }
 }

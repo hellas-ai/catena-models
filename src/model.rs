@@ -10,7 +10,6 @@ use catena_lang::{
 use crate::{
     catena::MODEL_SOURCE,
     checkpoint::{Checkpoint, GgufDtype, TensorView, exact_f32_bytes_to_bf16},
-    rope,
     spec::{
         KV_CACHE_ELEMENTS_PER_TOKEN, MAX_POSITION_EMBEDDINGS, MODEL_INPUT_COUNT, VOCAB_SIZE,
         WEIGHT_COUNT, weight_specs,
@@ -142,12 +141,9 @@ impl Model {
         );
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
-        let rope_values = rope::table_range(start, tokens.len());
-        let rope_buffer = self.runtime.mem_f32(&rope_values)?;
         let mut inputs = Vec::with_capacity(MODEL_INPUT_COUNT);
         inputs.extend([
             token_buffer.as_ref().into(),
-            rope_buffer.as_ref().into(),
             cache.into(),
             (capacity as u64).into(),
             (start as u64).into(),

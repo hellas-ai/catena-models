@@ -782,13 +782,403 @@
   ({[.output-count] [.output]} buf.to-mem)
 ))
 
+# Exact F32 values of 1_000_000^(-2 * pair / 128), matching the
+# checkpoint's host reference calculation. The power is model-constant, so
+# preserving its rounded bits is both faster and more accurate than evaluating
+# an approximate pow for every table row.
+(def program qwen3.rope-frequency : (u64 val) -> (f32 val) =
+  ([pair.]
+    (const.u32.0x3F800000 u32.bitcast-f32 [frequency-00.])
+    (const.u32.0x3F4E4BAC u32.bitcast-f32 [frequency-01.])
+    (const.u32.0x3F263DE0 u32.bitcast-f32 [frequency-02.])
+    (const.u32.0x3F05F6EE u32.bitcast-f32 [frequency-03.])
+    (const.u32.0x3ED7E89B u32.bitcast-f32 [frequency-04.])
+    (const.u32.0x3EADFCFF u32.bitcast-f32 [frequency-05.])
+    (const.u32.0x3E8C3504 u32.bitcast-f32 [frequency-06.])
+    (const.u32.0x3E61F836 u32.bitcast-f32 [frequency-07.])
+    (const.u32.0x3E361887 u32.bitcast-f32 [frequency-08.])
+    (const.u32.0x3E12BD91 u32.bitcast-f32 [frequency-09.])
+    (const.u32.0x3DEC7FD5 u32.bitcast-f32 [frequency-10.])
+    (const.u32.0x3DBE94C7 u32.bitcast-f32 [frequency-11.])
+    (const.u32.0x3D99940E u32.bitcast-f32 [frequency-12.])
+    (const.u32.0x3D778512 u32.bitcast-f32 [frequency-13.])
+    (const.u32.0x3D47763F u32.bitcast-f32 [frequency-14.])
+    (const.u32.0x3D20BC1D u32.bitcast-f32 [frequency-15.])
+    (const.u32.0x3D0186E2 u32.bitcast-f32 [frequency-16.])
+    (const.u32.0x3CD0C1A8 u32.bitcast-f32 [frequency-17.])
+    (const.u32.0x3CA8398B u32.bitcast-f32 [frequency-18.])
+    (const.u32.0x3C879008 u32.bitcast-f32 [frequency-19.])
+    (const.u32.0x3C5A7BF1 u32.bitcast-f32 [frequency-20.])
+    (const.u32.0x3C301052 u32.bitcast-f32 [frequency-21.])
+    (const.u32.0x3C0DE12D u32.bitcast-f32 [frequency-22.])
+    (const.u32.0x3BE4AA46 u32.bitcast-f32 [frequency-23.])
+    (const.u32.0x3BB8449C u32.bitcast-f32 [frequency-24.])
+    (const.u32.0x3B947DAE u32.bitcast-f32 [frequency-25.])
+    (const.u32.0x3B6F520D u32.bitcast-f32 [frequency-26.])
+    (const.u32.0x3B40DAC5 u32.bitcast-f32 [frequency-27.])
+    (const.u32.0x3B1B690D u32.bitcast-f32 [frequency-28.])
+    (const.u32.0x3AFA78F1 u32.bitcast-f32 [frequency-29.])
+    (const.u32.0x3AC9D75C u32.bitcast-f32 [frequency-30.])
+    (const.u32.0x3AA2A6F6 u32.bitcast-f32 [frequency-31.])
+    (const.u32.0x3A83126F u32.bitcast-f32 [frequency-32.])
+    (const.u32.0x3A533F27 u32.bitcast-f32 [frequency-33.])
+    (const.u32.0x3A2A3B43 u32.bitcast-f32 [frequency-34.])
+    (const.u32.0x3A092E02 u32.bitcast-f32 [frequency-35.])
+    (const.u32.0x39DD1726 u32.bitcast-f32 [frequency-36.])
+    (const.u32.0x39B229FB u32.bitcast-f32 [frequency-37.])
+    (const.u32.0x398F9272 u32.bitcast-f32 [frequency-38.])
+    (const.u32.0x39676491 u32.bitcast-f32 [frequency-39.])
+    (const.u32.0x393A7753 u32.bitcast-f32 [frequency-40.])
+    (const.u32.0x39164323 u32.bitcast-f32 [frequency-41.])
+    (const.u32.0x38F22CE3 u32.bitcast-f32 [frequency-42.])
+    (const.u32.0x38C327B5 u32.bitcast-f32 [frequency-43.])
+    (const.u32.0x389D43A4 u32.bitcast-f32 [frequency-44.])
+    (const.u32.0x387D75D5 u32.bitcast-f32 [frequency-45.])
+    (const.u32.0x384C3FBD u32.bitcast-f32 [frequency-46.])
+    (const.u32.0x382497AB u32.bitcast-f32 [frequency-47.])
+    (const.u32.0x3804A2B3 u32.bitcast-f32 [frequency-48.])
+    (const.u32.0x37D5C442 u32.bitcast-f32 [frequency-49.])
+    (const.u32.0x37AC431D u32.bitcast-f32 [frequency-50.])
+    (const.u32.0x378AD0ED u32.bitcast-f32 [frequency-51.])
+    (const.u32.0x375FBA4F u32.bitcast-f32 [frequency-52.])
+    (const.u32.0x37344A0E u32.bitcast-f32 [frequency-53.])
+    (const.u32.0x371148E2 u32.bitcast-f32 [frequency-54.])
+    (const.u32.0x36EA2731 u32.bitcast-f32 [frequency-55.])
+    (const.u32.0x36BCB0C1 u32.bitcast-f32 [frequency-56.])
+    (const.u32.0x36980E02 u32.bitcast-f32 [frequency-57.])
+    (const.u32.0x36751070 u32.bitcast-f32 [frequency-58.])
+    (const.u32.0x36457BAB u32.bitcast-f32 [frequency-59.])
+    (const.u32.0x361F23E4 u32.bitcast-f32 [frequency-60.])
+    (const.u32.0x36003DEC u32.bitcast-f32 [frequency-61.])
+    (const.u32.0x35CEAF79 u32.bitcast-f32 [frequency-62.])
+    (const.u32.0x35A68E4C u32.bitcast-f32 [frequency-63.])
+    (const.u64.0x0000000000000000 [pair-00.])
+    ([.pair pair-00] u64.ne bool.not [is-pair-00.])
+    (const.u64.0x0000000000000001 [pair-01.])
+    ([.pair pair-01] u64.ne bool.not [is-pair-01.])
+    (const.u64.0x0000000000000002 [pair-02.])
+    ([.pair pair-02] u64.ne bool.not [is-pair-02.])
+    (const.u64.0x0000000000000003 [pair-03.])
+    ([.pair pair-03] u64.ne bool.not [is-pair-03.])
+    (const.u64.0x0000000000000004 [pair-04.])
+    ([.pair pair-04] u64.ne bool.not [is-pair-04.])
+    (const.u64.0x0000000000000005 [pair-05.])
+    ([.pair pair-05] u64.ne bool.not [is-pair-05.])
+    (const.u64.0x0000000000000006 [pair-06.])
+    ([.pair pair-06] u64.ne bool.not [is-pair-06.])
+    (const.u64.0x0000000000000007 [pair-07.])
+    ([.pair pair-07] u64.ne bool.not [is-pair-07.])
+    (const.u64.0x0000000000000008 [pair-08.])
+    ([.pair pair-08] u64.ne bool.not [is-pair-08.])
+    (const.u64.0x0000000000000009 [pair-09.])
+    ([.pair pair-09] u64.ne bool.not [is-pair-09.])
+    (const.u64.0x000000000000000A [pair-10.])
+    ([.pair pair-10] u64.ne bool.not [is-pair-10.])
+    (const.u64.0x000000000000000B [pair-11.])
+    ([.pair pair-11] u64.ne bool.not [is-pair-11.])
+    (const.u64.0x000000000000000C [pair-12.])
+    ([.pair pair-12] u64.ne bool.not [is-pair-12.])
+    (const.u64.0x000000000000000D [pair-13.])
+    ([.pair pair-13] u64.ne bool.not [is-pair-13.])
+    (const.u64.0x000000000000000E [pair-14.])
+    ([.pair pair-14] u64.ne bool.not [is-pair-14.])
+    (const.u64.0x000000000000000F [pair-15.])
+    ([.pair pair-15] u64.ne bool.not [is-pair-15.])
+    (const.u64.0x0000000000000010 [pair-16.])
+    ([.pair pair-16] u64.ne bool.not [is-pair-16.])
+    (const.u64.0x0000000000000011 [pair-17.])
+    ([.pair pair-17] u64.ne bool.not [is-pair-17.])
+    (const.u64.0x0000000000000012 [pair-18.])
+    ([.pair pair-18] u64.ne bool.not [is-pair-18.])
+    (const.u64.0x0000000000000013 [pair-19.])
+    ([.pair pair-19] u64.ne bool.not [is-pair-19.])
+    (const.u64.0x0000000000000014 [pair-20.])
+    ([.pair pair-20] u64.ne bool.not [is-pair-20.])
+    (const.u64.0x0000000000000015 [pair-21.])
+    ([.pair pair-21] u64.ne bool.not [is-pair-21.])
+    (const.u64.0x0000000000000016 [pair-22.])
+    ([.pair pair-22] u64.ne bool.not [is-pair-22.])
+    (const.u64.0x0000000000000017 [pair-23.])
+    ([.pair pair-23] u64.ne bool.not [is-pair-23.])
+    (const.u64.0x0000000000000018 [pair-24.])
+    ([.pair pair-24] u64.ne bool.not [is-pair-24.])
+    (const.u64.0x0000000000000019 [pair-25.])
+    ([.pair pair-25] u64.ne bool.not [is-pair-25.])
+    (const.u64.0x000000000000001A [pair-26.])
+    ([.pair pair-26] u64.ne bool.not [is-pair-26.])
+    (const.u64.0x000000000000001B [pair-27.])
+    ([.pair pair-27] u64.ne bool.not [is-pair-27.])
+    (const.u64.0x000000000000001C [pair-28.])
+    ([.pair pair-28] u64.ne bool.not [is-pair-28.])
+    (const.u64.0x000000000000001D [pair-29.])
+    ([.pair pair-29] u64.ne bool.not [is-pair-29.])
+    (const.u64.0x000000000000001E [pair-30.])
+    ([.pair pair-30] u64.ne bool.not [is-pair-30.])
+    (const.u64.0x000000000000001F [pair-31.])
+    ([.pair pair-31] u64.ne bool.not [is-pair-31.])
+    (const.u64.0x0000000000000020 [pair-32.])
+    ([.pair pair-32] u64.ne bool.not [is-pair-32.])
+    (const.u64.0x0000000000000021 [pair-33.])
+    ([.pair pair-33] u64.ne bool.not [is-pair-33.])
+    (const.u64.0x0000000000000022 [pair-34.])
+    ([.pair pair-34] u64.ne bool.not [is-pair-34.])
+    (const.u64.0x0000000000000023 [pair-35.])
+    ([.pair pair-35] u64.ne bool.not [is-pair-35.])
+    (const.u64.0x0000000000000024 [pair-36.])
+    ([.pair pair-36] u64.ne bool.not [is-pair-36.])
+    (const.u64.0x0000000000000025 [pair-37.])
+    ([.pair pair-37] u64.ne bool.not [is-pair-37.])
+    (const.u64.0x0000000000000026 [pair-38.])
+    ([.pair pair-38] u64.ne bool.not [is-pair-38.])
+    (const.u64.0x0000000000000027 [pair-39.])
+    ([.pair pair-39] u64.ne bool.not [is-pair-39.])
+    (const.u64.0x0000000000000028 [pair-40.])
+    ([.pair pair-40] u64.ne bool.not [is-pair-40.])
+    (const.u64.0x0000000000000029 [pair-41.])
+    ([.pair pair-41] u64.ne bool.not [is-pair-41.])
+    (const.u64.0x000000000000002A [pair-42.])
+    ([.pair pair-42] u64.ne bool.not [is-pair-42.])
+    (const.u64.0x000000000000002B [pair-43.])
+    ([.pair pair-43] u64.ne bool.not [is-pair-43.])
+    (const.u64.0x000000000000002C [pair-44.])
+    ([.pair pair-44] u64.ne bool.not [is-pair-44.])
+    (const.u64.0x000000000000002D [pair-45.])
+    ([.pair pair-45] u64.ne bool.not [is-pair-45.])
+    (const.u64.0x000000000000002E [pair-46.])
+    ([.pair pair-46] u64.ne bool.not [is-pair-46.])
+    (const.u64.0x000000000000002F [pair-47.])
+    ([.pair pair-47] u64.ne bool.not [is-pair-47.])
+    (const.u64.0x0000000000000030 [pair-48.])
+    ([.pair pair-48] u64.ne bool.not [is-pair-48.])
+    (const.u64.0x0000000000000031 [pair-49.])
+    ([.pair pair-49] u64.ne bool.not [is-pair-49.])
+    (const.u64.0x0000000000000032 [pair-50.])
+    ([.pair pair-50] u64.ne bool.not [is-pair-50.])
+    (const.u64.0x0000000000000033 [pair-51.])
+    ([.pair pair-51] u64.ne bool.not [is-pair-51.])
+    (const.u64.0x0000000000000034 [pair-52.])
+    ([.pair pair-52] u64.ne bool.not [is-pair-52.])
+    (const.u64.0x0000000000000035 [pair-53.])
+    ([.pair pair-53] u64.ne bool.not [is-pair-53.])
+    (const.u64.0x0000000000000036 [pair-54.])
+    ([.pair pair-54] u64.ne bool.not [is-pair-54.])
+    (const.u64.0x0000000000000037 [pair-55.])
+    ([.pair pair-55] u64.ne bool.not [is-pair-55.])
+    (const.u64.0x0000000000000038 [pair-56.])
+    ([.pair pair-56] u64.ne bool.not [is-pair-56.])
+    (const.u64.0x0000000000000039 [pair-57.])
+    ([.pair pair-57] u64.ne bool.not [is-pair-57.])
+    (const.u64.0x000000000000003A [pair-58.])
+    ([.pair pair-58] u64.ne bool.not [is-pair-58.])
+    (const.u64.0x000000000000003B [pair-59.])
+    ([.pair pair-59] u64.ne bool.not [is-pair-59.])
+    (const.u64.0x000000000000003C [pair-60.])
+    ([.pair pair-60] u64.ne bool.not [is-pair-60.])
+    (const.u64.0x000000000000003D [pair-61.])
+    ([.pair pair-61] u64.ne bool.not [is-pair-61.])
+    (const.u64.0x000000000000003E [pair-62.])
+    ([.pair pair-62] u64.ne bool.not [is-pair-62.])
+    ([.is-pair-62 frequency-62 frequency-63] f32.select [selected-62.])
+    ([.is-pair-61 frequency-61 selected-62] f32.select [selected-61.])
+    ([.is-pair-60 frequency-60 selected-61] f32.select [selected-60.])
+    ([.is-pair-59 frequency-59 selected-60] f32.select [selected-59.])
+    ([.is-pair-58 frequency-58 selected-59] f32.select [selected-58.])
+    ([.is-pair-57 frequency-57 selected-58] f32.select [selected-57.])
+    ([.is-pair-56 frequency-56 selected-57] f32.select [selected-56.])
+    ([.is-pair-55 frequency-55 selected-56] f32.select [selected-55.])
+    ([.is-pair-54 frequency-54 selected-55] f32.select [selected-54.])
+    ([.is-pair-53 frequency-53 selected-54] f32.select [selected-53.])
+    ([.is-pair-52 frequency-52 selected-53] f32.select [selected-52.])
+    ([.is-pair-51 frequency-51 selected-52] f32.select [selected-51.])
+    ([.is-pair-50 frequency-50 selected-51] f32.select [selected-50.])
+    ([.is-pair-49 frequency-49 selected-50] f32.select [selected-49.])
+    ([.is-pair-48 frequency-48 selected-49] f32.select [selected-48.])
+    ([.is-pair-47 frequency-47 selected-48] f32.select [selected-47.])
+    ([.is-pair-46 frequency-46 selected-47] f32.select [selected-46.])
+    ([.is-pair-45 frequency-45 selected-46] f32.select [selected-45.])
+    ([.is-pair-44 frequency-44 selected-45] f32.select [selected-44.])
+    ([.is-pair-43 frequency-43 selected-44] f32.select [selected-43.])
+    ([.is-pair-42 frequency-42 selected-43] f32.select [selected-42.])
+    ([.is-pair-41 frequency-41 selected-42] f32.select [selected-41.])
+    ([.is-pair-40 frequency-40 selected-41] f32.select [selected-40.])
+    ([.is-pair-39 frequency-39 selected-40] f32.select [selected-39.])
+    ([.is-pair-38 frequency-38 selected-39] f32.select [selected-38.])
+    ([.is-pair-37 frequency-37 selected-38] f32.select [selected-37.])
+    ([.is-pair-36 frequency-36 selected-37] f32.select [selected-36.])
+    ([.is-pair-35 frequency-35 selected-36] f32.select [selected-35.])
+    ([.is-pair-34 frequency-34 selected-35] f32.select [selected-34.])
+    ([.is-pair-33 frequency-33 selected-34] f32.select [selected-33.])
+    ([.is-pair-32 frequency-32 selected-33] f32.select [selected-32.])
+    ([.is-pair-31 frequency-31 selected-32] f32.select [selected-31.])
+    ([.is-pair-30 frequency-30 selected-31] f32.select [selected-30.])
+    ([.is-pair-29 frequency-29 selected-30] f32.select [selected-29.])
+    ([.is-pair-28 frequency-28 selected-29] f32.select [selected-28.])
+    ([.is-pair-27 frequency-27 selected-28] f32.select [selected-27.])
+    ([.is-pair-26 frequency-26 selected-27] f32.select [selected-26.])
+    ([.is-pair-25 frequency-25 selected-26] f32.select [selected-25.])
+    ([.is-pair-24 frequency-24 selected-25] f32.select [selected-24.])
+    ([.is-pair-23 frequency-23 selected-24] f32.select [selected-23.])
+    ([.is-pair-22 frequency-22 selected-23] f32.select [selected-22.])
+    ([.is-pair-21 frequency-21 selected-22] f32.select [selected-21.])
+    ([.is-pair-20 frequency-20 selected-21] f32.select [selected-20.])
+    ([.is-pair-19 frequency-19 selected-20] f32.select [selected-19.])
+    ([.is-pair-18 frequency-18 selected-19] f32.select [selected-18.])
+    ([.is-pair-17 frequency-17 selected-18] f32.select [selected-17.])
+    ([.is-pair-16 frequency-16 selected-17] f32.select [selected-16.])
+    ([.is-pair-15 frequency-15 selected-16] f32.select [selected-15.])
+    ([.is-pair-14 frequency-14 selected-15] f32.select [selected-14.])
+    ([.is-pair-13 frequency-13 selected-14] f32.select [selected-13.])
+    ([.is-pair-12 frequency-12 selected-13] f32.select [selected-12.])
+    ([.is-pair-11 frequency-11 selected-12] f32.select [selected-11.])
+    ([.is-pair-10 frequency-10 selected-11] f32.select [selected-10.])
+    ([.is-pair-09 frequency-09 selected-10] f32.select [selected-09.])
+    ([.is-pair-08 frequency-08 selected-09] f32.select [selected-08.])
+    ([.is-pair-07 frequency-07 selected-08] f32.select [selected-07.])
+    ([.is-pair-06 frequency-06 selected-07] f32.select [selected-06.])
+    ([.is-pair-05 frequency-05 selected-06] f32.select [selected-05.])
+    ([.is-pair-04 frequency-04 selected-05] f32.select [selected-04.])
+    ([.is-pair-03 frequency-03 selected-04] f32.select [selected-03.])
+    ([.is-pair-02 frequency-02 selected-03] f32.select [selected-02.])
+    ([.is-pair-01 frequency-01 selected-02] f32.select [selected-01.])
+    ([.is-pair-00 frequency-00 selected-01] f32.select [selected-00.])
+    [.selected-00]
+  )
+)
+
+# Deterministic sine/cosine for non-negative RoPE angles through the model's
+# 32K context. A three-part pi/2 split keeps range-reduction products exact
+# enough in F32; fdlibm-derived degree-13/14 kernel polynomials operate on the
+# resulting interval of approximately [-pi/4, pi/4]. Every arithmetic step is
+# explicit so GPU dialects retain the same specified operation graph.
+(def program qwen3.rope-sincos : (f32 val) -> {(f32 val) (f32 val)} =
+  ([angle.]
+    (const.u32.0x3F22F983 u32.bitcast-f32 [inverse-pi-over-two.])
+    (const.u32.0x3FC90000 u32.bitcast-f32 [pi-over-two-1.])
+    (const.u32.0x39FDA000 u32.bitcast-f32 [pi-over-two-2.])
+    (const.u32.0x33A22169 u32.bitcast-f32 [pi-over-two-3.])
+    ([.angle inverse-pi-over-two] f32.mul [scaled-quadrant.])
+    ([.scaled-quadrant] f32.round-to-u32 [quadrant-count.])
+    ([.quadrant-count] u32.to-f32 [quadrant-count-f32.])
+    ([.quadrant-count-f32 pi-over-two-1] f32.mul [range-term-1.])
+    ([.angle range-term-1] f32.sub [reduced-1.])
+    ([.quadrant-count-f32 pi-over-two-2] f32.mul [range-term-2.])
+    ([.reduced-1 range-term-2] f32.sub [reduced-2.])
+    ([.quadrant-count-f32 pi-over-two-3] f32.mul [range-term-3.])
+    ([.reduced-2 range-term-3] f32.sub [reduced.])
+    ([.reduced reduced] f32.mul [squared.])
+
+    (const.u32.0xBE2AAAAB u32.bitcast-f32 [sin-c1.])
+    (const.u32.0x3C088889 u32.bitcast-f32 [sin-c2.])
+    (const.u32.0xB9500D01 u32.bitcast-f32 [sin-c3.])
+    (const.u32.0x3638EF1B u32.bitcast-f32 [sin-c4.])
+    (const.u32.0xB2D72F34 u32.bitcast-f32 [sin-c5.])
+    (const.u32.0x2F2EC9D3 u32.bitcast-f32 [sin-c6.])
+    ([.squared sin-c6] f32.mul [sin-p5-term.])
+    ([.sin-c5 sin-p5-term] f32.add [sin-p5.])
+    ([.squared sin-p5] f32.mul [sin-p4-term.])
+    ([.sin-c4 sin-p4-term] f32.add [sin-p4.])
+    ([.squared sin-p4] f32.mul [sin-p3-term.])
+    ([.sin-c3 sin-p3-term] f32.add [sin-p3.])
+    ([.squared sin-p3] f32.mul [sin-p2-term.])
+    ([.sin-c2 sin-p2-term] f32.add [sin-p2.])
+    ([.squared sin-p2] f32.mul [sin-p1-term.])
+    ([.sin-c1 sin-p1-term] f32.add [sin-p1.])
+    ([.reduced squared] f32.mul [reduced-cubed.])
+    ([.reduced-cubed sin-p1] f32.mul [sin-tail.])
+    ([.reduced sin-tail] f32.add [sine-reduced.])
+
+    (const.u32.0x3D2AAAAB u32.bitcast-f32 [cos-c1.])
+    (const.u32.0xBAB60B61 u32.bitcast-f32 [cos-c2.])
+    (const.u32.0x37D00D01 u32.bitcast-f32 [cos-c3.])
+    (const.u32.0xB493F27C u32.bitcast-f32 [cos-c4.])
+    (const.u32.0x310F74F6 u32.bitcast-f32 [cos-c5.])
+    (const.u32.0xAD47D74E u32.bitcast-f32 [cos-c6.])
+    ([.squared cos-c6] f32.mul [cos-p5-term.])
+    ([.cos-c5 cos-p5-term] f32.add [cos-p5.])
+    ([.squared cos-p5] f32.mul [cos-p4-term.])
+    ([.cos-c4 cos-p4-term] f32.add [cos-p4.])
+    ([.squared cos-p4] f32.mul [cos-p3-term.])
+    ([.cos-c3 cos-p3-term] f32.add [cos-p3.])
+    ([.squared cos-p3] f32.mul [cos-p2-term.])
+    ([.cos-c2 cos-p2-term] f32.add [cos-p2.])
+    ([.squared cos-p2] f32.mul [cos-p1-term.])
+    ([.cos-c1 cos-p1-term] f32.add [cos-p1.])
+    ([.squared squared] f32.mul [fourth-power.])
+    ([.fourth-power cos-p1] f32.mul [cos-tail.])
+    (const.u32.0x3F000000 u32.bitcast-f32 [half.])
+    ([.squared half] f32.mul [half-squared.])
+    (f32.one [one.])
+    ([.one half-squared] f32.sub [cos-head.])
+    ([.cos-head cos-tail] f32.add [cosine-reduced.])
+
+    ([.sine-reduced] f32.neg [negative-sine.])
+    ([.cosine-reduced] f32.neg [negative-cosine.])
+    (const.u32.0x00000003 [quadrant-mask.])
+    (const.u32.0x00000000 [quadrant-0.])
+    (const.u32.0x00000001 [quadrant-1.])
+    (const.u32.0x00000002 [quadrant-2.])
+    ([.quadrant-count quadrant-mask] u32.and [quadrant.])
+    ([.quadrant quadrant-0] u32.eq [is-quadrant-0.])
+    ([.quadrant quadrant-1] u32.eq [is-quadrant-1.])
+    ([.quadrant quadrant-2] u32.eq [is-quadrant-2.])
+    ([.is-quadrant-2 negative-sine negative-cosine] f32.select [sine-q23.])
+    ([.is-quadrant-1 cosine-reduced sine-q23] f32.select [sine-q123.])
+    ([.is-quadrant-0 sine-reduced sine-q123] f32.select [sine.])
+    ([.is-quadrant-2 negative-cosine sine-reduced] f32.select [cosine-q23.])
+    ([.is-quadrant-1 negative-sine cosine-q23] f32.select [cosine-q123.])
+    ([.is-quadrant-0 cosine-reduced cosine-q123] f32.select [cosine.])
+    {[.sine] [.cosine]}
+  )
+)
+
+# Materialize [cos(sequence, 64), sin(sequence, 64)] inside Catena from the
+# absolute start position. This buffer is constructed once per model call and
+# shared by all decoder layers.
+(def program qwen3.rope-table-at :
+  ([n.] {({(u64 val) (u64 val)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [start sequence.])
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x0000000000000040 [half-head-dim.])
+  ([.sequence half-head-dim] u64.mul [plane-size.])
+  ([.flat-index plane-size] u64.gte [is-sine-plane.])
+  ([.flat-index plane-size] u64.rem [plane-index.])
+  ([.plane-index half-head-dim] u64.div [local-position.])
+  ([.plane-index half-head-dim] u64.rem [pair.])
+  ([.start local-position] u64.add [absolute-position.])
+  ([.absolute-position] u64.to-f32 [position-f32.])
+  ([.pair] qwen3.rope-frequency [frequency.])
+  ([.position-f32 frequency] f32.mul [angle.])
+  ([.angle] qwen3.rope-sincos [sine cosine.])
+  ([.is-sine-plane sine cosine] f32.select [result.])
+  [.result]
+))
+
+(def program qwen3.rope-table :
+  {(u64 val) (u64 val)}
+  ->
+  (cap.own mem)
+= ([start sequence.]
+  (const.u64.0x0000000000000080 [values-per-position.])
+  ([.sequence values-per-position] u64.mul [table-count-value.])
+  ([.table-count-value] u64.name [table-count.])
+  ({[.start] [.sequence]} *.intro [env.])
+  {
+    [.table-count]
+    ({[.table-count] [.env] (([.table-count] :.param) name.qwen3.rope-table-at)}
+      materializec)
+  } buf.to-mem
+))
+
 # Read one non-interleaved RoPE-rotated channel from a projected tensor.
-# Projection layout is [sequence, head-count, 64]; the RoPE buffer contains
-# [cos(sequence, 32), sin(sequence, 32)].
+# Projection layout is [sequence, head-count, 128]; the RoPE buffer contains
+# [cos(sequence, 64), sin(sequence, 64)].
 (def program qwen3.rope-value :
   {
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (u64 val)
     (u64 val)
@@ -839,7 +1229,7 @@
     ({
       ({
         ({(cap.own mem) (cap.own mem)} *)
-        (cap.ref mem)
+        (cap.own mem)
       } *)
       ({
         ({(u64 val) (u64 val)} *)
@@ -876,7 +1266,7 @@
     ({
       ({
         ({(cap.own mem) (cap.own mem)} *)
-        (cap.ref mem)
+        (cap.own mem)
       } *)
       (u64 val)
     } *)
@@ -917,7 +1307,7 @@
 
 # Materialize causal rotary-GQA scores in [9, sequence, sequence] layout.
 (def program qwen3.attention-scores :
-  {(cap.own mem) (cap.own mem) (cap.ref mem) (u64 val)}
+  {(cap.own mem) (cap.own mem) (cap.own mem) (u64 val)}
   ->
   (cap.own mem)
 = ([query key rope sequence.]
@@ -1260,7 +1650,7 @@
     (cap.own mem)
     (cap.own mem)
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
   }
   ->
@@ -1600,7 +1990,7 @@
 (def program qwen3.cache-key-at :
   ([n.] {
     ({
-      ({(cap.own mem) (cap.ref mem)} *)
+      ({(cap.own mem) (cap.own mem)} *)
       (u64 val)
     } *)
     ([.n] ix val)
@@ -1638,12 +2028,12 @@
 ))
 
 # Append RoPE-applied keys to one layer's K region. Cache layout is
-# [layer, K-or-V, token, 192], with a session-specific token capacity.
+# [layer, K-or-V, token, 512], with a session-specific token capacity.
 (def program qwen3.cache-append-key :
   {
     (cap.own mem)
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (u64 val)
     (u64 val)
@@ -1717,7 +2107,7 @@
   ([cache-count n.] {
     ({
       ({({({[.cache-count] u64} :) ({cap.ref [.cache-count] f32} buf val)} *)
-        ({(cap.own mem) (cap.ref mem)} *)} *)
+        ({(cap.own mem) (cap.own mem)} *)} *)
       ({
         ({(u64 val) (u64 val)} *)
         ({({(u64 val) (u64 val)} *) ({({(u64 val) (u64 val)} *) (u64 val)} *)} *)
@@ -1767,7 +2157,7 @@
     ({
       ({
         ({({[.cache-count] u64} :) ({cap.ref [.cache-count] f32} buf val)} *)
-        ({(cap.own mem) (cap.ref mem)} *)
+        ({(cap.own mem) (cap.own mem)} *)
       } *)
       ({
         ({(u64 val) (u64 val)} *)
@@ -1789,7 +2179,7 @@
       ({
         ({
           ({({[.cache-count] u64} :) ({cap.ref [.cache-count] f32} buf val)} *)
-          ({(cap.own mem) (cap.ref mem)} *)
+          ({(cap.own mem) (cap.own mem)} *)
         } *)
         ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
       } *)
@@ -1822,7 +2212,7 @@
         ({
           ({
             ({({[.cache-count] u64} :) ({cap.ref [.cache-count] f32} buf val)} *)
-            ({(cap.own mem) (cap.ref mem)} *)
+            ({(cap.own mem) (cap.own mem)} *)
           } *)
           ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
         } *)
@@ -1852,7 +2242,7 @@
           ({
             ({
               ({({[.cache-count] u64} :) ({cap.ref [.cache-count] f32} buf val)} *)
-              ({(cap.own mem) (cap.ref mem)} *)
+              ({(cap.own mem) (cap.own mem)} *)
             } *)
             ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
           } *)
@@ -1875,7 +2265,7 @@
   ([.cache-input] *.elim [cache-count-value cache-buffer.])
   ([.scalar-inputs] *.elim [sequence-and-capacity start-and-layer.])
   ([.sequence-and-capacity] *.elim [_sequence token-capacity.])
-  ([.start-and-layer] *.elim [_start layer.])
+  ([.start-and-layer] *.elim [start layer.])
   ([.query-and-head] *.elim [_query-position query-head.])
   ([.max-and-denominator] *.elim [row-max denominator.])
   ({[.score-inputs] [.key-index]}
@@ -1910,7 +2300,7 @@
 (def program qwen3.cached2-score-term-at :
   ([n.] {
     ({
-      ({(cap.ref mem) ({(cap.own mem) (cap.ref mem)} *)} *)
+      ({(cap.ref mem) ({(cap.own mem) (cap.own mem)} *)} *)
       ({
         ({(u64 val) (u64 val)} *)
         ({({(u64 val) (u64 val)} *) ({({(u64 val) (u64 val)} *) (u64 val)} *)} *)
@@ -1927,7 +2317,7 @@
   ([.coordinates] *.elim [sequence-and-capacity position-inputs.])
   ([.sequence-and-capacity] *.elim [sequence token-capacity.])
   ([.position-inputs] *.elim [start-and-layer query-key-and-head.])
-  ([.start-and-layer] *.elim [_start layer.])
+  ([.start-and-layer] *.elim [start layer.])
   ([.query-key-and-head] *.elim [query-and-key query-head.])
   ([.query-and-key] *.elim [query-position key-position.])
   ([.channel-index] ix.to-u64 [channel.])
@@ -1956,7 +2346,7 @@
 
 (def program qwen3.cached2-score-at :
   ({
-    ({(cap.ref mem) ({(cap.own mem) (cap.ref mem)} *)} *)
+    ({(cap.ref mem) ({(cap.own mem) (cap.own mem)} *)} *)
     ({
       ({(u64 val) (u64 val)} *)
       ({({(u64 val) (u64 val)} *) ({({(u64 val) (u64 val)} *) (u64 val)} *)} *)
@@ -1983,7 +2373,7 @@
   ([n.] {
     ({
       ({
-        ({(cap.ref mem) ({(cap.own mem) (cap.ref mem)} *)} *)
+        ({(cap.ref mem) ({(cap.own mem) (cap.own mem)} *)} *)
         ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
       } *)
       ({(u64 val) (u64 val)} *)
@@ -2012,7 +2402,7 @@
     ({
       ({
         ({
-          ({(cap.ref mem) ({(cap.own mem) (cap.ref mem)} *)} *)
+          ({(cap.ref mem) ({(cap.own mem) (cap.own mem)} *)} *)
           ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
         } *)
         ({(u64 val) (u64 val)} *)
@@ -2038,7 +2428,7 @@
       ({
         ({
           ({
-            ({(cap.ref mem) ({(cap.own mem) (cap.ref mem)} *)} *)
+            ({(cap.ref mem) ({(cap.own mem) (cap.own mem)} *)} *)
             ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
           } *)
           ({(u64 val) (u64 val)} *)
@@ -2097,7 +2487,7 @@
     ({cap.ref [.cache-count] f32} buf val)
     ({
       ({
-        ({({[.cache-count] u64} :) ({(cap.own mem) (cap.ref mem)} *)} *)
+        ({({[.cache-count] u64} :) ({(cap.own mem) (cap.own mem)} *)} *)
         ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
       } *)
       ([.score-count] ix val)
@@ -2142,7 +2532,7 @@
   {
     (cap.own mem)
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (u64 val)
     (u64 val)
@@ -2710,7 +3100,7 @@
     ({cap.ref [.cache-count] f32} buf val)
     ({
       ({
-        ({({[.cache-count] u64} :) ({(cap.own mem) (cap.ref mem)} *)} *)
+        ({({[.cache-count] u64} :) ({(cap.own mem) (cap.own mem)} *)} *)
         ({({(u64 val) (u64 val)} *) ({(u64 val) (u64 val)} *)} *)
       } *)
       ([.output-count] ix val)
@@ -2776,7 +3166,7 @@
   {
     (cap.own mem)
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (u64 val)
     (u64 val)
@@ -3300,7 +3690,7 @@
 (def program qwen3.decoder-layer :
   {
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (cap.ref mem)
     (cap.ref mem)
@@ -3365,7 +3755,7 @@
 (def program qwen3.cached-decoder-layer :
   {
     (cap.own mem)
-    (cap.ref mem)
+    (cap.own mem)
     (u64 val)
     (cap.own mem)
     (u64 val)
@@ -3634,7 +4024,6 @@
 # Explicit 48-layer Qwen3-30B-A3B composition.
 (def program qwen3 :
   {
-    (cap.ref mem)
     (cap.ref mem)
     (cap.own mem)
     (u64 val)
@@ -4221,9 +4610,10 @@
   }
   ->
   {(cap.own mem) (cap.own mem) (cap.own mem)}
-= ([tokens rope cache token-capacity cache-start embed-weight layer-00-input-norm layer-00-q-weight layer-00-k-weight layer-00-v-weight layer-00-o-weight layer-00-q-norm layer-00-k-norm layer-00-post-norm layer-00-router-weight layer-00-expert-gate-weight layer-00-expert-up-weight layer-00-expert-down-weight layer-01-input-norm layer-01-q-weight layer-01-k-weight layer-01-v-weight layer-01-o-weight layer-01-q-norm layer-01-k-norm layer-01-post-norm layer-01-router-weight layer-01-expert-gate-weight layer-01-expert-up-weight layer-01-expert-down-weight layer-02-input-norm layer-02-q-weight layer-02-k-weight layer-02-v-weight layer-02-o-weight layer-02-q-norm layer-02-k-norm layer-02-post-norm layer-02-router-weight layer-02-expert-gate-weight layer-02-expert-up-weight layer-02-expert-down-weight layer-03-input-norm layer-03-q-weight layer-03-k-weight layer-03-v-weight layer-03-o-weight layer-03-q-norm layer-03-k-norm layer-03-post-norm layer-03-router-weight layer-03-expert-gate-weight layer-03-expert-up-weight layer-03-expert-down-weight layer-04-input-norm layer-04-q-weight layer-04-k-weight layer-04-v-weight layer-04-o-weight layer-04-q-norm layer-04-k-norm layer-04-post-norm layer-04-router-weight layer-04-expert-gate-weight layer-04-expert-up-weight layer-04-expert-down-weight layer-05-input-norm layer-05-q-weight layer-05-k-weight layer-05-v-weight layer-05-o-weight layer-05-q-norm layer-05-k-norm layer-05-post-norm layer-05-router-weight layer-05-expert-gate-weight layer-05-expert-up-weight layer-05-expert-down-weight layer-06-input-norm layer-06-q-weight layer-06-k-weight layer-06-v-weight layer-06-o-weight layer-06-q-norm layer-06-k-norm layer-06-post-norm layer-06-router-weight layer-06-expert-gate-weight layer-06-expert-up-weight layer-06-expert-down-weight layer-07-input-norm layer-07-q-weight layer-07-k-weight layer-07-v-weight layer-07-o-weight layer-07-q-norm layer-07-k-norm layer-07-post-norm layer-07-router-weight layer-07-expert-gate-weight layer-07-expert-up-weight layer-07-expert-down-weight layer-08-input-norm layer-08-q-weight layer-08-k-weight layer-08-v-weight layer-08-o-weight layer-08-q-norm layer-08-k-norm layer-08-post-norm layer-08-router-weight layer-08-expert-gate-weight layer-08-expert-up-weight layer-08-expert-down-weight layer-09-input-norm layer-09-q-weight layer-09-k-weight layer-09-v-weight layer-09-o-weight layer-09-q-norm layer-09-k-norm layer-09-post-norm layer-09-router-weight layer-09-expert-gate-weight layer-09-expert-up-weight layer-09-expert-down-weight layer-10-input-norm layer-10-q-weight layer-10-k-weight layer-10-v-weight layer-10-o-weight layer-10-q-norm layer-10-k-norm layer-10-post-norm layer-10-router-weight layer-10-expert-gate-weight layer-10-expert-up-weight layer-10-expert-down-weight layer-11-input-norm layer-11-q-weight layer-11-k-weight layer-11-v-weight layer-11-o-weight layer-11-q-norm layer-11-k-norm layer-11-post-norm layer-11-router-weight layer-11-expert-gate-weight layer-11-expert-up-weight layer-11-expert-down-weight layer-12-input-norm layer-12-q-weight layer-12-k-weight layer-12-v-weight layer-12-o-weight layer-12-q-norm layer-12-k-norm layer-12-post-norm layer-12-router-weight layer-12-expert-gate-weight layer-12-expert-up-weight layer-12-expert-down-weight layer-13-input-norm layer-13-q-weight layer-13-k-weight layer-13-v-weight layer-13-o-weight layer-13-q-norm layer-13-k-norm layer-13-post-norm layer-13-router-weight layer-13-expert-gate-weight layer-13-expert-up-weight layer-13-expert-down-weight layer-14-input-norm layer-14-q-weight layer-14-k-weight layer-14-v-weight layer-14-o-weight layer-14-q-norm layer-14-k-norm layer-14-post-norm layer-14-router-weight layer-14-expert-gate-weight layer-14-expert-up-weight layer-14-expert-down-weight layer-15-input-norm layer-15-q-weight layer-15-k-weight layer-15-v-weight layer-15-o-weight layer-15-q-norm layer-15-k-norm layer-15-post-norm layer-15-router-weight layer-15-expert-gate-weight layer-15-expert-up-weight layer-15-expert-down-weight layer-16-input-norm layer-16-q-weight layer-16-k-weight layer-16-v-weight layer-16-o-weight layer-16-q-norm layer-16-k-norm layer-16-post-norm layer-16-router-weight layer-16-expert-gate-weight layer-16-expert-up-weight layer-16-expert-down-weight layer-17-input-norm layer-17-q-weight layer-17-k-weight layer-17-v-weight layer-17-o-weight layer-17-q-norm layer-17-k-norm layer-17-post-norm layer-17-router-weight layer-17-expert-gate-weight layer-17-expert-up-weight layer-17-expert-down-weight layer-18-input-norm layer-18-q-weight layer-18-k-weight layer-18-v-weight layer-18-o-weight layer-18-q-norm layer-18-k-norm layer-18-post-norm layer-18-router-weight layer-18-expert-gate-weight layer-18-expert-up-weight layer-18-expert-down-weight layer-19-input-norm layer-19-q-weight layer-19-k-weight layer-19-v-weight layer-19-o-weight layer-19-q-norm layer-19-k-norm layer-19-post-norm layer-19-router-weight layer-19-expert-gate-weight layer-19-expert-up-weight layer-19-expert-down-weight layer-20-input-norm layer-20-q-weight layer-20-k-weight layer-20-v-weight layer-20-o-weight layer-20-q-norm layer-20-k-norm layer-20-post-norm layer-20-router-weight layer-20-expert-gate-weight layer-20-expert-up-weight layer-20-expert-down-weight layer-21-input-norm layer-21-q-weight layer-21-k-weight layer-21-v-weight layer-21-o-weight layer-21-q-norm layer-21-k-norm layer-21-post-norm layer-21-router-weight layer-21-expert-gate-weight layer-21-expert-up-weight layer-21-expert-down-weight layer-22-input-norm layer-22-q-weight layer-22-k-weight layer-22-v-weight layer-22-o-weight layer-22-q-norm layer-22-k-norm layer-22-post-norm layer-22-router-weight layer-22-expert-gate-weight layer-22-expert-up-weight layer-22-expert-down-weight layer-23-input-norm layer-23-q-weight layer-23-k-weight layer-23-v-weight layer-23-o-weight layer-23-q-norm layer-23-k-norm layer-23-post-norm layer-23-router-weight layer-23-expert-gate-weight layer-23-expert-up-weight layer-23-expert-down-weight layer-24-input-norm layer-24-q-weight layer-24-k-weight layer-24-v-weight layer-24-o-weight layer-24-q-norm layer-24-k-norm layer-24-post-norm layer-24-router-weight layer-24-expert-gate-weight layer-24-expert-up-weight layer-24-expert-down-weight layer-25-input-norm layer-25-q-weight layer-25-k-weight layer-25-v-weight layer-25-o-weight layer-25-q-norm layer-25-k-norm layer-25-post-norm layer-25-router-weight layer-25-expert-gate-weight layer-25-expert-up-weight layer-25-expert-down-weight layer-26-input-norm layer-26-q-weight layer-26-k-weight layer-26-v-weight layer-26-o-weight layer-26-q-norm layer-26-k-norm layer-26-post-norm layer-26-router-weight layer-26-expert-gate-weight layer-26-expert-up-weight layer-26-expert-down-weight layer-27-input-norm layer-27-q-weight layer-27-k-weight layer-27-v-weight layer-27-o-weight layer-27-q-norm layer-27-k-norm layer-27-post-norm layer-27-router-weight layer-27-expert-gate-weight layer-27-expert-up-weight layer-27-expert-down-weight layer-28-input-norm layer-28-q-weight layer-28-k-weight layer-28-v-weight layer-28-o-weight layer-28-q-norm layer-28-k-norm layer-28-post-norm layer-28-router-weight layer-28-expert-gate-weight layer-28-expert-up-weight layer-28-expert-down-weight layer-29-input-norm layer-29-q-weight layer-29-k-weight layer-29-v-weight layer-29-o-weight layer-29-q-norm layer-29-k-norm layer-29-post-norm layer-29-router-weight layer-29-expert-gate-weight layer-29-expert-up-weight layer-29-expert-down-weight layer-30-input-norm layer-30-q-weight layer-30-k-weight layer-30-v-weight layer-30-o-weight layer-30-q-norm layer-30-k-norm layer-30-post-norm layer-30-router-weight layer-30-expert-gate-weight layer-30-expert-up-weight layer-30-expert-down-weight layer-31-input-norm layer-31-q-weight layer-31-k-weight layer-31-v-weight layer-31-o-weight layer-31-q-norm layer-31-k-norm layer-31-post-norm layer-31-router-weight layer-31-expert-gate-weight layer-31-expert-up-weight layer-31-expert-down-weight layer-32-input-norm layer-32-q-weight layer-32-k-weight layer-32-v-weight layer-32-o-weight layer-32-q-norm layer-32-k-norm layer-32-post-norm layer-32-router-weight layer-32-expert-gate-weight layer-32-expert-up-weight layer-32-expert-down-weight layer-33-input-norm layer-33-q-weight layer-33-k-weight layer-33-v-weight layer-33-o-weight layer-33-q-norm layer-33-k-norm layer-33-post-norm layer-33-router-weight layer-33-expert-gate-weight layer-33-expert-up-weight layer-33-expert-down-weight layer-34-input-norm layer-34-q-weight layer-34-k-weight layer-34-v-weight layer-34-o-weight layer-34-q-norm layer-34-k-norm layer-34-post-norm layer-34-router-weight layer-34-expert-gate-weight layer-34-expert-up-weight layer-34-expert-down-weight layer-35-input-norm layer-35-q-weight layer-35-k-weight layer-35-v-weight layer-35-o-weight layer-35-q-norm layer-35-k-norm layer-35-post-norm layer-35-router-weight layer-35-expert-gate-weight layer-35-expert-up-weight layer-35-expert-down-weight layer-36-input-norm layer-36-q-weight layer-36-k-weight layer-36-v-weight layer-36-o-weight layer-36-q-norm layer-36-k-norm layer-36-post-norm layer-36-router-weight layer-36-expert-gate-weight layer-36-expert-up-weight layer-36-expert-down-weight layer-37-input-norm layer-37-q-weight layer-37-k-weight layer-37-v-weight layer-37-o-weight layer-37-q-norm layer-37-k-norm layer-37-post-norm layer-37-router-weight layer-37-expert-gate-weight layer-37-expert-up-weight layer-37-expert-down-weight layer-38-input-norm layer-38-q-weight layer-38-k-weight layer-38-v-weight layer-38-o-weight layer-38-q-norm layer-38-k-norm layer-38-post-norm layer-38-router-weight layer-38-expert-gate-weight layer-38-expert-up-weight layer-38-expert-down-weight layer-39-input-norm layer-39-q-weight layer-39-k-weight layer-39-v-weight layer-39-o-weight layer-39-q-norm layer-39-k-norm layer-39-post-norm layer-39-router-weight layer-39-expert-gate-weight layer-39-expert-up-weight layer-39-expert-down-weight layer-40-input-norm layer-40-q-weight layer-40-k-weight layer-40-v-weight layer-40-o-weight layer-40-q-norm layer-40-k-norm layer-40-post-norm layer-40-router-weight layer-40-expert-gate-weight layer-40-expert-up-weight layer-40-expert-down-weight layer-41-input-norm layer-41-q-weight layer-41-k-weight layer-41-v-weight layer-41-o-weight layer-41-q-norm layer-41-k-norm layer-41-post-norm layer-41-router-weight layer-41-expert-gate-weight layer-41-expert-up-weight layer-41-expert-down-weight layer-42-input-norm layer-42-q-weight layer-42-k-weight layer-42-v-weight layer-42-o-weight layer-42-q-norm layer-42-k-norm layer-42-post-norm layer-42-router-weight layer-42-expert-gate-weight layer-42-expert-up-weight layer-42-expert-down-weight layer-43-input-norm layer-43-q-weight layer-43-k-weight layer-43-v-weight layer-43-o-weight layer-43-q-norm layer-43-k-norm layer-43-post-norm layer-43-router-weight layer-43-expert-gate-weight layer-43-expert-up-weight layer-43-expert-down-weight layer-44-input-norm layer-44-q-weight layer-44-k-weight layer-44-v-weight layer-44-o-weight layer-44-q-norm layer-44-k-norm layer-44-post-norm layer-44-router-weight layer-44-expert-gate-weight layer-44-expert-up-weight layer-44-expert-down-weight layer-45-input-norm layer-45-q-weight layer-45-k-weight layer-45-v-weight layer-45-o-weight layer-45-q-norm layer-45-k-norm layer-45-post-norm layer-45-router-weight layer-45-expert-gate-weight layer-45-expert-up-weight layer-45-expert-down-weight layer-46-input-norm layer-46-q-weight layer-46-k-weight layer-46-v-weight layer-46-o-weight layer-46-q-norm layer-46-k-norm layer-46-post-norm layer-46-router-weight layer-46-expert-gate-weight layer-46-expert-up-weight layer-46-expert-down-weight layer-47-input-norm layer-47-q-weight layer-47-k-weight layer-47-v-weight layer-47-o-weight layer-47-q-norm layer-47-k-norm layer-47-post-norm layer-47-router-weight layer-47-expert-gate-weight layer-47-expert-up-weight layer-47-expert-down-weight final-norm lm-head.]
+= ([tokens cache token-capacity cache-start embed-weight layer-00-input-norm layer-00-q-weight layer-00-k-weight layer-00-v-weight layer-00-o-weight layer-00-q-norm layer-00-k-norm layer-00-post-norm layer-00-router-weight layer-00-expert-gate-weight layer-00-expert-up-weight layer-00-expert-down-weight layer-01-input-norm layer-01-q-weight layer-01-k-weight layer-01-v-weight layer-01-o-weight layer-01-q-norm layer-01-k-norm layer-01-post-norm layer-01-router-weight layer-01-expert-gate-weight layer-01-expert-up-weight layer-01-expert-down-weight layer-02-input-norm layer-02-q-weight layer-02-k-weight layer-02-v-weight layer-02-o-weight layer-02-q-norm layer-02-k-norm layer-02-post-norm layer-02-router-weight layer-02-expert-gate-weight layer-02-expert-up-weight layer-02-expert-down-weight layer-03-input-norm layer-03-q-weight layer-03-k-weight layer-03-v-weight layer-03-o-weight layer-03-q-norm layer-03-k-norm layer-03-post-norm layer-03-router-weight layer-03-expert-gate-weight layer-03-expert-up-weight layer-03-expert-down-weight layer-04-input-norm layer-04-q-weight layer-04-k-weight layer-04-v-weight layer-04-o-weight layer-04-q-norm layer-04-k-norm layer-04-post-norm layer-04-router-weight layer-04-expert-gate-weight layer-04-expert-up-weight layer-04-expert-down-weight layer-05-input-norm layer-05-q-weight layer-05-k-weight layer-05-v-weight layer-05-o-weight layer-05-q-norm layer-05-k-norm layer-05-post-norm layer-05-router-weight layer-05-expert-gate-weight layer-05-expert-up-weight layer-05-expert-down-weight layer-06-input-norm layer-06-q-weight layer-06-k-weight layer-06-v-weight layer-06-o-weight layer-06-q-norm layer-06-k-norm layer-06-post-norm layer-06-router-weight layer-06-expert-gate-weight layer-06-expert-up-weight layer-06-expert-down-weight layer-07-input-norm layer-07-q-weight layer-07-k-weight layer-07-v-weight layer-07-o-weight layer-07-q-norm layer-07-k-norm layer-07-post-norm layer-07-router-weight layer-07-expert-gate-weight layer-07-expert-up-weight layer-07-expert-down-weight layer-08-input-norm layer-08-q-weight layer-08-k-weight layer-08-v-weight layer-08-o-weight layer-08-q-norm layer-08-k-norm layer-08-post-norm layer-08-router-weight layer-08-expert-gate-weight layer-08-expert-up-weight layer-08-expert-down-weight layer-09-input-norm layer-09-q-weight layer-09-k-weight layer-09-v-weight layer-09-o-weight layer-09-q-norm layer-09-k-norm layer-09-post-norm layer-09-router-weight layer-09-expert-gate-weight layer-09-expert-up-weight layer-09-expert-down-weight layer-10-input-norm layer-10-q-weight layer-10-k-weight layer-10-v-weight layer-10-o-weight layer-10-q-norm layer-10-k-norm layer-10-post-norm layer-10-router-weight layer-10-expert-gate-weight layer-10-expert-up-weight layer-10-expert-down-weight layer-11-input-norm layer-11-q-weight layer-11-k-weight layer-11-v-weight layer-11-o-weight layer-11-q-norm layer-11-k-norm layer-11-post-norm layer-11-router-weight layer-11-expert-gate-weight layer-11-expert-up-weight layer-11-expert-down-weight layer-12-input-norm layer-12-q-weight layer-12-k-weight layer-12-v-weight layer-12-o-weight layer-12-q-norm layer-12-k-norm layer-12-post-norm layer-12-router-weight layer-12-expert-gate-weight layer-12-expert-up-weight layer-12-expert-down-weight layer-13-input-norm layer-13-q-weight layer-13-k-weight layer-13-v-weight layer-13-o-weight layer-13-q-norm layer-13-k-norm layer-13-post-norm layer-13-router-weight layer-13-expert-gate-weight layer-13-expert-up-weight layer-13-expert-down-weight layer-14-input-norm layer-14-q-weight layer-14-k-weight layer-14-v-weight layer-14-o-weight layer-14-q-norm layer-14-k-norm layer-14-post-norm layer-14-router-weight layer-14-expert-gate-weight layer-14-expert-up-weight layer-14-expert-down-weight layer-15-input-norm layer-15-q-weight layer-15-k-weight layer-15-v-weight layer-15-o-weight layer-15-q-norm layer-15-k-norm layer-15-post-norm layer-15-router-weight layer-15-expert-gate-weight layer-15-expert-up-weight layer-15-expert-down-weight layer-16-input-norm layer-16-q-weight layer-16-k-weight layer-16-v-weight layer-16-o-weight layer-16-q-norm layer-16-k-norm layer-16-post-norm layer-16-router-weight layer-16-expert-gate-weight layer-16-expert-up-weight layer-16-expert-down-weight layer-17-input-norm layer-17-q-weight layer-17-k-weight layer-17-v-weight layer-17-o-weight layer-17-q-norm layer-17-k-norm layer-17-post-norm layer-17-router-weight layer-17-expert-gate-weight layer-17-expert-up-weight layer-17-expert-down-weight layer-18-input-norm layer-18-q-weight layer-18-k-weight layer-18-v-weight layer-18-o-weight layer-18-q-norm layer-18-k-norm layer-18-post-norm layer-18-router-weight layer-18-expert-gate-weight layer-18-expert-up-weight layer-18-expert-down-weight layer-19-input-norm layer-19-q-weight layer-19-k-weight layer-19-v-weight layer-19-o-weight layer-19-q-norm layer-19-k-norm layer-19-post-norm layer-19-router-weight layer-19-expert-gate-weight layer-19-expert-up-weight layer-19-expert-down-weight layer-20-input-norm layer-20-q-weight layer-20-k-weight layer-20-v-weight layer-20-o-weight layer-20-q-norm layer-20-k-norm layer-20-post-norm layer-20-router-weight layer-20-expert-gate-weight layer-20-expert-up-weight layer-20-expert-down-weight layer-21-input-norm layer-21-q-weight layer-21-k-weight layer-21-v-weight layer-21-o-weight layer-21-q-norm layer-21-k-norm layer-21-post-norm layer-21-router-weight layer-21-expert-gate-weight layer-21-expert-up-weight layer-21-expert-down-weight layer-22-input-norm layer-22-q-weight layer-22-k-weight layer-22-v-weight layer-22-o-weight layer-22-q-norm layer-22-k-norm layer-22-post-norm layer-22-router-weight layer-22-expert-gate-weight layer-22-expert-up-weight layer-22-expert-down-weight layer-23-input-norm layer-23-q-weight layer-23-k-weight layer-23-v-weight layer-23-o-weight layer-23-q-norm layer-23-k-norm layer-23-post-norm layer-23-router-weight layer-23-expert-gate-weight layer-23-expert-up-weight layer-23-expert-down-weight layer-24-input-norm layer-24-q-weight layer-24-k-weight layer-24-v-weight layer-24-o-weight layer-24-q-norm layer-24-k-norm layer-24-post-norm layer-24-router-weight layer-24-expert-gate-weight layer-24-expert-up-weight layer-24-expert-down-weight layer-25-input-norm layer-25-q-weight layer-25-k-weight layer-25-v-weight layer-25-o-weight layer-25-q-norm layer-25-k-norm layer-25-post-norm layer-25-router-weight layer-25-expert-gate-weight layer-25-expert-up-weight layer-25-expert-down-weight layer-26-input-norm layer-26-q-weight layer-26-k-weight layer-26-v-weight layer-26-o-weight layer-26-q-norm layer-26-k-norm layer-26-post-norm layer-26-router-weight layer-26-expert-gate-weight layer-26-expert-up-weight layer-26-expert-down-weight layer-27-input-norm layer-27-q-weight layer-27-k-weight layer-27-v-weight layer-27-o-weight layer-27-q-norm layer-27-k-norm layer-27-post-norm layer-27-router-weight layer-27-expert-gate-weight layer-27-expert-up-weight layer-27-expert-down-weight layer-28-input-norm layer-28-q-weight layer-28-k-weight layer-28-v-weight layer-28-o-weight layer-28-q-norm layer-28-k-norm layer-28-post-norm layer-28-router-weight layer-28-expert-gate-weight layer-28-expert-up-weight layer-28-expert-down-weight layer-29-input-norm layer-29-q-weight layer-29-k-weight layer-29-v-weight layer-29-o-weight layer-29-q-norm layer-29-k-norm layer-29-post-norm layer-29-router-weight layer-29-expert-gate-weight layer-29-expert-up-weight layer-29-expert-down-weight layer-30-input-norm layer-30-q-weight layer-30-k-weight layer-30-v-weight layer-30-o-weight layer-30-q-norm layer-30-k-norm layer-30-post-norm layer-30-router-weight layer-30-expert-gate-weight layer-30-expert-up-weight layer-30-expert-down-weight layer-31-input-norm layer-31-q-weight layer-31-k-weight layer-31-v-weight layer-31-o-weight layer-31-q-norm layer-31-k-norm layer-31-post-norm layer-31-router-weight layer-31-expert-gate-weight layer-31-expert-up-weight layer-31-expert-down-weight layer-32-input-norm layer-32-q-weight layer-32-k-weight layer-32-v-weight layer-32-o-weight layer-32-q-norm layer-32-k-norm layer-32-post-norm layer-32-router-weight layer-32-expert-gate-weight layer-32-expert-up-weight layer-32-expert-down-weight layer-33-input-norm layer-33-q-weight layer-33-k-weight layer-33-v-weight layer-33-o-weight layer-33-q-norm layer-33-k-norm layer-33-post-norm layer-33-router-weight layer-33-expert-gate-weight layer-33-expert-up-weight layer-33-expert-down-weight layer-34-input-norm layer-34-q-weight layer-34-k-weight layer-34-v-weight layer-34-o-weight layer-34-q-norm layer-34-k-norm layer-34-post-norm layer-34-router-weight layer-34-expert-gate-weight layer-34-expert-up-weight layer-34-expert-down-weight layer-35-input-norm layer-35-q-weight layer-35-k-weight layer-35-v-weight layer-35-o-weight layer-35-q-norm layer-35-k-norm layer-35-post-norm layer-35-router-weight layer-35-expert-gate-weight layer-35-expert-up-weight layer-35-expert-down-weight layer-36-input-norm layer-36-q-weight layer-36-k-weight layer-36-v-weight layer-36-o-weight layer-36-q-norm layer-36-k-norm layer-36-post-norm layer-36-router-weight layer-36-expert-gate-weight layer-36-expert-up-weight layer-36-expert-down-weight layer-37-input-norm layer-37-q-weight layer-37-k-weight layer-37-v-weight layer-37-o-weight layer-37-q-norm layer-37-k-norm layer-37-post-norm layer-37-router-weight layer-37-expert-gate-weight layer-37-expert-up-weight layer-37-expert-down-weight layer-38-input-norm layer-38-q-weight layer-38-k-weight layer-38-v-weight layer-38-o-weight layer-38-q-norm layer-38-k-norm layer-38-post-norm layer-38-router-weight layer-38-expert-gate-weight layer-38-expert-up-weight layer-38-expert-down-weight layer-39-input-norm layer-39-q-weight layer-39-k-weight layer-39-v-weight layer-39-o-weight layer-39-q-norm layer-39-k-norm layer-39-post-norm layer-39-router-weight layer-39-expert-gate-weight layer-39-expert-up-weight layer-39-expert-down-weight layer-40-input-norm layer-40-q-weight layer-40-k-weight layer-40-v-weight layer-40-o-weight layer-40-q-norm layer-40-k-norm layer-40-post-norm layer-40-router-weight layer-40-expert-gate-weight layer-40-expert-up-weight layer-40-expert-down-weight layer-41-input-norm layer-41-q-weight layer-41-k-weight layer-41-v-weight layer-41-o-weight layer-41-q-norm layer-41-k-norm layer-41-post-norm layer-41-router-weight layer-41-expert-gate-weight layer-41-expert-up-weight layer-41-expert-down-weight layer-42-input-norm layer-42-q-weight layer-42-k-weight layer-42-v-weight layer-42-o-weight layer-42-q-norm layer-42-k-norm layer-42-post-norm layer-42-router-weight layer-42-expert-gate-weight layer-42-expert-up-weight layer-42-expert-down-weight layer-43-input-norm layer-43-q-weight layer-43-k-weight layer-43-v-weight layer-43-o-weight layer-43-q-norm layer-43-k-norm layer-43-post-norm layer-43-router-weight layer-43-expert-gate-weight layer-43-expert-up-weight layer-43-expert-down-weight layer-44-input-norm layer-44-q-weight layer-44-k-weight layer-44-v-weight layer-44-o-weight layer-44-q-norm layer-44-k-norm layer-44-post-norm layer-44-router-weight layer-44-expert-gate-weight layer-44-expert-up-weight layer-44-expert-down-weight layer-45-input-norm layer-45-q-weight layer-45-k-weight layer-45-v-weight layer-45-o-weight layer-45-q-norm layer-45-k-norm layer-45-post-norm layer-45-router-weight layer-45-expert-gate-weight layer-45-expert-up-weight layer-45-expert-down-weight layer-46-input-norm layer-46-q-weight layer-46-k-weight layer-46-v-weight layer-46-o-weight layer-46-q-norm layer-46-k-norm layer-46-post-norm layer-46-router-weight layer-46-expert-gate-weight layer-46-expert-up-weight layer-46-expert-down-weight layer-47-input-norm layer-47-q-weight layer-47-k-weight layer-47-v-weight layer-47-o-weight layer-47-q-norm layer-47-k-norm layer-47-post-norm layer-47-router-weight layer-47-expert-gate-weight layer-47-expert-up-weight layer-47-expert-down-weight final-norm lm-head.]
   ([.tokens] mem.cast.u64 [sequence _token-buffer.])
   ([.sequence] :.forget [sequence-value.])
+  ({[.cache-start] [.sequence-value]} qwen3.rope-table [rope.])
   ({[.tokens] [.embed-weight]} qwen3.embedding [hidden-00.])
   ({
     [.hidden-00]
@@ -5243,7 +5633,8 @@
   } qwen3.final-logits [logits.])
   ({[.final-inverse] [.logits]} qwen3.free-f32-before [logits-after-inverse.])
   ({[.hidden-48] [.logits-after-inverse]} qwen3.free-f32-before [final-logits.])
-  ([.final-logits] mem.cast.f32 [logit-count logit-buffer.])
+  ({[.rope] [.final-logits]} qwen3.free-f32-before [final-logits-after-rope.])
+  ([.final-logits-after-rope] mem.cast.f32 [logit-count logit-buffer.])
   (const.u64.0x0000000000000001 u64.name [one.])
   {
     [.logit-buffer]

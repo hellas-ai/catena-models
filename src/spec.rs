@@ -19,7 +19,7 @@ pub const EOS_TOKEN_ID: u64 = 151_643;
 
 pub const TENSORS_PER_LAYER: usize = 12;
 pub const WEIGHT_COUNT: usize = 1 + NUM_LAYERS * TENSORS_PER_LAYER + 2;
-pub const MODEL_INPUT_COUNT: usize = 5 + WEIGHT_COUNT;
+pub const MODEL_INPUT_COUNT: usize = 4 + WEIGHT_COUNT;
 pub const KV_CACHE_ELEMENTS_PER_TOKEN: usize = NUM_LAYERS * 2 * NUM_KEY_VALUE_HEADS * HEAD_DIM;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ mod tests {
     fn checkpoint_abi_has_the_expected_inventory() {
         let specs = weight_specs();
         assert_eq!(specs.len(), 579);
-        assert_eq!(MODEL_INPUT_COUNT, 584);
+        assert_eq!(MODEL_INPUT_COUNT, 583);
         assert_eq!(KV_CACHE_ELEMENTS_PER_TOKEN, 49_152);
         assert_eq!(specs.first().unwrap().name, "model.embed_tokens.weight");
         assert_eq!(specs.last().unwrap().name, "lm_head.weight");

@@ -102,7 +102,20 @@ tok/s, or 51.7% of the matched 19.03 tok/s llama.cpp baseline.
 
 A session preallocates the complete layered key/value cache. Prefill and decode
 append RoPE-applied keys and raw values in place, and decode evaluates only the
-new token. RoPE tables cover only the current absolute-position range.
+new token.
+
+## Catena-owned RoPE table
+
+RoPE is no longer constructed with model-specific Rust `powf`, `sin`, and
+`cos` calls or passed as an additional model input. The Catena entrypoint
+materializes only the current absolute-position range once per call and reuses
+that owned table across all 48 layers. Exact F32 inverse-frequency constants,
+a three-part Cody-Waite range reduction, and fixed degree-13/14 sine/cosine
+polynomials make the operation graph explicit. Across all 32,768 supported
+positions, the GPU table's maximum absolute difference from the previous host
+table was `4.92e-7` for sine and `4.17e-7` for cosine. The known continuation
+was unchanged; three 99-cached-token samples reached 10.42, 10.43, and 10.35
+tok/s (10.42 tok/s median).
 
 ## Cooperative fused projections
 
