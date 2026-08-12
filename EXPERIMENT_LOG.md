@@ -43,6 +43,39 @@ before that issue: llama.cpp reached 19.42 tok/s and the final Catena build
 reached 10.95 tok/s, or 56.4%. Both baselines are retained here so the
 exploratory result is not overstated.
 
+## Registered GGUF zero-copy loading (kept)
+
+The original Qwen loader mapped 18,867 safetensors, copied each source tensor
+through a Rust `Vec`, concatenated every 128-expert group, then allocated and
+uploaded all 579 Catena buffers. The retained loader instead consumes the
+unquantized `model-bf16.gguf` already used by llama.cpp. That file contains the
+expert groups in Catena's required numeric order.
+
+The loader validates GGUF v3, the complete name inventory, reversed GGUF
+dimensions, dtypes, alignment, checked byte ranges, and non-overlap before
+inference. It makes one read-only file mapping and registers it with HIP's
+mapped/read-only coarse-grained flags. The resulting device-visible base is
+split into borrowed `MemRef`s whose lifetime is tied to the registration;
+registration is released before the mmap. No mapped pointer is given `MemOwn`
+ownership.
+
+Of the 56.90 GiB file, 56.85 GiB is BF16 tensor payload read directly by the
+kernels. llama.cpp's converter stores 48.80 MiB of small norms/router weights
+as F32. Every one of those values is verified to have zero low 16 bits before
+its original BF16 high word is uploaded, producing only 24.40 MiB of copied
+device weights. This validation makes the conversion bit-exact rather than a
+new rounding step.
+
+Observed load-to-ready times were 2.72--2.84 seconds. The eight-token
+known continuation stayed exactly ` Paris. Which of the following options
+correctly`. A 99-cached-token run measured 10.92 tok/s versus the earlier 10.95
+tok/s sample. A full 999-cached-token validation measured 9.83 tok/s, or 51.7%
+of the matched 19.03 tok/s llama.cpp baseline. The loading change therefore
+retained both short and sustained throughput while removing the model-sized
+repack/upload and duplicate allocation. This mode is specific to the tested
+HIP unified-memory APU for now; discrete hardware must benchmark registered
+host access against an ordinary device upload.
+
 ## Materialized MoE activation (kept)
 
 Qwen3-30B-A3B activates eight experts per token. The first implementation

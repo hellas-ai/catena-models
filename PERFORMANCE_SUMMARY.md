@@ -86,6 +86,18 @@ once at the Catena program boundary.
 
 # Architecture/model implementation changes made to achieve performance
 
+## Registered GGUF weight views
+
+The Qwen runner validates and read-only-maps the offline-packed BF16 GGUF once,
+registers the complete mapping with HIP, and passes its BF16 tensor ranges as
+borrowed `MemRef`s. This removes the model-sized safetensors repack, upload, and
+duplicate allocation. Only 48.80 MiB of GGUF tensors promoted exactly to F32
+are verified and restored into 24.40 MiB of BF16 device allocations. Observed
+weight readiness fell to 2.72--2.84 seconds, while the known continuation and
+short cached throughput were retained (10.92 tok/s over 99 cached tokens versus
+the earlier 10.95 tok/s sample). A 999-cached-token validation reached 9.83
+tok/s, or 51.7% of the matched 19.03 tok/s llama.cpp baseline.
+
 ## Persistent KV cache
 
 A session preallocates the complete layered key/value cache. Prefill and decode
@@ -150,3 +162,9 @@ same Catena median is 47.6%. At 99 cached tokens, before the runners' different
 ignore-EOS behavior changes their streams, Catena measured 10.95 tok/s versus
 llama.cpp's 19.42 tok/s, or 56.4%. Detailed measurements, determinism notes,
 and rejected experiments are retained in `EXPERIMENT_LOG.md`.
+
+After replacing the safetensors upload with registered GGUF views, one full
+validation run reached 9.83 tok/s over 999 cached tokens. This is 51.7% of the
+matched 19.03 tok/s baseline and confirms the loading change retains the
+requested sustained-performance threshold; it is not a replacement for the
+three-run median above.

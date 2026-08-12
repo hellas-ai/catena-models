@@ -22,9 +22,13 @@ struct Args {
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
 
-    /// Directory containing model.safetensors and tokenizer.json.
+    /// Directory containing tokenizer.json and, by default, model-bf16.gguf.
     #[arg(long, default_value = "models/Qwen3-30B-A3B-Base")]
     model_dir: PathBuf,
+
+    /// GGUF checkpoint path (defaults to <model-dir>/model-bf16.gguf).
+    #[arg(long)]
+    gguf: Option<PathBuf>,
 
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, default_value_t = 20)]
@@ -56,7 +60,10 @@ fn main() -> Result<()> {
     );
 
     let load_started = Instant::now();
-    let model = Model::load(&args.model_dir)?;
+    let gguf_path = args
+        .gguf
+        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
+    let model = Model::load_gguf(&gguf_path)?;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
         load_started.elapsed()

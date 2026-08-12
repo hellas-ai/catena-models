@@ -27,5 +27,4 @@ exec llama-completion \
   --gpu-layers "$gpu_layers" \
   --fit off \
   --no-conversation \
-  --simple-io \
   "$@"

@@ -33,6 +33,8 @@ pub struct TensorSpec {
     /// Stable name of the device-side buffer. Grouped expert buffers do not
     /// exist as a single tensor in the Hugging Face checkpoint.
     pub name: String,
+    /// Tensor name used by llama.cpp's Qwen3-MoE GGUF conversion.
+    pub gguf_name: String,
     pub shape: Vec<usize>,
     pub sources: Vec<TensorSource>,
 }
@@ -42,18 +44,24 @@ impl TensorSpec {
         self.shape.iter().product()
     }
 
-    fn single(name: String, shape: Vec<usize>) -> Self {
+    fn single(name: String, gguf_name: String, shape: Vec<usize>) -> Self {
         Self {
             sources: vec![TensorSource {
                 name: name.clone(),
                 shape: shape.clone(),
             }],
             name,
+            gguf_name,
             shape,
         }
     }
 
-    fn experts(layer: usize, projection: &str, source_shape: Vec<usize>) -> Self {
+    fn experts(
+        layer: usize,
+        projection: &str,
+        gguf_projection: &str,
+        source_shape: Vec<usize>,
+    ) -> Self {
         let sources = (0..NUM_EXPERTS)
             .map(|expert| TensorSource {
                 name: format!("model.layers.{layer}.mlp.experts.{expert}.{projection}.weight"),
@@ -64,6 +72,7 @@ impl TensorSpec {
         shape.extend(source_shape);
         Self {
             name: format!("model.layers.{layer}.mlp.experts.{projection}.weight"),
+            gguf_name: format!("blk.{layer}.{gguf_projection}.weight"),
             shape,
             sources,
         }
@@ -76,6 +85,7 @@ pub fn weight_specs() -> Vec<TensorSpec> {
     let mut tensors = Vec::with_capacity(WEIGHT_COUNT);
     tensors.push(TensorSpec::single(
         "model.embed_tokens.weight".into(),
+        "token_embd.weight".into(),
         vec![VOCAB_SIZE, HIDDEN_SIZE],
     ));
 
@@ -84,46 +94,78 @@ pub fn weight_specs() -> Vec<TensorSpec> {
         tensors.extend([
             TensorSpec::single(
                 format!("{prefix}.input_layernorm.weight"),
+                format!("blk.{layer}.attn_norm.weight"),
                 vec![HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.q_proj.weight"),
+                format!("blk.{layer}.attn_q.weight"),
                 vec![QUERY_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.k_proj.weight"),
+                format!("blk.{layer}.attn_k.weight"),
                 vec![KEY_VALUE_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.v_proj.weight"),
+                format!("blk.{layer}.attn_v.weight"),
                 vec![KEY_VALUE_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.o_proj.weight"),
+                format!("blk.{layer}.attn_output.weight"),
                 vec![HIDDEN_SIZE, QUERY_SIZE],
             ),
-            TensorSpec::single(format!("{prefix}.self_attn.q_norm.weight"), vec![HEAD_DIM]),
-            TensorSpec::single(format!("{prefix}.self_attn.k_norm.weight"), vec![HEAD_DIM]),
+            TensorSpec::single(
+                format!("{prefix}.self_attn.q_norm.weight"),
+                format!("blk.{layer}.attn_q_norm.weight"),
+                vec![HEAD_DIM],
+            ),
+            TensorSpec::single(
+                format!("{prefix}.self_attn.k_norm.weight"),
+                format!("blk.{layer}.attn_k_norm.weight"),
+                vec![HEAD_DIM],
+            ),
             TensorSpec::single(
                 format!("{prefix}.post_attention_layernorm.weight"),
+                format!("blk.{layer}.ffn_norm.weight"),
                 vec![HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.mlp.gate.weight"),
+                format!("blk.{layer}.ffn_gate_inp.weight"),
                 vec![NUM_EXPERTS, HIDDEN_SIZE],
             ),
-            TensorSpec::experts(layer, "gate_proj", vec![INTERMEDIATE_SIZE, HIDDEN_SIZE]),
-            TensorSpec::experts(layer, "up_proj", vec![INTERMEDIATE_SIZE, HIDDEN_SIZE]),
-            TensorSpec::experts(layer, "down_proj", vec![HIDDEN_SIZE, INTERMEDIATE_SIZE]),
+            TensorSpec::experts(
+                layer,
+                "gate_proj",
+                "ffn_gate_exps",
+                vec![INTERMEDIATE_SIZE, HIDDEN_SIZE],
+            ),
+            TensorSpec::experts(
+                layer,
+                "up_proj",
+                "ffn_up_exps",
+                vec![INTERMEDIATE_SIZE, HIDDEN_SIZE],
+            ),
+            TensorSpec::experts(
+                layer,
+                "down_proj",
+                "ffn_down_exps",
+                vec![HIDDEN_SIZE, INTERMEDIATE_SIZE],
+            ),
         ]);
     }
 
     tensors.push(TensorSpec::single(
         "model.norm.weight".into(),
+        "output_norm.weight".into(),
         vec![HIDDEN_SIZE],
     ));
     tensors.push(TensorSpec::single(
         "lm_head.weight".into(),
+        "output.weight".into(),
         vec![VOCAB_SIZE, HIDDEN_SIZE],
     ));
     debug_assert_eq!(tensors.len(), WEIGHT_COUNT);
@@ -162,5 +204,16 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), 18_867);
+    }
+
+    #[test]
+    fn gguf_tensor_names_are_unique() {
+        let specs = weight_specs();
+        let mut names = specs.iter().map(|spec| &spec.gguf_name).collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), WEIGHT_COUNT);
+        assert_eq!(specs.first().unwrap().gguf_name, "token_embd.weight");
+        assert_eq!(specs.last().unwrap().gguf_name, "output.weight");
     }
 }

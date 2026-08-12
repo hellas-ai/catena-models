@@ -9,7 +9,7 @@ use catena_lang::{
 
 use crate::{
     catena::MODEL_SOURCE,
-    checkpoint::Checkpoint,
+    checkpoint::{Checkpoint, GgufDtype, TensorView, exact_f32_bytes_to_bf16},
     rope,
     spec::{
         KV_CACHE_ELEMENTS_PER_TOKEN, MAX_POSITION_EMBEDDINGS, MODEL_INPUT_COUNT, VOCAB_SIZE,
@@ -17,35 +17,78 @@ use crate::{
     },
 };
 
-/// Loaded Qwen3 runtime and persistent GPU weight allocations.
+/// Loaded Qwen3 runtime, registered GGUF mapping, and converted small weights.
 pub struct Model {
     runtime: Runtime,
-    weights: Vec<MemOwn>,
+    weights: Vec<Weight>,
+    checkpoint: Checkpoint,
+}
+
+enum Weight {
+    /// BF16 payload read directly from the HIP-registered GGUF mapping.
+    Mapped(TensorView),
+    /// Small F32 GGUF tensors restored to their original BF16 representation.
+    Converted(MemOwn),
 }
 
 impl Model {
     pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
-        let model_dir = model_dir.as_ref();
+        Self::load_gguf(model_dir.as_ref().join("model-bf16.gguf"))
+    }
+
+    pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
+        let gguf_path = gguf_path.as_ref();
         let runtime =
             Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)
                 .context("failed to compile the Qwen3 Catena GPU program")?;
-        let checkpoint = Checkpoint::open(model_dir)?;
+        let checkpoint = Checkpoint::open(gguf_path)?;
         let mut weights = Vec::with_capacity(WEIGHT_COUNT);
+        let mut mapped_bytes = 0_usize;
+        let mut converted_source_bytes = 0_usize;
+        let mut converted_device_bytes = 0_usize;
         for spec in weight_specs() {
-            let values = checkpoint
-                .load_bf16(&spec)
-                .with_context(|| format!("failed to load {}", spec.name))?;
-            weights.push(
-                runtime
-                    .mem_u16(&values)
-                    .with_context(|| format!("failed to upload {}", spec.name))?,
-            );
+            let view = checkpoint
+                .tensor_view(&spec)
+                .with_context(|| format!("failed to locate {}", spec.name))?;
+            match view.dtype {
+                GgufDtype::Bf16 => {
+                    mapped_bytes += view.byte_len;
+                    weights.push(Weight::Mapped(view));
+                }
+                GgufDtype::F32 => {
+                    let values = exact_f32_bytes_to_bf16(checkpoint.tensor_bytes(&view)?)
+                        .with_context(|| format!("failed to restore {} to BF16", spec.name))?;
+                    ensure!(
+                        values.len() == spec.element_count(),
+                        "restored tensor {} has {} elements, expected {}",
+                        spec.name,
+                        values.len(),
+                        spec.element_count()
+                    );
+                    converted_source_bytes += view.byte_len;
+                    converted_device_bytes += values.len() * std::mem::size_of::<u16>();
+                    weights.push(Weight::Converted(runtime.mem_u16(&values).with_context(
+                        || format!("failed to upload restored {}", spec.name),
+                    )?));
+                }
+            }
         }
         ensure!(
             weights.len() == WEIGHT_COUNT,
             "internal weight ABI mismatch"
         );
-        Ok(Self { runtime, weights })
+        eprintln!(
+            "registered {:.2} GiB GGUF; {:.2} GiB BF16 mapped zero-copy, {:.2} MiB F32 restored into {:.2} MiB BF16",
+            checkpoint.registered_byte_len() as f64 / (1_u64 << 30) as f64,
+            mapped_bytes as f64 / (1_u64 << 30) as f64,
+            converted_source_bytes as f64 / (1_u64 << 20) as f64,
+            converted_device_bytes as f64 / (1_u64 << 20) as f64,
+        );
+        Ok(Self {
+            runtime,
+            weights,
+            checkpoint,
+        })
     }
 
     /// Run a full causal prefill and return final-position vocabulary logits.
@@ -101,15 +144,20 @@ impl Model {
         let token_buffer = self.runtime.mem_u64(tokens)?;
         let rope_values = rope::table_range(start, tokens.len());
         let rope_buffer = self.runtime.mem_f32(&rope_values)?;
-        let inputs = [token_buffer.as_ref().into(), rope_buffer.as_ref().into()]
-            .into_iter()
-            .chain([
-                cache.into(),
-                (capacity as u64).into(),
-                (start as u64).into(),
-            ])
-            .chain(self.weights.iter().map(|memory| memory.as_ref().into()))
-            .collect::<Vec<_>>();
+        let mut inputs = Vec::with_capacity(MODEL_INPUT_COUNT);
+        inputs.extend([
+            token_buffer.as_ref().into(),
+            rope_buffer.as_ref().into(),
+            cache.into(),
+            (capacity as u64).into(),
+            (start as u64).into(),
+        ]);
+        for weight in &self.weights {
+            inputs.push(match weight {
+                Weight::Mapped(view) => self.checkpoint.mapped_ref(view)?.into(),
+                Weight::Converted(memory) => memory.as_ref().into(),
+            });
+        }
         ensure!(
             inputs.len() == MODEL_INPUT_COUNT,
             "internal model ABI mismatch"

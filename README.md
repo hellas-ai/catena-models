@@ -3,8 +3,8 @@
 Local BF16 inference for the base (non-instruct) `Qwen3-30B-A3B-Base`
 checkpoint through Transformers, llama.cpp, and an exploratory Catena/HIP
 implementation. The Catena path executes all 48 layers, uses a persistent KV
-cache, and performs greedy generation directly from the original BF16
-safetensors.
+cache, and performs greedy generation directly from a HIP-registered BF16
+GGUF mapping.
 
 The scripts assume the Nix development environment; invoke them with
 `nix develop --command` as shown below.
@@ -30,7 +30,8 @@ nix develop --command hf download Qwen/Qwen3-30B-A3B-Base \
   --local-dir models/Qwen3-30B-A3B-Base
 ```
 
-Convert it to an unquantized BF16 GGUF for llama.cpp (about another 61 GB):
+Convert it to an unquantized BF16 GGUF used by both llama.cpp and Catena
+(about another 61 GB):
 
 ```bash
 nix develop --command ./setup-llama-cpp.sh
@@ -55,7 +56,7 @@ nix develop --command env QWEN3_TOKENS=20 \
 ```
 
 The llama.cpp runner offloads every layer to ROCm. This machine is configured
-with a 96 GiB AMDGPU GTT aperture so the 61 GB model and compute buffers fit in
+with a 104 GiB AMDGPU GTT aperture so the 61 GB model and compute buffers fit in
 unified GPU memory. Set `QWEN3_GPU_LAYERS` to override the layer count. Both
 runners use raw text completion because this is a base model, not an
 instruction-tuned model.
@@ -89,6 +90,17 @@ nix develop --command cargo run --release -- \
   "The capital of France is" --max-new-tokens 20
 ```
 
+Catena validates and read-only-maps `model-bf16.gguf`, registers that single
+mapping with HIP, and passes BF16 tensor subranges directly to the generated
+kernels. It neither repacks the 128 experts nor copies the 56.85 GiB BF16
+payload into separate device allocations. llama.cpp's converter stores 48.80
+MiB of small BF16-derived tensors as F32; the loader verifies those values are
+exact BF16 expansions and restores only that subset into 24.40 MiB of device
+memory. Measured loads reached weight readiness in 2.72--2.84 seconds.
+
+Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
+`--model-dir` still selects the directory containing `tokenizer.json`.
+
 Normal inference compiles the complete checked-in `src/catena/qwen3.hex` and
 does not generate its 48-layer entrypoint in Rust. If the layer/weight ABI is
 changed, explicitly regenerate that entrypoint once and review the resulting
@@ -105,8 +117,11 @@ nix develop --command cargo run --release -- \
   "The capital of France is" --max-new-tokens 1000 --ignore-eos
 ```
 
-The current exploratory compiler fork produces the known continuation and
-reaches 10.95 tok/s over 99 cached tokens. Three 999-cached-token runs reached
+The current exploratory compiler fork produces the known continuation. The
+registered-GGUF path reached 10.92 tok/s over 99 cached tokens, versus the
+previous safetensors loader's 10.95 tok/s sample, and a 999-cached-token GGUF
+validation run reached 9.83 tok/s. Three earlier
+999-cached-token safetensors runs reached
 9.90, 9.81, and 9.88 tok/s, a 9.88 tok/s median. That is 51.9% of the recorded
 matched llama.cpp 19.03 tok/s baseline. A later llama.cpp sample reached 20.74
 tok/s. The retained techniques are summarized in
