@@ -22,6 +22,12 @@ pub const WEIGHT_COUNT: usize = 1 + NUM_LAYERS * TENSORS_PER_LAYER + 2;
 pub const MODEL_INPUT_COUNT: usize = 4 + WEIGHT_COUNT;
 pub const KV_CACHE_ELEMENTS_PER_TOKEN: usize = NUM_LAYERS * 2 * NUM_KEY_VALUE_HEADS * HEAD_DIM;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightDtype {
+    F32,
+    Bf16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TensorSource {
     pub name: String,
@@ -35,6 +41,8 @@ pub struct TensorSpec {
     pub name: String,
     /// Tensor name used by llama.cpp's Qwen3-MoE GGUF conversion.
     pub gguf_name: String,
+    /// Element representation consumed by the generated Catena program.
+    pub dtype: WeightDtype,
     pub shape: Vec<usize>,
     pub sources: Vec<TensorSource>,
 }
@@ -44,7 +52,7 @@ impl TensorSpec {
         self.shape.iter().product()
     }
 
-    fn single(name: String, gguf_name: String, shape: Vec<usize>) -> Self {
+    fn single(name: String, gguf_name: String, dtype: WeightDtype, shape: Vec<usize>) -> Self {
         Self {
             sources: vec![TensorSource {
                 name: name.clone(),
@@ -52,6 +60,7 @@ impl TensorSpec {
             }],
             name,
             gguf_name,
+            dtype,
             shape,
         }
     }
@@ -73,6 +82,7 @@ impl TensorSpec {
         Self {
             name: format!("model.layers.{layer}.mlp.experts.{projection}.weight"),
             gguf_name: format!("blk.{layer}.{gguf_projection}.weight"),
+            dtype: WeightDtype::Bf16,
             shape,
             sources,
         }
@@ -86,6 +96,7 @@ pub fn weight_specs() -> Vec<TensorSpec> {
     tensors.push(TensorSpec::single(
         "model.embed_tokens.weight".into(),
         "token_embd.weight".into(),
+        WeightDtype::Bf16,
         vec![VOCAB_SIZE, HIDDEN_SIZE],
     ));
 
@@ -95,46 +106,55 @@ pub fn weight_specs() -> Vec<TensorSpec> {
             TensorSpec::single(
                 format!("{prefix}.input_layernorm.weight"),
                 format!("blk.{layer}.attn_norm.weight"),
+                WeightDtype::F32,
                 vec![HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.q_proj.weight"),
                 format!("blk.{layer}.attn_q.weight"),
+                WeightDtype::Bf16,
                 vec![QUERY_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.k_proj.weight"),
                 format!("blk.{layer}.attn_k.weight"),
+                WeightDtype::Bf16,
                 vec![KEY_VALUE_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.v_proj.weight"),
                 format!("blk.{layer}.attn_v.weight"),
+                WeightDtype::Bf16,
                 vec![KEY_VALUE_SIZE, HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.o_proj.weight"),
                 format!("blk.{layer}.attn_output.weight"),
+                WeightDtype::Bf16,
                 vec![HIDDEN_SIZE, QUERY_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.q_norm.weight"),
                 format!("blk.{layer}.attn_q_norm.weight"),
+                WeightDtype::F32,
                 vec![HEAD_DIM],
             ),
             TensorSpec::single(
                 format!("{prefix}.self_attn.k_norm.weight"),
                 format!("blk.{layer}.attn_k_norm.weight"),
+                WeightDtype::F32,
                 vec![HEAD_DIM],
             ),
             TensorSpec::single(
                 format!("{prefix}.post_attention_layernorm.weight"),
                 format!("blk.{layer}.ffn_norm.weight"),
+                WeightDtype::F32,
                 vec![HIDDEN_SIZE],
             ),
             TensorSpec::single(
                 format!("{prefix}.mlp.gate.weight"),
                 format!("blk.{layer}.ffn_gate_inp.weight"),
+                WeightDtype::F32,
                 vec![NUM_EXPERTS, HIDDEN_SIZE],
             ),
             TensorSpec::experts(
@@ -161,11 +181,13 @@ pub fn weight_specs() -> Vec<TensorSpec> {
     tensors.push(TensorSpec::single(
         "model.norm.weight".into(),
         "output_norm.weight".into(),
+        WeightDtype::F32,
         vec![HIDDEN_SIZE],
     ));
     tensors.push(TensorSpec::single(
         "lm_head.weight".into(),
         "output.weight".into(),
+        WeightDtype::Bf16,
         vec![VOCAB_SIZE, HIDDEN_SIZE],
     ));
     debug_assert_eq!(tensors.len(), WEIGHT_COUNT);
@@ -184,6 +206,20 @@ mod tests {
         assert_eq!(KV_CACHE_ELEMENTS_PER_TOKEN, 49_152);
         assert_eq!(specs.first().unwrap().name, "model.embed_tokens.weight");
         assert_eq!(specs.last().unwrap().name, "lm_head.weight");
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.dtype == WeightDtype::F32)
+                .count(),
+            241
+        );
+        assert_eq!(
+            specs
+                .iter()
+                .filter(|spec| spec.dtype == WeightDtype::Bf16)
+                .count(),
+            338
+        );
         assert_eq!(
             specs.iter().map(|spec| spec.sources.len()).sum::<usize>(),
             18_867

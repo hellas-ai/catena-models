@@ -91,12 +91,12 @@ nix develop --command cargo run --release -- \
 ```
 
 Catena validates and read-only-maps `model-bf16.gguf`, registers that single
-mapping with HIP, and passes BF16 tensor subranges directly to the generated
-kernels. It neither repacks the 128 experts nor copies the 56.85 GiB BF16
-payload into separate device allocations. llama.cpp's converter stores 48.80
-MiB of small BF16-derived tensors as F32; the loader verifies those values are
-exact BF16 expansions and restores only that subset into 24.40 MiB of device
-memory. Measured loads reached weight readiness in 2.72--2.84 seconds.
+mapping with HIP, and passes every tensor subrange directly to the generated
+kernels in its native GGUF representation. The 338 large tensors remain BF16;
+the 241 norms/router tensors emitted by llama.cpp's converter remain F32. The
+loader validates this dtype contract and performs no weight repacking,
+conversion, upload, or per-tensor allocation. Measured warm loads reached
+weight readiness in 2.72--2.84 seconds.
 
 Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
 `--model-dir` still selects the directory containing `tokenizer.json`.

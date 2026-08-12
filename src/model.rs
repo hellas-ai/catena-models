@@ -9,25 +9,18 @@ use catena_lang::{
 
 use crate::{
     catena::MODEL_SOURCE,
-    checkpoint::{Checkpoint, GgufDtype, TensorView, exact_f32_bytes_to_bf16},
+    checkpoint::{Checkpoint, GgufDtype, TensorView},
     spec::{
         KV_CACHE_ELEMENTS_PER_TOKEN, MAX_POSITION_EMBEDDINGS, MODEL_INPUT_COUNT, VOCAB_SIZE,
         WEIGHT_COUNT, weight_specs,
     },
 };
 
-/// Loaded Qwen3 runtime, registered GGUF mapping, and converted small weights.
+/// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
 pub struct Model {
     runtime: Runtime,
-    weights: Vec<Weight>,
+    weights: Vec<TensorView>,
     checkpoint: Checkpoint,
-}
-
-enum Weight {
-    /// BF16 payload read directly from the HIP-registered GGUF mapping.
-    Mapped(TensorView),
-    /// Small F32 GGUF tensors restored to their original BF16 representation.
-    Converted(MemOwn),
 }
 
 impl Model {
@@ -42,46 +35,27 @@ impl Model {
                 .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open(gguf_path)?;
         let mut weights = Vec::with_capacity(WEIGHT_COUNT);
-        let mut mapped_bytes = 0_usize;
-        let mut converted_source_bytes = 0_usize;
-        let mut converted_device_bytes = 0_usize;
+        let mut mapped_bf16_bytes = 0_usize;
+        let mut mapped_f32_bytes = 0_usize;
         for spec in weight_specs() {
             let view = checkpoint
                 .tensor_view(&spec)
                 .with_context(|| format!("failed to locate {}", spec.name))?;
             match view.dtype {
-                GgufDtype::Bf16 => {
-                    mapped_bytes += view.byte_len;
-                    weights.push(Weight::Mapped(view));
-                }
-                GgufDtype::F32 => {
-                    let values = exact_f32_bytes_to_bf16(checkpoint.tensor_bytes(&view)?)
-                        .with_context(|| format!("failed to restore {} to BF16", spec.name))?;
-                    ensure!(
-                        values.len() == spec.element_count(),
-                        "restored tensor {} has {} elements, expected {}",
-                        spec.name,
-                        values.len(),
-                        spec.element_count()
-                    );
-                    converted_source_bytes += view.byte_len;
-                    converted_device_bytes += values.len() * std::mem::size_of::<u16>();
-                    weights.push(Weight::Converted(runtime.mem_u16(&values).with_context(
-                        || format!("failed to upload restored {}", spec.name),
-                    )?));
-                }
+                GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
+                GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
             }
+            weights.push(view);
         }
         ensure!(
             weights.len() == WEIGHT_COUNT,
             "internal weight ABI mismatch"
         );
         eprintln!(
-            "registered {:.2} GiB GGUF; {:.2} GiB BF16 mapped zero-copy, {:.2} MiB F32 restored into {:.2} MiB BF16",
+            "registered {:.2} GiB GGUF; {:.2} GiB BF16 and {:.2} MiB F32 mapped zero-copy in native storage",
             checkpoint.registered_byte_len() as f64 / (1_u64 << 30) as f64,
-            mapped_bytes as f64 / (1_u64 << 30) as f64,
-            converted_source_bytes as f64 / (1_u64 << 20) as f64,
-            converted_device_bytes as f64 / (1_u64 << 20) as f64,
+            mapped_bf16_bytes as f64 / (1_u64 << 30) as f64,
+            mapped_f32_bytes as f64 / (1_u64 << 20) as f64,
         );
         Ok(Self {
             runtime,
@@ -149,10 +123,7 @@ impl Model {
             (start as u64).into(),
         ]);
         for weight in &self.weights {
-            inputs.push(match weight {
-                Weight::Mapped(view) => self.checkpoint.mapped_ref(view)?.into(),
-                Weight::Converted(memory) => memory.as_ref().into(),
-            });
+            inputs.push(self.checkpoint.mapped_ref(weight)?.into());
         }
         ensure!(
             inputs.len() == MODEL_INPUT_COUNT,

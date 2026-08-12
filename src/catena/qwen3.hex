@@ -429,9 +429,9 @@
   ([.projection] mem.cast.f32 [projection-count projection-buffer.])
   ({[.projection-count] [.projection-buffer] [.flat-index]}
     qwen3.f32-buffer-at [projection-value.])
-  ([.norm-weight] mem.cast.bf16 [norm-count norm-buffer.])
+  ([.norm-weight] mem.cast.f32 [norm-count norm-buffer.])
   ({[.norm-count] [.norm-buffer] [.channel]}
-    qwen3.bf16-buffer-at bf16.to-f32 [norm-value.])
+    qwen3.f32-buffer-at [norm-value.])
   ([.inverse] mem.cast.f32 [inverse-count inverse-buffer.])
   ({[.inverse-count] [.inverse-buffer] [.head]}
     qwen3.f32-buffer-at [inverse-rms.])
@@ -493,9 +493,9 @@
   ([.hidden] mem.cast.f32 [hidden-count hidden-buffer.])
   ({[.hidden-count] [.hidden-buffer] [.flat-index]}
     qwen3.f32-buffer-at [hidden-value.])
-  ([.norm-weight] mem.cast.bf16 [norm-count norm-buffer.])
+  ([.norm-weight] mem.cast.f32 [norm-count norm-buffer.])
   ({[.norm-count] [.norm-buffer] [.channel]}
-    qwen3.bf16-buffer-at bf16.to-f32 [norm-value.])
+    qwen3.f32-buffer-at [norm-value.])
   ([.inverse-buffer] mem.cast.f32 [inverse-count inverse-values.])
   ({[.inverse-count] [.inverse-values] [.row]}
     qwen3.f32-buffer-at [inverse-rms.])
@@ -547,12 +547,12 @@
   ([.output-channel hidden-size] u64.mul [weight-row-offset.])
   ([.weight-row-offset input-channel] u64.add [weight-index.])
   ([.hidden] mem.cast.f32 [hidden-count hidden-buffer.])
-  ([.norm-weight] mem.cast.bf16 [norm-count norm-buffer.])
+  ([.norm-weight] mem.cast.f32 [norm-count norm-buffer.])
   ([.linear-weight] mem.cast.bf16 [weight-count weight-buffer.])
   ({[.hidden-count] [.hidden-buffer] [.hidden-index]}
     qwen3.f32-buffer-at [hidden-value.])
   ({[.norm-count] [.norm-buffer] [.input-channel]}
-    qwen3.bf16-buffer-at bf16.to-f32 [norm-value.])
+    qwen3.f32-buffer-at [norm-value.])
   ({[.weight-count] [.weight-buffer] [.weight-index]}
     qwen3.bf16-buffer-at bf16.to-f32 [weight-value.])
   ([.hidden-value norm-value] f32.mul [normalized-unscaled.])
@@ -700,7 +700,7 @@
   ({[.output-count] [.output]} buf.to-mem)
 ))
 
-# One term of a bias-free projection from an already normalized 576-wide row.
+# One term of the native-F32 router projection from an already normalized row.
 (def program qwen3.linear-reduce-term-at :
   ([n k.] {
     ({
@@ -730,9 +730,9 @@
   ([.input] mem.cast.f32 [input-count input-buffer.])
   ({[.input-count] [.input-buffer] [.flat-input-index]}
     qwen3.f32-buffer-at [input-value.])
-  ([.linear-weight] mem.cast.bf16 [weight-count weight-buffer.])
+  ([.linear-weight] mem.cast.f32 [weight-count weight-buffer.])
   ({[.weight-count] [.weight-buffer] [.weight-index]}
-    qwen3.bf16-buffer-at bf16.to-f32 [weight-value.])
+    qwen3.f32-buffer-at [weight-value.])
   ([.input-value weight-value] f32.mul [result.])
   [.result]
 ))
@@ -755,6 +755,7 @@
   [.sum]
 ))
 
+# The GGUF stores router matrices as F32; this path consumes them directly.
 (def program qwen3.linear :
   {(cap.own mem) (cap.ref mem) (u64 val)}
   ->

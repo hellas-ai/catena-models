@@ -59,22 +59,32 @@ split into borrowed `MemRef`s whose lifetime is tied to the registration;
 registration is released before the mmap. No mapped pointer is given `MemOwn`
 ownership.
 
-Of the 56.90 GiB file, 56.85 GiB is BF16 tensor payload read directly by the
-kernels. llama.cpp's converter stores 48.80 MiB of small norms/router weights
-as F32. Every one of those values is verified to have zero low 16 bits before
-its original BF16 high word is uploaded, producing only 24.40 MiB of copied
-device weights. This validation makes the conversion bit-exact rather than a
-new rounding step.
+Of the 56.90 GiB file, 56.85 GiB is BF16 tensor payload and 48.80 MiB is F32
+norm/router payload. An initial version verified that every F32 value had zero
+low 16 bits, restored its BF16 high word, and uploaded 24.40 MiB of copied
+device weights. The retained native-dtype version removes that final setup
+step: all 579 tensor ranges are borrowed directly from the registered mapping.
+The Catena norm and router consumers now load the 241 F32 tensors as F32, while
+embeddings, projections, expert matrices, and the LM head continue to load the
+338 BF16 tensors as BF16. `TensorSpec` records this per-role contract and GGUF
+validation rejects a dtype mismatch before inference.
 
-Observed load-to-ready times were 2.72--2.84 seconds. The eight-token
-known continuation stayed exactly ` Paris. Which of the following options
-correctly`. A 99-cached-token run measured 10.92 tok/s versus the earlier 10.95
-tok/s sample. A full 999-cached-token validation measured 9.83 tok/s, or 51.7%
-of the matched 19.03 tok/s llama.cpp baseline. The loading change therefore
-retained both short and sustained throughput while removing the model-sized
-repack/upload and duplicate allocation. This mode is specific to the tested
-HIP unified-memory APU for now; discrete hardware must benchmark registered
-host access against an ordinary device upload.
+This change does not alter a reduction tree or introduce a compiler feature.
+For the tested GGUF, the earlier exhaustive low-word validation established
+that each native F32 operand has exactly the bits previously reconstructed by
+`bf16.to-f32`, so removing the storage round trip does not change the arithmetic
+inputs. A future GGUF with additional F32 precision would now preserve that
+precision instead of silently truncating it; checkpoint identity is therefore
+part of the reproducibility contract.
+
+Observed load-to-ready times were 2.72--2.84 seconds. The native-dtype version
+kept the eight-token continuation exactly ` Paris. Which of the following
+options correctly`; one 99-cached-token run measured 10.33 tok/s. The preceding
+conversion-based registered loader measured 10.92 tok/s over 99 cached tokens
+and 9.83 tok/s over 999, so a repeated long native-dtype comparison remains to
+be run. This mode is specific to the tested HIP unified-memory APU for now;
+discrete hardware must benchmark registered host access against an ordinary
+device upload.
 
 ## Catena-owned deterministic RoPE construction (kept)
 

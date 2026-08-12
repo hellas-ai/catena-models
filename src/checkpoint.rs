@@ -12,7 +12,7 @@ use catena_lang::{codegen::GpuDialect, runtime::MemRef};
 use libloading::{Library, Symbol};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::spec::{TensorSpec, WEIGHT_COUNT, weight_specs};
+use crate::spec::{TensorSpec, WEIGHT_COUNT, WeightDtype, weight_specs};
 
 const GGUF_MAGIC: u32 = 0x4655_4747;
 const GGUF_VERSION: u32 = 3;
@@ -93,23 +93,8 @@ impl Checkpoint {
         self.file.tensor_view(spec)
     }
 
-    pub fn tensor_bytes<'a>(&'a self, view: &TensorView) -> Result<&'a [u8]> {
-        let end = view
-            .file_offset
-            .checked_add(view.byte_len)
-            .context("GGUF tensor byte range overflowed")?;
-        self.file
-            .bytes
-            .get(view.file_offset..end)
-            .context("validated GGUF tensor range became unavailable")
-    }
-
     /// Borrow one registered GGUF payload range as HIP-visible memory.
     pub fn mapped_ref<'a>(&'a self, view: &TensorView) -> Result<MemRef<'a>> {
-        ensure!(
-            view.dtype == GgufDtype::Bf16,
-            "only BF16 GGUF tensors may be passed through the zero-copy path"
-        );
         let end = view
             .file_offset
             .checked_add(view.byte_len)
@@ -229,6 +214,18 @@ impl GgufFile {
             spec.gguf_name,
             info.shape,
             spec.shape,
+            spec.name
+        );
+        let expected_dtype = match spec.dtype {
+            WeightDtype::F32 => GgufDtype::F32,
+            WeightDtype::Bf16 => GgufDtype::Bf16,
+        };
+        ensure!(
+            info.dtype == expected_dtype,
+            "GGUF tensor {} has dtype {:?}, expected {:?} for {}",
+            spec.gguf_name,
+            info.dtype,
+            expected_dtype,
             spec.name
         );
         let element_count = spec
@@ -598,51 +595,11 @@ impl<'a> Cursor<'a> {
     }
 }
 
-/// Restore BF16 words that llama.cpp's GGUF converter promoted exactly to F32.
-pub fn exact_f32_bytes_to_bf16(bytes: &[u8]) -> Result<Vec<u16>> {
-    ensure!(
-        bytes.len().is_multiple_of(4),
-        "F32 tensor byte length is not divisible by four"
-    );
-    bytes
-        .chunks_exact(4)
-        .enumerate()
-        .map(|(index, bytes)| {
-            let bits = u32::from_le_bytes(bytes.try_into().unwrap());
-            ensure!(
-                bits & 0xffff == 0,
-                "GGUF F32 value {index} is not an exact BF16 expansion (bits=0x{bits:08x})"
-            );
-            Ok((bits >> 16) as u16)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const GGUF_PATH: &str = "models/Qwen3-30B-A3B-Base/model-bf16.gguf";
-
-    #[test]
-    fn exact_f32_conversion_preserves_high_words() -> Result<()> {
-        let words = [0x0000_0000_u32, 0x3f80_0000, 0xc020_0000, 0x7fc0_0000];
-        let bytes = words
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            exact_f32_bytes_to_bf16(&bytes)?,
-            [0x0000, 0x3f80, 0xc020, 0x7fc0]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn exact_f32_conversion_rejects_new_precision() {
-        let error = exact_f32_bytes_to_bf16(&1.000_000_1_f32.to_bits().to_le_bytes()).unwrap_err();
-        assert!(error.to_string().contains("not an exact BF16 expansion"));
-    }
 
     #[test]
     fn validates_downloaded_gguf_when_present() -> Result<()> {
@@ -658,11 +615,6 @@ mod tests {
             let norm = file.tensor_view(&specs[1])?;
             assert_eq!(norm.dtype, GgufDtype::F32);
             assert_eq!(norm.byte_len, 2_048 * 4);
-            exact_f32_bytes_to_bf16(
-                file.bytes
-                    .get(norm.file_offset..norm.file_offset + norm.byte_len)
-                    .context("norm range")?,
-            )?;
         }
         Ok(())
     }

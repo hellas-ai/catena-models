@@ -89,14 +89,19 @@ once at the Catena program boundary.
 ## Registered GGUF weight views
 
 The Qwen runner validates and read-only-maps the offline-packed BF16 GGUF once,
-registers the complete mapping with HIP, and passes its BF16 tensor ranges as
-borrowed `MemRef`s. This removes the model-sized safetensors repack, upload, and
-duplicate allocation. Only 48.80 MiB of GGUF tensors promoted exactly to F32
-are verified and restored into 24.40 MiB of BF16 device allocations. Observed
-weight readiness fell to 2.72--2.84 seconds, while the known continuation and
-short cached throughput were retained (10.92 tok/s over 99 cached tokens versus
-the earlier 10.95 tok/s sample). A 999-cached-token validation reached 9.83
-tok/s, or 51.7% of the matched 19.03 tok/s llama.cpp baseline.
+registers the complete mapping with HIP, and passes all 579 tensor ranges as
+borrowed `MemRef`s in their native GGUF storage. This removes the model-sized
+safetensors repack, upload, and duplicate allocation. The Catena consumers use
+BF16 for the 338 large tensors and F32 for the 241 norms/router tensors, so the
+remaining 48.80 MiB F32-to-BF16 setup conversion and its 24.40 MiB of device
+allocations are also gone. The loader validates the per-role dtype contract.
+
+Observed warm weight readiness remained 2.72--2.84 seconds. The eight-token
+known continuation was unchanged, and one 99-cached-token native-dtype run
+measured 10.33 tok/s, or 54.3% of the matched 19.03 tok/s llama.cpp baseline.
+The preceding conversion-based loader measured 10.92 tok/s over 99 cached
+tokens and 9.83 tok/s over 999; a matched long native-dtype median has not yet
+been recorded.
 
 ## Persistent KV cache
 
