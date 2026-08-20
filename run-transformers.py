@@ -16,9 +16,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Greedy Qwen3-30B-A3B-Base generation through Transformers"
     )
-    parser.add_argument("prompt", nargs="?", default="The capital of France is")
+    parser.add_argument("--prompt", nargs="?", default="The capital of France is")
     parser.add_argument(
-        "--model-dir", type=Path, default=Path("models/Qwen3-30B-A3B-Base")
+        "--model-dir", type=Path, default=Path("Qwen/Qwen3-30B-A3B-Base")
     )
     parser.add_argument("-n", "--max-new-tokens", type=int, default=20)
     parser.add_argument(
@@ -52,13 +52,13 @@ def main() -> None:
         raise SystemExit("CUDA/ROCm PyTorch is not available in this environment")
 
     load_started = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
     model = AutoModelForCausalLM.from_pretrained(
         args.model_dir,
-        local_files_only=True,
         dtype=torch.bfloat16,
+        device_map=device,
         attn_implementation="eager",
-    ).eval().to(device)
+    ).eval()
     load_seconds = time.perf_counter() - load_started
 
     encoded = tokenizer(
