@@ -12,7 +12,7 @@ use catena_lang::{codegen::GpuDialect, runtime::MemRef};
 use libloading::{Library, Symbol};
 use memmap2::{Mmap, MmapOptions};
 
-use crate::spec::{TensorSpec, WEIGHT_COUNT, WeightDtype, weight_specs};
+use crate::spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype, weight_specs};
 
 const GGUF_MAGIC: u32 = 0x4655_4747;
 const GGUF_VERSION: u32 = 3;
@@ -101,13 +101,14 @@ struct RegisteredGgufFile {
 impl Checkpoint {
     /// Open either one GGUF, any member of a standard GGUF shard set, or a
     /// directory containing GGUF shards.
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>, config: &ModelConfig) -> Result<Self> {
+        let specs = weight_specs(config)?;
         let paths = resolve_gguf_paths(path.as_ref())?;
         let files = paths
             .iter()
             .map(GgufFile::open)
             .collect::<Result<Vec<_>>>()?;
-        let tensor_files = validate_files(&files)?;
+        let tensor_files = validate_files(&files, &specs)?;
         let registered_files = files
             .into_iter()
             .map(|file| {
@@ -256,8 +257,171 @@ pub(crate) fn read_gguf_tokenizer_metadata(
         .with_context(|| format!("failed to parse GGUF tokenizer metadata {}", path.display()))
 }
 
-fn validate_files(files: &[GgufFile]) -> Result<HashMap<String, usize>> {
-    let mut tensor_files = HashMap::with_capacity(WEIGHT_COUNT);
+pub fn read_gguf_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
+    let paths = resolve_gguf_paths(path.as_ref())?;
+    let path = paths
+        .first()
+        .context("GGUF path resolution returned no files")?;
+    let file = File::open(path)
+        .with_context(|| format!("failed to open GGUF metadata source {}", path.display()))?;
+    // SAFETY: this temporary read-only mapping is used only for header metadata.
+    let bytes = unsafe { MmapOptions::new().map(&file) }
+        .with_context(|| format!("failed to map GGUF metadata source {}", path.display()))?;
+    parse_gguf_model_config(&bytes)
+        .with_context(|| format!("failed to parse model metadata from {}", path.display()))
+}
+
+/// Validate every tensor header in a shard set without registering or reading
+/// the tensor payloads.
+pub fn validate_gguf_tensors(path: impl AsRef<Path>, config: &ModelConfig) -> Result<()> {
+    let specs = weight_specs(config)?;
+    let files = resolve_gguf_paths(path.as_ref())?
+        .iter()
+        .map(GgufFile::open)
+        .collect::<Result<Vec<_>>>()?;
+    validate_files(&files, &specs)?;
+    Ok(())
+}
+
+#[derive(Debug)]
+enum ScalarMetadata {
+    Unsigned(usize),
+    Float(f32),
+}
+
+fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
+    let mut cursor = Cursor::new(bytes);
+    ensure!(cursor.u32()? == GGUF_MAGIC, "file does not have GGUF magic");
+    ensure!(
+        cursor.u32()? == GGUF_VERSION,
+        "only GGUF version {GGUF_VERSION} is supported"
+    );
+    let _tensor_count = cursor.usize_u64("tensor count")?;
+    let metadata_count = cursor.usize_u64("metadata count")?;
+    let mut architecture = None;
+    let mut values = HashMap::new();
+    let mut eos_token_id = None;
+    let mut tokenizer_vocabulary_size = None;
+    for _ in 0..metadata_count {
+        let key = cursor.string("metadata key")?.to_owned();
+        let ty = ValueType::from_u32(cursor.u32()?)?;
+        if key == "general.architecture" {
+            architecture = Some(cursor.string_value(ty, &key)?.to_owned());
+        } else if key == "tokenizer.ggml.tokens" {
+            let (element_type, len) = cursor.array_header(ty, &key)?;
+            ensure!(
+                matches!(element_type, ValueType::String),
+                "GGUF tokenizer.ggml.tokens is not a string array"
+            );
+            tokenizer_vocabulary_size = Some(len);
+            for _ in 0..len {
+                cursor.skip_value(element_type, 1)?;
+            }
+        } else if key == "tokenizer.ggml.eos_token_id" {
+            eos_token_id = Some(cursor.unsigned_value(ty, &key)? as u64);
+        } else if is_model_scalar_key(&key) {
+            let value = match ty {
+                ValueType::F32 => ScalarMetadata::Float(cursor.f32()?),
+                ValueType::F64 => ScalarMetadata::Float(cursor.f64()? as f32),
+                _ => ScalarMetadata::Unsigned(cursor.unsigned_value(ty, &key)?),
+            };
+            values.insert(key, value);
+        } else {
+            cursor.skip_value(ty, 0)?;
+        }
+    }
+    let architecture_name = architecture.context("GGUF is missing general.architecture")?;
+    let architecture = match architecture_name.as_str() {
+        "qwen3moe" => ModelArchitecture::Qwen3Moe,
+        "qwen35moe" | "qwen35" => ModelArchitecture::Qwen35Moe,
+        other => bail!("unsupported GGUF architecture {other:?}; expected qwen3moe or qwen35moe"),
+    };
+    let prefix = architecture_name.as_str();
+    let u = |suffix: &str| -> Result<usize> {
+        let key = format!("{prefix}.{suffix}");
+        match values.get(&key) {
+            Some(ScalarMetadata::Unsigned(value)) => Ok(*value),
+            Some(ScalarMetadata::Float(_)) => bail!("GGUF {key} is not an integer"),
+            None => bail!("GGUF is missing {key}"),
+        }
+    };
+    let optional_u = |suffix: &str| -> Result<Option<usize>> {
+        let key = format!("{prefix}.{suffix}");
+        match values.get(&key) {
+            Some(ScalarMetadata::Unsigned(value)) => Ok(Some(*value)),
+            Some(ScalarMetadata::Float(_)) => bail!("GGUF {key} is not an integer"),
+            None => Ok(None),
+        }
+    };
+    let f = |suffix: &str| -> Result<f32> {
+        let key = format!("{prefix}.{suffix}");
+        match values.get(&key) {
+            Some(ScalarMetadata::Float(value)) => Ok(*value),
+            Some(ScalarMetadata::Unsigned(value)) => Ok(*value as f32),
+            None => bail!("GGUF is missing {key}"),
+        }
+    };
+    let head_dim = optional_u("attention.key_length")?
+        .unwrap_or(u("embedding_length")? / u("attention.head_count")?);
+    let config = ModelConfig {
+        architecture,
+        vocabulary_size: optional_u("vocab_size")?
+            .or(tokenizer_vocabulary_size)
+            .context("GGUF has neither architecture vocab_size nor tokenizer tokens")?,
+        hidden_size: u("embedding_length")?,
+        intermediate_size: u("expert_feed_forward_length")?,
+        num_layers: u("block_count")?,
+        num_attention_heads: u("attention.head_count")?,
+        num_key_value_heads: u("attention.head_count_kv")?,
+        head_dim,
+        max_position_embeddings: u("context_length")?,
+        rms_norm_eps: f("attention.layer_norm_rms_epsilon")?,
+        rope_theta: f("rope.freq_base")?,
+        rope_dimension_count: optional_u("rope.dimension_count")?.unwrap_or(head_dim),
+        num_experts: u("expert_count")?,
+        experts_per_token: u("expert_used_count")?,
+        shared_expert_intermediate_size: optional_u("expert_shared_feed_forward_length")?,
+        full_attention_interval: optional_u("full_attention_interval")?,
+        linear_conv_kernel: optional_u("ssm.conv_kernel")?,
+        linear_state_size: optional_u("ssm.state_size")?,
+        linear_group_count: optional_u("ssm.group_count")?,
+        linear_time_step_rank: optional_u("ssm.time_step_rank")?,
+        linear_inner_size: optional_u("ssm.inner_size")?,
+        eos_token_id,
+    };
+    config.validate()?;
+    Ok(config)
+}
+
+fn is_model_scalar_key(key: &str) -> bool {
+    [
+        ".vocab_size",
+        ".embedding_length",
+        ".expert_feed_forward_length",
+        ".block_count",
+        ".attention.head_count",
+        ".attention.head_count_kv",
+        ".attention.key_length",
+        ".context_length",
+        ".attention.layer_norm_rms_epsilon",
+        ".rope.freq_base",
+        ".rope.dimension_count",
+        ".expert_count",
+        ".expert_used_count",
+        ".expert_shared_feed_forward_length",
+        ".full_attention_interval",
+        ".ssm.conv_kernel",
+        ".ssm.state_size",
+        ".ssm.group_count",
+        ".ssm.time_step_rank",
+        ".ssm.inner_size",
+    ]
+    .iter()
+    .any(|suffix| key.ends_with(suffix))
+}
+
+fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<String, usize>> {
+    let mut tensor_files = HashMap::with_capacity(specs.len());
     for (file_index, file) in files.iter().enumerate() {
         for name in file.tensors.keys() {
             if let Some(previous_index) = tensor_files.insert(name.clone(), file_index) {
@@ -271,11 +435,11 @@ fn validate_files(files: &[GgufFile]) -> Result<HashMap<String, usize>> {
     }
 
     ensure!(
-        tensor_files.len() == WEIGHT_COUNT,
-        "GGUF shard set contains {} tensors, expected {WEIGHT_COUNT}",
-        tensor_files.len()
+        tensor_files.len() == specs.len(),
+        "GGUF shard set contains {} tensors, expected {} for selected model",
+        tensor_files.len(),
+        specs.len()
     );
-    let specs = weight_specs();
     let expected_names = specs
         .iter()
         .map(|spec| spec.gguf_name.as_str())
@@ -752,6 +916,14 @@ impl<'a> Cursor<'a> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
 
+    fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_le_bytes(self.take(4)?.try_into().unwrap()))
+    }
+
+    fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+
     fn usize_u64(&mut self, label: &str) -> Result<usize> {
         usize::try_from(self.u64()?).with_context(|| format!("GGUF {label} exceeds usize"))
     }
@@ -996,9 +1168,9 @@ mod tests {
         let path = Path::new(GGUF_PATH);
         if path.exists() {
             let file = GgufFile::open(path)?;
-            assert_eq!(file.tensors.len(), WEIGHT_COUNT);
+            assert_eq!(file.tensors.len(), 579);
             assert_eq!(file.data_start, 5_969_472);
-            let specs = weight_specs();
+            let specs = weight_specs(&ModelConfig::qwen3_30b())?;
             for spec in &specs {
                 file.tensor_view(spec, 0)?;
             }
@@ -1009,6 +1181,25 @@ mod tests {
             assert_eq!(norm.dtype, GgufDtype::F32);
             assert_eq!(norm.byte_len, 2_048 * 4);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn reads_qwen36_hybrid_configuration_when_present() -> Result<()> {
+        let Some(path) = std::env::var_os("CATENA_QWEN36_GGUF").map(PathBuf::from) else {
+            return Ok(());
+        };
+        let config = read_gguf_model_config(&path)?;
+        assert_eq!(config.architecture, ModelArchitecture::Qwen35Moe);
+        assert_eq!(config.vocabulary_size, 248_320);
+        assert_eq!(config.hidden_size, 2_048);
+        assert_eq!(config.num_layers, 40);
+        assert_eq!(config.num_attention_heads, 16);
+        assert_eq!(config.num_key_value_heads, 2);
+        assert_eq!(config.head_dim, 256);
+        assert_eq!(config.full_attention_interval, Some(4));
+        assert_eq!(weight_specs(&config)?.len(), 733);
+        validate_gguf_tensors(&path, &config)?;
         Ok(())
     }
 }

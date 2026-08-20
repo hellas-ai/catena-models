@@ -7,7 +7,8 @@ use std::{
 
 use anyhow::{Result, ensure};
 use catena_qwen3::{
-    catena::generated_model_source, model::Model, spec::EOS_TOKEN_ID, tokenizer::QwenTokenizer,
+    catena::generated_model_source_for, checkpoint::read_gguf_model_config, model::Model,
+    tokenizer::QwenTokenizer,
 };
 use clap::Parser;
 
@@ -45,9 +46,14 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let selected_gguf = args
+        .gguf
+        .clone()
+        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
     if args.generate_entrypoint {
+        let config = read_gguf_model_config(&selected_gguf)?;
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/catena/qwen3.hex");
-        std::fs::write(&path, generated_model_source())?;
+        std::fs::write(&path, generated_model_source_for(&config)?)?;
         println!("regenerated {}", path.display());
         return Ok(());
     }
@@ -56,9 +62,7 @@ fn main() -> Result<()> {
         .prompt
         .as_deref()
         .expect("clap requires a prompt unless entrypoint generation was selected");
-    let gguf_path = args
-        .gguf
-        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
+    let gguf_path = selected_gguf;
     let tokenizer = if let Some(tokenizer_path) = args.tokenizer {
         QwenTokenizer::open(tokenizer_path)?
     } else if let Some(tokenizer) = QwenTokenizer::from_gguf(&gguf_path)? {
@@ -75,6 +79,7 @@ fn main() -> Result<()> {
 
     let load_started = Instant::now();
     let model = Model::load_gguf(&gguf_path)?;
+    let eos_token_id = model.config().eos_token_id;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
         load_started.elapsed()
@@ -168,7 +173,7 @@ fn main() -> Result<()> {
             write!(stdout, "{chunk}")?;
             stdout.flush()?;
         }
-        if token == EOS_TOKEN_ID && !args.ignore_eos {
+        if Some(token) == eos_token_id && !args.ignore_eos {
             break;
         }
     }

@@ -1,6 +1,8 @@
 use std::fmt::Write;
 
-use crate::spec::{NUM_LAYERS, TENSORS_PER_LAYER, WEIGHT_COUNT};
+use anyhow::{Result, ensure};
+
+use crate::spec::{ModelArchitecture, ModelConfig, NUM_LAYERS, TENSORS_PER_LAYER, WEIGHT_COUNT};
 
 /// Complete checked-in Catena program used by normal inference.
 pub const MODEL_SOURCE: &str = include_str!("catena/qwen3.hex");
@@ -101,6 +103,30 @@ pub fn generated_model_source() -> String {
     writeln!(source, "    [.cache-{NUM_LAYERS:02}]").unwrap();
     source.push_str("    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)\n    ({[.one] [.next-token-buffer]} buf.to-mem)\n  }\n))\n");
     source
+}
+
+/// Generate the source for a selected GGUF configuration. The current Catena
+/// core implements conventional Qwen3 MoE attention only; rejecting the hybrid
+/// architecture here prevents writing a plausible-looking but invalid program.
+pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
+    let legacy = ModelConfig::qwen3_30b();
+    ensure!(
+        config.architecture == ModelArchitecture::Qwen3Moe,
+        "Qwen3.5/3.6 source generation requires gated-delta-net, shared-expert, \
+         gated-attention, partial-RoPE, and offset-RMSNorm Catena primitives"
+    );
+    ensure!(
+        config.hidden_size == legacy.hidden_size
+            && config.intermediate_size == legacy.intermediate_size
+            && config.num_layers == legacy.num_layers
+            && config.num_attention_heads == legacy.num_attention_heads
+            && config.num_key_value_heads == legacy.num_key_value_heads
+            && config.head_dim == legacy.head_dim
+            && config.num_experts == legacy.num_experts
+            && config.experts_per_token == legacy.experts_per_token,
+        "the checked-in Catena core does not yet parameterize all model dimensions"
+    );
+    Ok(generated_model_source())
 }
 
 #[cfg(test)]

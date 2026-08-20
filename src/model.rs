@@ -9,11 +9,8 @@ use catena_lang::{
 
 use crate::{
     catena::MODEL_SOURCE,
-    checkpoint::{Checkpoint, GgufDtype, TensorView},
-    spec::{
-        KV_CACHE_ELEMENTS_PER_TOKEN, MAX_POSITION_EMBEDDINGS, MODEL_INPUT_COUNT, VOCAB_SIZE,
-        WEIGHT_COUNT, weight_specs,
-    },
+    checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
+    spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 
 /// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
@@ -21,6 +18,7 @@ pub struct Model {
     runtime: Runtime,
     weights: Vec<TensorView>,
     checkpoint: Checkpoint,
+    config: ModelConfig,
 }
 
 impl Model {
@@ -30,14 +28,16 @@ impl Model {
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
         let gguf_path = gguf_path.as_ref();
+        let config = read_gguf_model_config(gguf_path)?;
+        let specs = weight_specs(&config)?;
         let runtime =
             Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)
                 .context("failed to compile the Qwen3 Catena GPU program")?;
-        let checkpoint = Checkpoint::open(gguf_path)?;
-        let mut weights = Vec::with_capacity(WEIGHT_COUNT);
+        let checkpoint = Checkpoint::open(gguf_path, &config)?;
+        let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
         let mut mapped_f32_bytes = 0_usize;
-        for spec in weight_specs() {
+        for spec in specs {
             let view = checkpoint
                 .tensor_view(&spec)
                 .with_context(|| format!("failed to locate {}", spec.name))?;
@@ -48,8 +48,8 @@ impl Model {
             weights.push(view);
         }
         ensure!(
-            weights.len() == WEIGHT_COUNT,
-            "internal weight ABI mismatch"
+            weights.len() + 4 == config_model_input_count(&config),
+            "internal model weight ABI mismatch"
         );
         eprintln!(
             "registered {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 mapped zero-copy in native storage",
@@ -62,22 +62,30 @@ impl Model {
             runtime,
             weights,
             checkpoint,
+            config,
         })
+    }
+
+    pub fn config(&self) -> &ModelConfig {
+        &self.config
     }
 
     /// Run a full causal prefill and return final-position vocabulary logits.
     pub fn logits(&self, tokens: &[u64]) -> Result<Vec<f32>> {
+        self.ensure_execution_supported()?;
         let cache = self.allocate_cache(tokens.len())?;
         let (_cache, logits, _next_token) = self.cached_outputs(tokens, 0, tokens.len(), cache)?;
-        read_logits(logits)
+        read_logits(logits, self.config.vocabulary_size)
     }
 
     pub fn session(&self, capacity: usize) -> Result<Session<'_>> {
         ensure!(capacity > 0, "cache capacity must be non-zero");
         ensure!(
-            capacity <= MAX_POSITION_EMBEDDINGS,
-            "cache capacity {capacity} exceeds the model maximum {MAX_POSITION_EMBEDDINGS}"
+            capacity <= self.config.max_position_embeddings,
+            "cache capacity {capacity} exceeds the model maximum {}",
+            self.config.max_position_embeddings
         );
+        self.ensure_execution_supported()?;
         Ok(Session {
             model: self,
             cache: Some(self.allocate_cache(capacity)?),
@@ -88,7 +96,9 @@ impl Model {
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
         let elements = capacity
-            .checked_mul(KV_CACHE_ELEMENTS_PER_TOKEN)
+            .checked_mul(
+                self.config.num_layers * 2 * self.config.num_key_value_heads * self.config.head_dim,
+            )
             .context("KV cache element count overflowed")?;
         self.runtime
             .mem_f32_zeroed(elements)
@@ -102,6 +112,7 @@ impl Model {
         capacity: usize,
         cache: MemOwn,
     ) -> Result<(MemOwn, MemOwn, u64)> {
+        self.ensure_execution_supported()?;
         ensure!(!tokens.is_empty(), "the token prefix must not be empty");
         ensure!(
             start
@@ -111,12 +122,15 @@ impl Model {
             start.saturating_add(tokens.len())
         );
         ensure!(
-            tokens.iter().all(|&token| token < VOCAB_SIZE as u64),
-            "token prefix contains an ID outside the {VOCAB_SIZE}-token vocabulary"
+            tokens
+                .iter()
+                .all(|&token| token < self.config.vocabulary_size as u64),
+            "token prefix contains an ID outside the {}-token vocabulary",
+            self.config.vocabulary_size
         );
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
-        let mut inputs = Vec::with_capacity(MODEL_INPUT_COUNT);
+        let mut inputs = Vec::with_capacity(config_model_input_count(&self.config));
         inputs.extend([
             token_buffer.as_ref().into(),
             cache.into(),
@@ -127,7 +141,7 @@ impl Model {
             inputs.push(self.checkpoint.mapped_ref(weight)?.into());
         }
         ensure!(
-            inputs.len() == MODEL_INPUT_COUNT,
+            inputs.len() == config_model_input_count(&self.config),
             "internal model ABI mismatch"
         );
         let mut outputs = self.runtime.exec_values("qwen3", inputs)?;
@@ -152,16 +166,27 @@ impl Model {
             );
         };
         ensure!(
-            *next_token < VOCAB_SIZE as u64,
+            *next_token < self.config.vocabulary_size as u64,
             "qwen3 returned next-token ID {next_token} outside the vocabulary"
         );
         Ok((cache, logits_output, *next_token))
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
+        self.ensure_execution_supported()?;
         let cache = self.allocate_cache(tokens.len())?;
         let (_cache, _logits, next_token) = self.cached_outputs(tokens, 0, tokens.len(), cache)?;
         Ok(next_token)
+    }
+
+    fn ensure_execution_supported(&self) -> Result<()> {
+        ensure!(
+            self.config.architecture == ModelArchitecture::Qwen3Moe,
+            "Qwen3.5/3.6 GGUF metadata and all {} tensors were validated, but the hybrid \
+             linear-attention Catena program is not implemented yet",
+            self.weights.len()
+        );
+        Ok(())
     }
 }
 
@@ -185,13 +210,13 @@ impl Session<'_> {
     pub fn prefill_logits(&mut self, tokens: &[u64]) -> Result<Vec<f32>> {
         ensure!(self.position == 0, "a session can only be prefilled once");
         let (logits, _next_token) = self.forward(tokens)?;
-        read_logits(logits)
+        read_logits(logits, self.model.config.vocabulary_size)
     }
 
     pub fn decode_logits(&mut self, token: u64) -> Result<Vec<f32>> {
         ensure!(self.position > 0, "decode requires a completed prefill");
         let (logits, _next_token) = self.forward(std::slice::from_ref(&token))?;
-        read_logits(logits)
+        read_logits(logits, self.model.config.vocabulary_size)
     }
 
     pub fn prefill_next_token(&mut self, tokens: &[u64]) -> Result<u64> {
@@ -220,12 +245,17 @@ impl Session<'_> {
     }
 }
 
-fn read_logits(logits_output: MemOwn) -> Result<Vec<f32>> {
+fn config_model_input_count(config: &ModelConfig) -> usize {
+    // Header validation has already built the same inventory.
+    4 + weight_specs(config).expect("validated model config").len()
+}
+
+fn read_logits(logits_output: MemOwn, vocabulary_size: usize) -> Result<Vec<f32>> {
     let logits = logits_output.try_to_f32_vec()?;
     ensure!(
-        logits.len() == VOCAB_SIZE,
-        "qwen3 returned {} logits, expected {VOCAB_SIZE}",
-        logits.len()
+        logits.len() == vocabulary_size,
+        "qwen3 returned {} logits, expected {vocabulary_size}",
+        logits.len(),
     );
     ensure!(
         logits.iter().all(|value| value.is_finite()),
