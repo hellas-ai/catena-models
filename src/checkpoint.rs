@@ -57,6 +57,20 @@ struct TensorInfo {
     relative_offset: usize,
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct GgufTokenizerMetadata {
+    pub(crate) model: Option<String>,
+    pub(crate) pre: Option<String>,
+    pub(crate) tokens: Vec<String>,
+    pub(crate) merges: Vec<String>,
+    pub(crate) token_types: Vec<i32>,
+    pub(crate) special_token_ids: Vec<u32>,
+    pub(crate) bos_token_id: Option<u32>,
+    pub(crate) eos_token_id: Option<u32>,
+    pub(crate) add_bos_token: bool,
+    pub(crate) add_eos_token: bool,
+}
+
 struct GgufFile {
     path: PathBuf,
     bytes: Mmap,
@@ -224,6 +238,22 @@ fn resolve_gguf_paths(path: &Path) -> Result<Vec<PathBuf>> {
         })
         .collect();
     Ok(paths)
+}
+
+pub(crate) fn read_gguf_tokenizer_metadata(
+    path: impl AsRef<Path>,
+) -> Result<Option<GgufTokenizerMetadata>> {
+    let paths = resolve_gguf_paths(path.as_ref())?;
+    let path = paths
+        .first()
+        .context("GGUF path resolution returned no files")?;
+    let file = File::open(path)
+        .with_context(|| format!("failed to open GGUF tokenizer source {}", path.display()))?;
+    // SAFETY: only metadata is read from this temporary read-only mapping.
+    let bytes = unsafe { MmapOptions::new().map(&file) }
+        .with_context(|| format!("failed to map GGUF tokenizer source {}", path.display()))?;
+    parse_gguf_tokenizer_metadata(&bytes)
+        .with_context(|| format!("failed to parse GGUF tokenizer metadata {}", path.display()))
 }
 
 fn validate_files(files: &[GgufFile]) -> Result<HashMap<String, usize>> {
@@ -508,6 +538,74 @@ enum ValueType {
     F64 = 12,
 }
 
+fn parse_gguf_tokenizer_metadata(bytes: &[u8]) -> Result<Option<GgufTokenizerMetadata>> {
+    ensure!(
+        cfg!(target_endian = "little"),
+        "GGUF tokenizer parsing requires a little-endian host"
+    );
+    let mut cursor = Cursor::new(bytes);
+    ensure!(cursor.u32()? == GGUF_MAGIC, "file does not have GGUF magic");
+    ensure!(
+        cursor.u32()? == GGUF_VERSION,
+        "only GGUF version {GGUF_VERSION} is supported"
+    );
+    let _tensor_count = cursor.usize_u64("tensor count")?;
+    let metadata_count = cursor.usize_u64("metadata count")?;
+    ensure!(
+        metadata_count <= 1_000_000,
+        "unreasonable GGUF metadata count {metadata_count}"
+    );
+
+    let mut metadata = GgufTokenizerMetadata::default();
+    for _ in 0..metadata_count {
+        let key = cursor.string("metadata key")?.to_owned();
+        let value_type = ValueType::from_u32(cursor.u32()?)?;
+        match key.as_str() {
+            "tokenizer.ggml.model" => {
+                metadata.model = Some(cursor.string_value(value_type, &key)?.to_owned());
+            }
+            "tokenizer.ggml.pre" => {
+                metadata.pre = Some(cursor.string_value(value_type, &key)?.to_owned());
+            }
+            "tokenizer.ggml.tokens" => {
+                metadata.tokens = cursor.string_array(value_type, &key)?;
+            }
+            "tokenizer.ggml.merges" => {
+                metadata.merges = cursor.string_array(value_type, &key)?;
+            }
+            "tokenizer.ggml.token_type" => {
+                metadata.token_types = cursor.i32_array(value_type, &key)?;
+            }
+            "tokenizer.ggml.bos_token_id" => {
+                let id = cursor.u32_value(value_type, &key)?;
+                metadata.bos_token_id = Some(id);
+                metadata.special_token_ids.push(id);
+            }
+            "tokenizer.ggml.eos_token_id" => {
+                let id = cursor.u32_value(value_type, &key)?;
+                metadata.eos_token_id = Some(id);
+                metadata.special_token_ids.push(id);
+            }
+            "tokenizer.ggml.unknown_token_id"
+            | "tokenizer.ggml.separator_token_id"
+            | "tokenizer.ggml.padding_token_id"
+            | "tokenizer.ggml.mask_token_id" => {
+                metadata
+                    .special_token_ids
+                    .push(cursor.u32_value(value_type, &key)?);
+            }
+            "tokenizer.ggml.add_bos_token" => {
+                metadata.add_bos_token = cursor.bool_value(value_type, &key)?;
+            }
+            "tokenizer.ggml.add_eos_token" => {
+                metadata.add_eos_token = cursor.bool_value(value_type, &key)?;
+            }
+            _ => cursor.skip_value(value_type, 0)?,
+        }
+    }
+    Ok((!metadata.tokens.is_empty()).then_some(metadata))
+}
+
 impl ValueType {
     fn from_u32(value: u32) -> Result<Self> {
         match value {
@@ -663,6 +761,73 @@ impl<'a> Cursor<'a> {
         std::str::from_utf8(self.take(len)?).with_context(|| format!("GGUF {label} is not UTF-8"))
     }
 
+    fn string_value(&mut self, value_type: ValueType, label: &str) -> Result<&'a str> {
+        ensure!(
+            matches!(value_type, ValueType::String),
+            "GGUF {label} is not a string"
+        );
+        self.string(label)
+    }
+
+    fn u32_value(&mut self, value_type: ValueType, label: &str) -> Result<u32> {
+        let value = match value_type {
+            ValueType::U8 => u64::from(self.u8()?),
+            ValueType::U16 => u64::from(self.u16()?),
+            ValueType::U32 => u64::from(self.u32()?),
+            ValueType::U64 => self.u64()?,
+            _ => bail!("GGUF {label} is not an unsigned integer"),
+        };
+        u32::try_from(value).with_context(|| format!("GGUF {label} exceeds u32"))
+    }
+
+    fn bool_value(&mut self, value_type: ValueType, label: &str) -> Result<bool> {
+        ensure!(
+            matches!(value_type, ValueType::Bool),
+            "GGUF {label} is not a boolean"
+        );
+        match self.u8()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            value => bail!("GGUF {label} has invalid boolean value {value}"),
+        }
+    }
+
+    fn array_header(&mut self, value_type: ValueType, label: &str) -> Result<(ValueType, usize)> {
+        ensure!(
+            matches!(value_type, ValueType::Array),
+            "GGUF {label} is not an array"
+        );
+        let element_type = ValueType::from_u32(self.u32()?)?;
+        let len = self.usize_u64(&format!("{label} array length"))?;
+        ensure!(
+            len <= 10_000_000,
+            "unreasonable GGUF {label} array length {len}"
+        );
+        Ok((element_type, len))
+    }
+
+    fn string_array(&mut self, value_type: ValueType, label: &str) -> Result<Vec<String>> {
+        let (element_type, len) = self.array_header(value_type, label)?;
+        ensure!(
+            matches!(element_type, ValueType::String),
+            "GGUF {label} is not a string array"
+        );
+        (0..len)
+            .map(|_| self.string(label).map(str::to_owned))
+            .collect()
+    }
+
+    fn i32_array(&mut self, value_type: ValueType, label: &str) -> Result<Vec<i32>> {
+        let (element_type, len) = self.array_header(value_type, label)?;
+        ensure!(
+            matches!(element_type, ValueType::I32),
+            "GGUF {label} is not an i32 array"
+        );
+        (0..len)
+            .map(|_| Ok(i32::from_le_bytes(self.take(4)?.try_into().unwrap())))
+            .collect()
+    }
+
     fn unsigned_value(&mut self, value_type: ValueType, label: &str) -> Result<usize> {
         let value = match value_type {
             ValueType::U8 => u64::from(self.u8()?),
@@ -717,6 +882,38 @@ mod tests {
 
     const GGUF_PATH: &str = "models/Qwen3-30B-A3B-Base/model-bf16.gguf";
 
+    fn push_u32(bytes: &mut Vec<u8>, value: u32) {
+        bytes.extend(value.to_le_bytes());
+    }
+
+    fn push_u64(bytes: &mut Vec<u8>, value: u64) {
+        bytes.extend(value.to_le_bytes());
+    }
+
+    fn push_string(bytes: &mut Vec<u8>, value: &str) {
+        push_u64(bytes, value.len() as u64);
+        bytes.extend(value.as_bytes());
+    }
+
+    fn push_metadata_key(bytes: &mut Vec<u8>, key: &str, value_type: ValueType) {
+        push_string(bytes, key);
+        push_u32(bytes, value_type as u32);
+    }
+
+    fn push_string_metadata(bytes: &mut Vec<u8>, key: &str, value: &str) {
+        push_metadata_key(bytes, key, ValueType::String);
+        push_string(bytes, value);
+    }
+
+    fn push_string_array_metadata(bytes: &mut Vec<u8>, key: &str, values: &[&str]) {
+        push_metadata_key(bytes, key, ValueType::Array);
+        push_u32(bytes, ValueType::String as u32);
+        push_u64(bytes, values.len() as u64);
+        for value in values {
+            push_string(bytes, value);
+        }
+    }
+
     #[test]
     fn resolves_every_file_from_any_standard_shard() -> Result<()> {
         let paths = resolve_gguf_paths(Path::new("models/Qwen3-30B-A3B-BF16-00002-of-00003.gguf"))?;
@@ -756,6 +953,41 @@ mod tests {
             paths,
             ["part-00001.gguf", "part-00002.gguf"].map(|name| directory.join(name))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_embedded_tokenizer_metadata_without_tensor_data() -> Result<()> {
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, GGUF_MAGIC);
+        push_u32(&mut bytes, GGUF_VERSION);
+        push_u64(&mut bytes, 42);
+        push_u64(&mut bytes, 8);
+        push_string_metadata(&mut bytes, "tokenizer.ggml.model", "gpt2");
+        push_string_metadata(&mut bytes, "tokenizer.ggml.pre", "qwen2");
+        push_string_array_metadata(&mut bytes, "tokenizer.ggml.tokens", &["h", "i", "hi"]);
+        push_string_array_metadata(&mut bytes, "tokenizer.ggml.merges", &["h i"]);
+        push_metadata_key(&mut bytes, "tokenizer.ggml.token_type", ValueType::Array);
+        push_u32(&mut bytes, ValueType::I32 as u32);
+        push_u64(&mut bytes, 3);
+        for token_type in [1_i32, 1, 3] {
+            bytes.extend(token_type.to_le_bytes());
+        }
+        push_metadata_key(&mut bytes, "tokenizer.ggml.eos_token_id", ValueType::U32);
+        push_u32(&mut bytes, 2);
+        push_metadata_key(&mut bytes, "tokenizer.ggml.add_eos_token", ValueType::Bool);
+        bytes.push(1);
+        push_string_metadata(&mut bytes, "unrelated.metadata", "ignored");
+
+        let metadata =
+            parse_gguf_tokenizer_metadata(&bytes)?.context("tokenizer metadata was not found")?;
+        assert_eq!(metadata.model.as_deref(), Some("gpt2"));
+        assert_eq!(metadata.pre.as_deref(), Some("qwen2"));
+        assert_eq!(metadata.tokens, ["h", "i", "hi"]);
+        assert_eq!(metadata.merges, ["h i"]);
+        assert_eq!(metadata.token_types, [1, 1, 3]);
+        assert_eq!(metadata.eos_token_id, Some(2));
+        assert!(metadata.add_eos_token);
         Ok(())
     }
 

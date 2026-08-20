@@ -26,7 +26,7 @@ struct Args {
     #[arg(long, default_value = "unsloth/Qwen3-30B-A3B-Base")]
     model_dir: PathBuf,
 
-    /// Tokenizer JSON path (defaults to <model-dir>/tokenizer.json).
+    /// Tokenizer JSON override (defaults to GGUF metadata, then <model-dir>/tokenizer.json).
     #[arg(long, value_name = "PATH")]
     tokenizer: Option<PathBuf>,
 
@@ -56,10 +56,17 @@ fn main() -> Result<()> {
         .prompt
         .as_deref()
         .expect("clap requires a prompt unless entrypoint generation was selected");
-    let tokenizer_path = args
-        .tokenizer
-        .unwrap_or_else(|| args.model_dir.join("tokenizer.json"));
-    let tokenizer = QwenTokenizer::open(tokenizer_path)?;
+    let gguf_path = args
+        .gguf
+        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
+    let tokenizer = if let Some(tokenizer_path) = args.tokenizer {
+        QwenTokenizer::open(tokenizer_path)?
+    } else if let Some(tokenizer) = QwenTokenizer::from_gguf(&gguf_path)? {
+        eprintln!("loaded tokenizer from GGUF metadata");
+        tokenizer
+    } else {
+        QwenTokenizer::open(args.model_dir.join("tokenizer.json"))?
+    };
     let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
         !tokens.is_empty(),
@@ -67,9 +74,6 @@ fn main() -> Result<()> {
     );
 
     let load_started = Instant::now();
-    let gguf_path = args
-        .gguf
-        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
     let model = Model::load_gguf(&gguf_path)?;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
