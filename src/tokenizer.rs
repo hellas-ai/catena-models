@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use tokenizers::{
     AddedToken, Tokenizer,
     models::bpe::{BPE, Vocab},
@@ -22,6 +22,7 @@ use tokenizers::{
 use crate::checkpoint::{GgufTokenizerMetadata, read_gguf_tokenizer_metadata};
 
 const QWEN2_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const QWEN35_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 pub type QwenDecodeStream<'a> = DecodeStream<
     'a,
@@ -57,11 +58,11 @@ impl QwenTokenizer {
             "unsupported GGUF tokenizer model {:?}; expected gpt2",
             metadata.model
         );
-        ensure!(
-            matches!(metadata.pre.as_deref(), Some("qwen2")),
-            "unsupported GGUF pre-tokenizer {:?}; expected qwen2",
-            metadata.pre
-        );
+        let split_pattern = match metadata.pre.as_deref() {
+            Some("qwen2") => QWEN2_SPLIT_PATTERN,
+            Some("qwen35") => QWEN35_SPLIT_PATTERN,
+            other => bail!("unsupported GGUF pre-tokenizer {other:?}; expected qwen2 or qwen35"),
+        };
         ensure!(
             metadata.tokens.len() <= u32::MAX as usize,
             "GGUF tokenizer vocabulary exceeds u32"
@@ -104,12 +105,12 @@ impl QwenTokenizer {
 
         let byte_level = ByteLevel::new(false, false, false);
         let split = Split::new(
-            SplitPattern::Regex(QWEN2_SPLIT_PATTERN.to_owned()),
+            SplitPattern::Regex(split_pattern.to_owned()),
             SplitDelimiterBehavior::Isolated,
             false,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("failed to build Qwen2 pre-tokenizer regex")?;
+        .context("failed to build Qwen pre-tokenizer regex")?;
         let mut inner = Tokenizer::new(bpe);
         inner.with_normalizer(Some(NFC));
         inner.with_pre_tokenizer(Some(PreSequence::new(vec![
@@ -229,12 +230,16 @@ fn special_token_template(metadata: &GgufTokenizerMetadata) -> Result<Option<Tem
 
 #[cfg(test)]
 mod tests {
+    use tokenizers::{
+        OffsetReferential, OffsetType, PreTokenizedString, PreTokenizer as PreTokenizerTrait,
+    };
+
     use super::*;
 
-    fn embedded_test_metadata(add_eos_token: bool) -> GgufTokenizerMetadata {
+    fn embedded_test_metadata(pre: &str, add_eos_token: bool) -> GgufTokenizerMetadata {
         GgufTokenizerMetadata {
             model: Some("gpt2".to_owned()),
-            pre: Some("qwen2".to_owned()),
+            pre: Some(pre.to_owned()),
             tokens: ["h", "i", "hi", "<|end|>"].map(str::to_owned).to_vec(),
             merges: vec!["h i".to_owned()],
             token_types: vec![1, 1, 1, 3],
@@ -247,7 +252,7 @@ mod tests {
 
     #[test]
     fn builds_qwen_tokenizer_from_gguf_metadata() -> Result<()> {
-        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata(false))?;
+        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata("qwen2", false))?;
         assert_eq!(tokenizer.encode("hi")?, [2]);
         assert_eq!(tokenizer.decode(&[2], false)?, "hi");
         assert_eq!(tokenizer.encode("<|end|>")?, [3]);
@@ -257,8 +262,41 @@ mod tests {
 
     #[test]
     fn applies_gguf_eos_setting() -> Result<()> {
-        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata(true))?;
+        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata("qwen2", true))?;
         assert_eq!(tokenizer.encode("hi")?, [2, 3]);
+        Ok(())
+    }
+
+    #[test]
+    fn builds_qwen35_tokenizer_from_gguf_metadata() -> Result<()> {
+        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata("qwen35", false))?;
+        assert_eq!(tokenizer.encode("hi")?, [2]);
+        assert_eq!(tokenizer.decode(&[2], false)?, "hi");
+        Ok(())
+    }
+
+    #[test]
+    fn qwen35_keeps_combining_marks_with_letters() -> Result<()> {
+        fn split(pattern: &str) -> Result<Vec<String>> {
+            let tokenizer = Split::new(
+                SplitPattern::Regex(pattern.to_owned()),
+                SplitDelimiterBehavior::Isolated,
+                false,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            let mut text = PreTokenizedString::from("a\u{035c}b");
+            tokenizer
+                .pre_tokenize(&mut text)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            Ok(text
+                .get_splits(OffsetReferential::Original, OffsetType::Byte)
+                .into_iter()
+                .map(|(text, _, _)| text.to_owned())
+                .collect())
+        }
+
+        assert_eq!(split(QWEN2_SPLIT_PATTERN)?, ["a", "\u{035c}b"]);
+        assert_eq!(split(QWEN35_SPLIT_PATTERN)?, ["a\u{035c}b"]);
         Ok(())
     }
 
