@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeSet, HashMap},
     env,
     ffi::{CStr, c_char, c_int, c_uint, c_void},
-    fs::File,
+    fs::{self, File},
     path::{Path, PathBuf},
     ptr::NonNull,
 };
@@ -67,30 +67,54 @@ struct GgufFile {
 #[derive(Debug, Clone, Copy)]
 pub struct TensorView {
     pub(crate) dtype: GgufDtype,
+    file_index: usize,
     pub(crate) file_offset: usize,
     pub(crate) byte_len: usize,
 }
 
-/// Read-only GGUF mapping registered directly in the HIP address space.
-///
-/// The registration is declared before the file so it is unregistered before
-/// the `Mmap` is dropped.
+/// Read-only GGUF mappings registered directly in the HIP address space.
 pub struct Checkpoint {
+    files: Vec<RegisteredGgufFile>,
+    tensor_files: HashMap<String, usize>,
+}
+
+/// A registration must be dropped before its backing mapping.
+struct RegisteredGgufFile {
     registration: HipRegistration,
     file: GgufFile,
 }
 
 impl Checkpoint {
+    /// Open either one GGUF, any member of a standard GGUF shard set, or a
+    /// directory containing GGUF shards.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let file = GgufFile::open(path)?;
-        file.validate()?;
-        let registration = HipRegistration::new(&file.bytes)
-            .with_context(|| format!("failed to register GGUF {} with HIP", file.path.display()))?;
-        Ok(Self { registration, file })
+        let paths = resolve_gguf_paths(path.as_ref())?;
+        let files = paths
+            .iter()
+            .map(GgufFile::open)
+            .collect::<Result<Vec<_>>>()?;
+        let tensor_files = validate_files(&files)?;
+        let registered_files = files
+            .into_iter()
+            .map(|file| {
+                let registration = HipRegistration::new(&file.bytes).with_context(|| {
+                    format!("failed to register GGUF {} with HIP", file.path.display())
+                })?;
+                Ok(RegisteredGgufFile { registration, file })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            files: registered_files,
+            tensor_files,
+        })
     }
 
     pub fn tensor_view(&self, spec: &TensorSpec) -> Result<TensorView> {
-        self.file.tensor_view(spec)
+        let file_index = *self
+            .tensor_files
+            .get(&spec.gguf_name)
+            .with_context(|| format!("GGUF is missing {}", spec.gguf_name))?;
+        self.files[file_index].file.tensor_view(spec, file_index)
     }
 
     /// Borrow one registered GGUF payload range as HIP-visible memory.
@@ -99,14 +123,19 @@ impl Checkpoint {
             .file_offset
             .checked_add(view.byte_len)
             .context("GGUF device view range overflowed")?;
+        let registered = self
+            .files
+            .get(view.file_index)
+            .context("GGUF device view refers to an unknown shard")?;
         ensure!(
-            end <= self.file.bytes.len(),
+            end <= registered.file.bytes.len(),
             "GGUF device view is out of bounds"
         );
         // SAFETY: `registration` covers the entire live `Mmap`; the validated
         // range lies inside it, and the returned borrow is tied to `self`.
         let data = unsafe {
-            self.registration
+            registered
+                .registration
                 .device_base
                 .as_ptr()
                 .cast::<u8>()
@@ -120,14 +149,152 @@ impl Checkpoint {
                 data,
                 view.byte_len as u64,
                 GpuDialect::Hip,
-                &self.registration,
+                &registered.registration,
             )
         })
     }
 
     pub fn registered_byte_len(&self) -> usize {
-        self.file.bytes.len()
+        self.files.iter().map(|file| file.file.bytes.len()).sum()
     }
+
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
+}
+
+fn resolve_gguf_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    if path.is_dir() {
+        let mut paths = fs::read_dir(path)
+            .with_context(|| format!("failed to read GGUF directory {}", path.display()))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.retain(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("gguf"))
+        });
+        paths.sort();
+        ensure!(
+            !paths.is_empty(),
+            "GGUF directory {} contains no .gguf files",
+            path.display()
+        );
+        return Ok(paths);
+    }
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(vec![path.to_path_buf()]);
+    };
+    let Some(stem) = file_name.strip_suffix(".gguf") else {
+        return Ok(vec![path.to_path_buf()]);
+    };
+    let Some((numbered_prefix, total_text)) = stem.rsplit_once("-of-") else {
+        return Ok(vec![path.to_path_buf()]);
+    };
+    let Some((prefix, index_text)) = numbered_prefix.rsplit_once('-') else {
+        return Ok(vec![path.to_path_buf()]);
+    };
+    if index_text.is_empty()
+        || total_text.is_empty()
+        || !index_text.bytes().all(|byte| byte.is_ascii_digit())
+        || !total_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    let index = index_text
+        .parse::<usize>()
+        .context("invalid GGUF shard index")?;
+    let total = total_text
+        .parse::<usize>()
+        .context("invalid GGUF shard count")?;
+    ensure!(
+        total > 0 && index > 0 && index <= total,
+        "invalid GGUF shard {index} of {total} in {}",
+        path.display()
+    );
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let paths = (1..=total)
+        .map(|shard| {
+            parent.join(format!(
+                "{prefix}-{shard:0width$}-of-{total_text}.gguf",
+                width = index_text.len()
+            ))
+        })
+        .collect();
+    Ok(paths)
+}
+
+fn validate_files(files: &[GgufFile]) -> Result<HashMap<String, usize>> {
+    let mut tensor_files = HashMap::with_capacity(WEIGHT_COUNT);
+    for (file_index, file) in files.iter().enumerate() {
+        for name in file.tensors.keys() {
+            if let Some(previous_index) = tensor_files.insert(name.clone(), file_index) {
+                bail!(
+                    "duplicate GGUF tensor {name} in {} and {}",
+                    files[previous_index].path.display(),
+                    file.path.display()
+                );
+            }
+        }
+    }
+
+    ensure!(
+        tensor_files.len() == WEIGHT_COUNT,
+        "GGUF shard set contains {} tensors, expected {WEIGHT_COUNT}",
+        tensor_files.len()
+    );
+    let specs = weight_specs();
+    let expected_names = specs
+        .iter()
+        .map(|spec| spec.gguf_name.as_str())
+        .collect::<BTreeSet<_>>();
+    let actual_names = tensor_files
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if expected_names != actual_names {
+        let missing = expected_names
+            .difference(&actual_names)
+            .take(16)
+            .copied()
+            .collect::<Vec<_>>();
+        let unexpected = actual_names
+            .difference(&expected_names)
+            .take(16)
+            .copied()
+            .collect::<Vec<_>>();
+        bail!(
+            "GGUF tensor inventory mismatch; missing(first 16)={missing:?}, unexpected(first 16)={unexpected:?}"
+        );
+    }
+
+    for (file_index, file) in files.iter().enumerate() {
+        let mut ranges = Vec::new();
+        for spec in specs
+            .iter()
+            .filter(|spec| tensor_files[&spec.gguf_name] == file_index)
+        {
+            let view = file.tensor_view(spec, file_index)?;
+            ranges.push((
+                view.file_offset,
+                view.file_offset + view.byte_len,
+                &spec.gguf_name,
+            ));
+        }
+        ranges.sort_by_key(|range| range.0);
+        for pair in ranges.windows(2) {
+            ensure!(
+                pair[0].1 <= pair[1].0,
+                "GGUF tensors {} and {} overlap in {}",
+                pair[0].2,
+                pair[1].2,
+                file.path.display()
+            );
+        }
+    }
+    Ok(tensor_files)
 }
 
 impl GgufFile {
@@ -149,61 +316,7 @@ impl GgufFile {
         })
     }
 
-    fn validate(&self) -> Result<()> {
-        ensure!(
-            self.tensors.len() == WEIGHT_COUNT,
-            "GGUF {} contains {} tensors, expected {WEIGHT_COUNT}",
-            self.path.display(),
-            self.tensors.len()
-        );
-        let specs = weight_specs();
-        let expected_names = specs
-            .iter()
-            .map(|spec| spec.gguf_name.as_str())
-            .collect::<BTreeSet<_>>();
-        let actual_names = self
-            .tensors
-            .keys()
-            .map(String::as_str)
-            .collect::<BTreeSet<_>>();
-        if expected_names != actual_names {
-            let missing = expected_names
-                .difference(&actual_names)
-                .take(16)
-                .copied()
-                .collect::<Vec<_>>();
-            let unexpected = actual_names
-                .difference(&expected_names)
-                .take(16)
-                .copied()
-                .collect::<Vec<_>>();
-            bail!(
-                "GGUF tensor inventory mismatch; missing(first 16)={missing:?}, unexpected(first 16)={unexpected:?}"
-            );
-        }
-
-        let mut ranges = Vec::with_capacity(specs.len());
-        for spec in &specs {
-            let view = self.tensor_view(spec)?;
-            ranges.push((
-                view.file_offset,
-                view.file_offset + view.byte_len,
-                &spec.gguf_name,
-            ));
-        }
-        ranges.sort_by_key(|range| range.0);
-        for pair in ranges.windows(2) {
-            ensure!(
-                pair[0].1 <= pair[1].0,
-                "GGUF tensors {} and {} overlap",
-                pair[0].2,
-                pair[1].2
-            );
-        }
-        Ok(())
-    }
-
-    fn tensor_view(&self, spec: &TensorSpec) -> Result<TensorView> {
+    fn tensor_view(&self, spec: &TensorSpec, file_index: usize) -> Result<TensorView> {
         let info = self
             .tensors
             .get(&spec.gguf_name)
@@ -251,6 +364,7 @@ impl GgufFile {
         );
         Ok(TensorView {
             dtype: info.dtype,
+            file_index,
             file_offset,
             byte_len,
         })
@@ -597,22 +711,69 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use super::*;
 
     const GGUF_PATH: &str = "models/Qwen3-30B-A3B-Base/model-bf16.gguf";
+
+    #[test]
+    fn resolves_every_file_from_any_standard_shard() -> Result<()> {
+        let paths = resolve_gguf_paths(Path::new("models/Qwen3-30B-A3B-BF16-00002-of-00003.gguf"))?;
+        assert_eq!(
+            paths,
+            [
+                "models/Qwen3-30B-A3B-BF16-00001-of-00003.gguf",
+                "models/Qwen3-30B-A3B-BF16-00002-of-00003.gguf",
+                "models/Qwen3-30B-A3B-BF16-00003-of-00003.gguf",
+            ]
+            .map(PathBuf::from)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn leaves_an_unsharded_name_alone() -> Result<()> {
+        let path = Path::new("models/model-bf16.gguf");
+        assert_eq!(resolve_gguf_paths(path)?, [path]);
+        Ok(())
+    }
+
+    #[test]
+    fn resolves_a_directory_to_sorted_gguf_files_only() -> Result<()> {
+        let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "catena-qwen3-gguf-paths-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory)?;
+        for name in ["part-00002.gguf", "tokenizer.json", "part-00001.gguf"] {
+            File::create(directory.join(name))?;
+        }
+        let paths = resolve_gguf_paths(&directory)?;
+        fs::remove_dir_all(&directory)?;
+        assert_eq!(
+            paths,
+            ["part-00001.gguf", "part-00002.gguf"].map(|name| directory.join(name))
+        );
+        Ok(())
+    }
 
     #[test]
     fn validates_downloaded_gguf_when_present() -> Result<()> {
         let path = Path::new(GGUF_PATH);
         if path.exists() {
             let file = GgufFile::open(path)?;
-            file.validate()?;
+            assert_eq!(file.tensors.len(), WEIGHT_COUNT);
             assert_eq!(file.data_start, 5_969_472);
             let specs = weight_specs();
-            let embedding = file.tensor_view(&specs[0])?;
+            for spec in &specs {
+                file.tensor_view(spec, 0)?;
+            }
+            let embedding = file.tensor_view(&specs[0], 0)?;
             assert_eq!(embedding.dtype, GgufDtype::Bf16);
             assert_eq!(embedding.byte_len, 151_936 * 2_048 * 2);
-            let norm = file.tensor_view(&specs[1])?;
+            let norm = file.tensor_view(&specs[1], 0)?;
             assert_eq!(norm.dtype, GgufDtype::F32);
             assert_eq!(norm.byte_len, 2_048 * 4);
         }

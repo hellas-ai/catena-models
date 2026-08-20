@@ -22,11 +22,15 @@ struct Args {
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
 
-    /// Directory containing tokenizer.json and, by default, model-bf16.gguf.
-    #[arg(long, default_value = "models/Qwen3-30B-A3B-Base")]
+    /// Fallback directory for tokenizer.json and model-bf16.gguf.
+    #[arg(long, default_value = "unsloth/Qwen3-30B-A3B-Base")]
     model_dir: PathBuf,
 
-    /// GGUF checkpoint path (defaults to <model-dir>/model-bf16.gguf).
+    /// Tokenizer JSON path (defaults to <model-dir>/tokenizer.json).
+    #[arg(long, value_name = "PATH")]
+    tokenizer: Option<PathBuf>,
+
+    /// GGUF file, shard, or shard directory (defaults to <model-dir>/model-bf16.gguf).
     #[arg(long)]
     gguf: Option<PathBuf>,
 
@@ -52,7 +56,10 @@ fn main() -> Result<()> {
         .prompt
         .as_deref()
         .expect("clap requires a prompt unless entrypoint generation was selected");
-    let tokenizer = QwenTokenizer::open(args.model_dir.join("tokenizer.json"))?;
+    let tokenizer_path = args
+        .tokenizer
+        .unwrap_or_else(|| args.model_dir.join("tokenizer.json"));
+    let tokenizer = QwenTokenizer::open(tokenizer_path)?;
     let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
         !tokens.is_empty(),

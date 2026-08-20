@@ -99,7 +99,10 @@ conversion, upload, or per-tensor allocation. Measured warm loads reached
 weight readiness in 2.72--2.84 seconds.
 
 Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
-`--model-dir` still selects the directory containing `tokenizer.json`.
+For split checkpoints, `--gguf` can also name a shard directory or any one
+standard `-00001-of-00002.gguf` shard. Select a separate tokenizer with
+`--tokenizer /path/to/tokenizer.json`; `--model-dir` remains the fallback for
+both `tokenizer.json` and the default unsharded GGUF path.
 
 RoPE is also part of the Catena program rather than a model-specific Rust
 input. Each invocation materializes only its current absolute-position range,

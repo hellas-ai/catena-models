@@ -52,7 +52,8 @@ impl Model {
             "internal weight ABI mismatch"
         );
         eprintln!(
-            "registered {:.2} GiB GGUF; {:.2} GiB BF16 and {:.2} MiB F32 mapped zero-copy in native storage",
+            "registered {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 mapped zero-copy in native storage",
+            checkpoint.file_count(),
             checkpoint.registered_byte_len() as f64 / (1_u64 << 30) as f64,
             mapped_bf16_bytes as f64 / (1_u64 << 30) as f64,
             mapped_f32_bytes as f64 / (1_u64 << 20) as f64,
