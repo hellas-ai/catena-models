@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{self, Write},
     path::PathBuf,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, ensure};
@@ -16,12 +16,28 @@ use clap::Parser;
 #[command(about = "Greedy text generation with Qwen3-30B-A3B-Base BF16 on Catena/HIP")]
 struct Args {
     /// Text prefix to continue.
-    #[arg(required_unless_present = "generate_entrypoint")]
+    #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
     prompt: Option<String>,
 
     /// Regenerate the explicit entrypoint in src/catena/qwen3.hex, then exit.
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
+
+    /// Run llama-style prompt-processing and token-generation benchmarks.
+    #[arg(long, conflicts_with = "generate_entrypoint")]
+    bench: bool,
+
+    /// Prompt-processing token count used by --bench; zero skips this test.
+    #[arg(long, default_value_t = 512)]
+    pp: usize,
+
+    /// Token-generation count used by --bench; zero skips this test.
+    #[arg(long, default_value_t = 128)]
+    tg: usize,
+
+    /// Number of measured runs per enabled benchmark test.
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
+    bench_runs: usize,
 
     /// Fallback directory for tokenizer.json and model-bf16.gguf.
     #[arg(long, default_value = "unsloth/Qwen3-30B-A3B-Base")]
@@ -56,6 +72,19 @@ fn main() -> Result<()> {
         std::fs::write(&path, generated_model_source_for(&config)?)?;
         println!("regenerated {}", path.display());
         return Ok(());
+    }
+    if args.bench {
+        ensure!(
+            args.pp > 0 || args.tg > 0,
+            "at least one of --pp or --tg must be non-zero"
+        );
+        let load_started = Instant::now();
+        let model = Model::load_gguf(&selected_gguf)?;
+        eprintln!(
+            "loaded Catena runtime and weights in {:.2?}",
+            load_started.elapsed()
+        );
+        return run_benchmark(&model, args.pp, args.tg, args.bench_runs);
     }
 
     let prompt = args
@@ -202,4 +231,169 @@ fn main() -> Result<()> {
     );
     eprintln!("generated {generated} token(s) in {elapsed:.2?} ({tokens_per_second:.2} tok/s)");
     Ok(())
+}
+
+fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|error| format!("invalid positive integer: {error}"))?;
+    if value == 0 {
+        Err("value must be greater than zero".into())
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct BenchRow {
+    test: String,
+    tokens_per_second: f64,
+}
+
+fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()> {
+    let mut rows = Vec::with_capacity(2);
+    if pp > 0 {
+        let tokens = synthetic_tokens(pp, model.config().vocabulary_size);
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let mut session = model.session(pp)?;
+            let started = Instant::now();
+            session.prefill_next_token(&tokens)?;
+            samples.push((pp, started.elapsed()));
+        }
+        rows.push(BenchRow {
+            test: format!("pp{pp}"),
+            tokens_per_second: mean_tokens_per_second(&samples),
+        });
+    }
+    if tg > 0 {
+        let tokens = synthetic_tokens(tg, model.config().vocabulary_size);
+        let mut samples = Vec::with_capacity(runs);
+        for _ in 0..runs {
+            let mut session = model.session(tg)?;
+            let started = Instant::now();
+            session.prefill_next_token(&tokens[..1])?;
+            for &token in &tokens[1..] {
+                session.decode_next_token(token)?;
+            }
+            samples.push((tg, started.elapsed()));
+        }
+        rows.push(BenchRow {
+            test: format!("tg{tg}"),
+            tokens_per_second: mean_tokens_per_second(&samples),
+        });
+    }
+    print_benchmark_table(model, &rows);
+    Ok(())
+}
+
+fn synthetic_tokens(count: usize, vocabulary_size: usize) -> Vec<u64> {
+    let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+    (0..count)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            state % vocabulary_size as u64
+        })
+        .collect()
+}
+
+fn mean_tokens_per_second(samples: &[(usize, Duration)]) -> f64 {
+    samples
+        .iter()
+        .map(|(tokens, elapsed)| *tokens as f64 / elapsed.as_secs_f64())
+        .sum::<f64>()
+        / samples.len() as f64
+}
+
+fn print_benchmark_table(model: &Model, rows: &[BenchRow]) {
+    let model_width = 40_usize.max(model.display_name().chars().count());
+    println!(
+        "| {:model_width$} | {:10} | {:10} | {:>15} | {:>20} |",
+        "model", "size", "params", "test", "t/s"
+    );
+    println!(
+        "| {} | {} | {} | {} | {} |",
+        "-".repeat(model_width),
+        "-".repeat(10),
+        "-".repeat(10),
+        "-".repeat(15),
+        "-".repeat(20)
+    );
+    let size = format_byte_size(model.weight_byte_len());
+    let params = format_parameter_count(model.parameter_count());
+    for row in rows {
+        println!(
+            "| {:model_width$} | {:>10} | {:>10} | {:>15} | {:>20.2} |",
+            model.display_name(),
+            size,
+            params,
+            row.test,
+            row.tokens_per_second
+        );
+    }
+}
+
+fn format_byte_size(bytes: usize) -> String {
+    const GIB: f64 = (1_u64 << 30) as f64;
+    const MIB: f64 = (1_u64 << 20) as f64;
+    if bytes >= 1 << 30 {
+        format!("{:.2} GiB", bytes as f64 / GIB)
+    } else {
+        format!("{:.2} MiB", bytes as f64 / MIB)
+    }
+}
+
+fn format_parameter_count(parameters: usize) -> String {
+    if parameters >= 1_000_000_000 {
+        format!("{:.2} B", parameters as f64 / 1_000_000_000.0)
+    } else {
+        format!("{:.2} M", parameters as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn benchmark_cli_defaults_do_not_require_a_prompt() {
+        let args = Args::try_parse_from(["catena-qwen3", "--bench"]).unwrap();
+        assert!(args.bench);
+        assert_eq!(args.pp, 512);
+        assert_eq!(args.tg, 128);
+        assert_eq!(args.bench_runs, 1);
+        assert!(args.prompt.is_none());
+    }
+
+    #[test]
+    fn benchmark_prompt_is_accepted_and_ignored_by_the_mode() {
+        let args =
+            Args::try_parse_from(["catena-qwen3", "--bench", "--pp", "8", "ignored"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("ignored"));
+        assert_eq!(args.pp, 8);
+    }
+
+    #[test]
+    fn benchmark_runs_must_be_positive() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--bench-runs", "0"]).is_err());
+    }
+
+    #[test]
+    fn benchmark_and_entrypoint_generation_conflict() {
+        assert!(
+            Args::try_parse_from(["catena-qwen3", "--bench", "--generate-entrypoint"]).is_err()
+        );
+    }
+
+    #[test]
+    fn benchmark_helpers_are_deterministic_and_format_units() {
+        assert_eq!(synthetic_tokens(4, 100), synthetic_tokens(4, 100));
+        assert_eq!(format_byte_size(3 << 30), "3.00 GiB");
+        assert_eq!(format_parameter_count(30_532_122_624), "30.53 B");
+        let samples = [(10, Duration::from_secs(2)), (10, Duration::from_secs(1))];
+        assert_eq!(mean_tokens_per_second(&samples), 7.5);
+    }
 }

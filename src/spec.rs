@@ -36,6 +36,7 @@ pub enum LayerType {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelConfig {
+    pub model_name: Option<String>,
     pub architecture: ModelArchitecture,
     pub vocabulary_size: usize,
     pub hidden_size: usize,
@@ -63,6 +64,7 @@ pub struct ModelConfig {
 impl ModelConfig {
     pub fn qwen3_30b() -> Self {
         Self {
+            model_name: Some("Qwen3-30B-A3B-Base".into()),
             architecture: ModelArchitecture::Qwen3Moe,
             vocabulary_size: VOCAB_SIZE,
             hidden_size: HIDDEN_SIZE,

@@ -299,6 +299,7 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     let _tensor_count = cursor.usize_u64("tensor count")?;
     let metadata_count = cursor.usize_u64("metadata count")?;
     let mut architecture = None;
+    let mut model_name = None;
     let mut values = HashMap::new();
     let mut eos_token_id = None;
     let mut tokenizer_vocabulary_size = None;
@@ -307,6 +308,8 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         let ty = ValueType::from_u32(cursor.u32()?)?;
         if key == "general.architecture" {
             architecture = Some(cursor.string_value(ty, &key)?.to_owned());
+        } else if key == "general.name" {
+            model_name = Some(cursor.string_value(ty, &key)?.to_owned());
         } else if key == "tokenizer.ggml.tokens" {
             let (element_type, len) = cursor.array_header(ty, &key)?;
             ensure!(
@@ -364,6 +367,7 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     let head_dim = optional_u("attention.key_length")?
         .unwrap_or(u("embedding_length")? / u("attention.head_count")?);
     let config = ModelConfig {
+        model_name,
         architecture,
         vocabulary_size: optional_u("vocab_size")?
             .or(tokenizer_vocabulary_size)

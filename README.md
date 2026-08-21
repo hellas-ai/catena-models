@@ -105,6 +105,18 @@ from the GGUF's `tokenizer.ggml.*` metadata. Use
 `--tokenizer /path/to/tokenizer.json` as an explicit override; when the GGUF has
 no embedded tokenizer, `<model-dir>/tokenizer.json` remains the fallback.
 
+Run llama.cpp-style prompt-processing and token-generation measurements with:
+
+```bash
+nix develop --command cargo run --release -- \
+  --gguf /path/to/model.gguf --bench --pp 512 --tg 128
+```
+
+`--pp` and `--tg` default to 512 and 128; set either one to zero to skip that
+row. `--bench-runs N` reports the mean throughput across `N` measured runs
+(default 1). Benchmark mode ignores any positional prompt and uses deterministic
+token IDs directly, so it does not load or require a tokenizer.
+
 RoPE is also part of the Catena program rather than a model-specific Rust
 input. Each invocation materializes only its current absolute-position range,
 using exact F32 inverse-frequency constants and deterministic range-reduced

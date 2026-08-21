@@ -19,6 +19,8 @@ pub struct Model {
     weights: Vec<TensorView>,
     checkpoint: Checkpoint,
     config: ModelConfig,
+    parameter_count: usize,
+    weight_byte_len: usize,
 }
 
 impl Model {
@@ -30,6 +32,12 @@ impl Model {
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
         let specs = weight_specs(&config)?;
+        let parameter_count = specs
+            .iter()
+            .try_fold(0_usize, |total, spec| {
+                total.checked_add(spec.element_count())
+            })
+            .context("model parameter count overflowed")?;
         let runtime =
             Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)
                 .context("failed to compile the Qwen3 Catena GPU program")?;
@@ -63,11 +71,31 @@ impl Model {
             weights,
             checkpoint,
             config,
+            parameter_count,
+            weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
         })
     }
 
     pub fn config(&self) -> &ModelConfig {
         &self.config
+    }
+
+    pub fn display_name(&self) -> &str {
+        self.config
+            .model_name
+            .as_deref()
+            .unwrap_or(match self.config.architecture {
+                ModelArchitecture::Qwen3Moe => "Qwen3 MoE",
+                ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
+            })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.parameter_count
+    }
+
+    pub fn weight_byte_len(&self) -> usize {
+        self.weight_byte_len
     }
 
     /// Run a full causal prefill and return final-position vocabulary logits.
