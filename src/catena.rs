@@ -138,6 +138,44 @@ mod tests {
         runtime::{Runtime, Value},
         stdlib,
     };
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn qwen3_program_references(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+        const DEFINITION: &str = "(def program ";
+        let definitions = source
+            .match_indices(DEFINITION)
+            .filter_map(|(offset, _)| {
+                let name_start = offset + DEFINITION.len();
+                let name = source[name_start..].split_whitespace().next()?;
+                (name == "qwen3" || name.starts_with("qwen3.")).then_some((offset, name))
+            })
+            .collect::<Vec<_>>();
+        definitions
+            .iter()
+            .enumerate()
+            .map(|(index, (offset, name))| {
+                let end = definitions
+                    .get(index + 1)
+                    .map_or(source.len(), |(offset, _)| *offset);
+                let mut references = source[*offset..end]
+                    .lines()
+                    .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+                    .flat_map(|line| {
+                        line.split(|character: char| {
+                            !(character.is_ascii_alphanumeric()
+                                || character == '.'
+                                || character == '-')
+                        })
+                    })
+                    .map(|token| token.strip_prefix("name.").unwrap_or(token))
+                    .filter(|token| *token == "qwen3" || token.starts_with("qwen3."))
+                    .map(str::to_owned)
+                    .collect::<BTreeSet<_>>();
+                references.remove(*name);
+                ((*name).to_owned(), references)
+            })
+            .collect()
+    }
 
     #[test]
     fn entrypoint_has_all_layers_and_inputs() {
@@ -163,6 +201,28 @@ mod tests {
     #[test]
     fn checked_in_entrypoint_matches_generator() {
         assert_eq!(MODEL_SOURCE, generated_model_source());
+    }
+
+    #[test]
+    fn every_qwen3_program_is_reachable_from_the_model_entrypoint() {
+        let programs = qwen3_program_references(MODEL_SOURCE);
+        let mut reachable = BTreeSet::new();
+        let mut pending = vec!["qwen3".to_owned()];
+        while let Some(program) = pending.pop() {
+            if !reachable.insert(program.clone()) {
+                continue;
+            }
+            pending.extend(programs.get(&program).into_iter().flatten().cloned());
+        }
+        let unreachable = programs
+            .keys()
+            .filter(|program| !reachable.contains(*program))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            unreachable.is_empty(),
+            "programs unreachable from qwen3: {unreachable:?}"
+        );
     }
 
     #[test]
