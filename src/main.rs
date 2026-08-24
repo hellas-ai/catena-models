@@ -13,7 +13,7 @@ use catena_qwen3::{
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(about = "Greedy text generation with Qwen3-30B-A3B-Base BF16 on Catena/HIP")]
+#[command(about = "Greedy BF16 text generation with dense or MoE Qwen3 on Catena/HIP")]
 struct Args {
     /// Text prefix to continue.
     #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]

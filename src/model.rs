@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
@@ -32,8 +32,10 @@ impl Model {
         let config = read_gguf_model_config(gguf_path)?;
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
+        let mut physical_tensors = HashSet::new();
         let parameter_count = specs
             .iter()
+            .filter(|spec| physical_tensors.insert(spec.gguf_name.as_str()))
             .try_fold(0_usize, |total, spec| {
                 total.checked_add(spec.element_count())
             })
@@ -45,13 +47,16 @@ impl Model {
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
         let mut mapped_f32_bytes = 0_usize;
+        let mut counted_tensors = HashSet::new();
         for spec in specs {
             let view = checkpoint
                 .tensor_view(&spec)
                 .with_context(|| format!("failed to locate {}", spec.name))?;
-            match view.dtype {
-                GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
-                GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
+            if counted_tensors.insert(spec.gguf_name) {
+                match view.dtype {
+                    GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
+                    GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
+                }
             }
             weights.push(view);
         }
@@ -85,6 +90,7 @@ impl Model {
             .model_name
             .as_deref()
             .unwrap_or(match self.config.architecture {
+                ModelArchitecture::Qwen3Dense => "Qwen3 dense",
                 ModelArchitecture::Qwen3Moe => "Qwen3 MoE",
                 ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
             })
@@ -209,7 +215,10 @@ impl Model {
 
     fn ensure_execution_supported(&self) -> Result<()> {
         ensure!(
-            self.config.architecture == ModelArchitecture::Qwen3Moe,
+            matches!(
+                self.config.architecture,
+                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen3Moe
+            ),
             "Qwen3.5/3.6 GGUF metadata and all {} tensors were validated, but the hybrid \
              linear-attention Catena program is not implemented yet",
             self.weights.len()

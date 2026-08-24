@@ -4,6 +4,7 @@ use anyhow::{Result, ensure};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelArchitecture {
+    Qwen3Dense,
     Qwen3Moe,
     Qwen35Moe,
 }
@@ -42,6 +43,29 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    pub fn qwen3_0_6b() -> Self {
+        let mut config = Self::qwen3_30b();
+        config.model_name = Some("Qwen3-0.6B".into());
+        config.architecture = ModelArchitecture::Qwen3Dense;
+        config.hidden_size = 1_024;
+        config.intermediate_size = 3_072;
+        config.num_layers = 28;
+        config.num_attention_heads = 16;
+        config.num_key_value_heads = 8;
+        config.max_position_embeddings = 40_960;
+        config.num_experts = 0;
+        config.experts_per_token = 0;
+        config
+    }
+
+    pub fn qwen3_1_7b() -> Self {
+        let mut config = Self::qwen3_0_6b();
+        config.model_name = Some("Qwen3-1.7B".into());
+        config.hidden_size = 2_048;
+        config.intermediate_size = 6_144;
+        config
+    }
+
     pub fn qwen3_30b() -> Self {
         Self {
             model_name: Some("Qwen3-30B-A3B-Base".into()),
@@ -80,8 +104,6 @@ impl ModelConfig {
             ("KV heads", self.num_key_value_heads),
             ("head dimension", self.head_dim),
             ("context length", self.max_position_embeddings),
-            ("expert count", self.num_experts),
-            ("experts used", self.experts_per_token),
         ] {
             ensure!(value > 0, "GGUF {name} must be non-zero");
         }
@@ -90,10 +112,23 @@ impl ModelConfig {
                 .is_multiple_of(self.num_key_value_heads),
             "attention head count must be divisible by KV head count"
         );
-        ensure!(
-            self.experts_per_token <= self.num_experts,
-            "experts used exceeds expert count"
-        );
+        match self.architecture {
+            ModelArchitecture::Qwen3Dense => ensure!(
+                self.num_experts == 0 && self.experts_per_token == 0,
+                "dense Qwen3 metadata must not define routed experts"
+            ),
+            ModelArchitecture::Qwen3Moe | ModelArchitecture::Qwen35Moe => {
+                ensure!(self.num_experts > 0, "GGUF expert count must be non-zero");
+                ensure!(
+                    self.experts_per_token > 0,
+                    "GGUF experts used must be non-zero"
+                );
+                ensure!(
+                    self.experts_per_token <= self.num_experts,
+                    "experts used exceeds expert count"
+                );
+            }
+        }
         ensure!(
             self.rope_dimension_count > 0 && self.rope_dimension_count <= self.head_dim,
             "rotary dimension must be within the attention head"
@@ -230,7 +265,8 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
             vec![c.hidden_size],
         ));
         match (c.architecture, c.layer_type(l)) {
-            (ModelArchitecture::Qwen3Moe, _)
+            (ModelArchitecture::Qwen3Dense, _)
+            | (ModelArchitecture::Qwen3Moe, _)
             | (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
                 let q = c.query_size()
                     * if c.architecture == ModelArchitecture::Qwen35Moe {
@@ -365,36 +401,62 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
             WeightDtype::F32,
             vec![c.hidden_size],
         ));
-        out.push(layer_tensor(
-            l,
-            "mlp.gate.weight",
-            "ffn_gate_inp.weight",
-            WeightDtype::F32,
-            vec![c.num_experts, c.hidden_size],
-        ));
-        out.extend([
-            TensorSpec::experts(
-                c,
+        if c.architecture == ModelArchitecture::Qwen3Dense {
+            out.extend([
+                layer_tensor(
+                    l,
+                    "mlp.gate_proj.weight",
+                    "ffn_gate.weight",
+                    WeightDtype::Bf16,
+                    vec![c.intermediate_size, c.hidden_size],
+                ),
+                layer_tensor(
+                    l,
+                    "mlp.up_proj.weight",
+                    "ffn_up.weight",
+                    WeightDtype::Bf16,
+                    vec![c.intermediate_size, c.hidden_size],
+                ),
+                layer_tensor(
+                    l,
+                    "mlp.down_proj.weight",
+                    "ffn_down.weight",
+                    WeightDtype::Bf16,
+                    vec![c.hidden_size, c.intermediate_size],
+                ),
+            ]);
+        } else {
+            out.push(layer_tensor(
                 l,
-                "gate_proj",
-                "ffn_gate_exps",
-                vec![c.intermediate_size, c.hidden_size],
-            ),
-            TensorSpec::experts(
-                c,
-                l,
-                "up_proj",
-                "ffn_up_exps",
-                vec![c.intermediate_size, c.hidden_size],
-            ),
-            TensorSpec::experts(
-                c,
-                l,
-                "down_proj",
-                "ffn_down_exps",
-                vec![c.hidden_size, c.intermediate_size],
-            ),
-        ]);
+                "mlp.gate.weight",
+                "ffn_gate_inp.weight",
+                WeightDtype::F32,
+                vec![c.num_experts, c.hidden_size],
+            ));
+            out.extend([
+                TensorSpec::experts(
+                    c,
+                    l,
+                    "gate_proj",
+                    "ffn_gate_exps",
+                    vec![c.intermediate_size, c.hidden_size],
+                ),
+                TensorSpec::experts(
+                    c,
+                    l,
+                    "up_proj",
+                    "ffn_up_exps",
+                    vec![c.intermediate_size, c.hidden_size],
+                ),
+                TensorSpec::experts(
+                    c,
+                    l,
+                    "down_proj",
+                    "ffn_down_exps",
+                    vec![c.hidden_size, c.intermediate_size],
+                ),
+            ]);
+        }
         if let Some(shared) = c.shared_expert_intermediate_size {
             out.extend([
                 layer_tensor(
@@ -437,7 +499,12 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
         ),
         TensorSpec::one(
             "lm_head.weight".into(),
-            "output.weight".into(),
+            if c.architecture == ModelArchitecture::Qwen3Dense {
+                "token_embd.weight"
+            } else {
+                "output.weight"
+            }
+            .into(),
             WeightDtype::Bf16,
             vec![c.vocabulary_size, c.hidden_size],
         ),
@@ -448,6 +515,17 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    fn physical_parameter_count(specs: &[TensorSpec]) -> usize {
+        let mut names = HashSet::new();
+        specs
+            .iter()
+            .filter(|spec| names.insert(spec.gguf_name.as_str()))
+            .map(TensorSpec::element_count)
+            .sum()
+    }
+
     fn qwen35() -> ModelConfig {
         let mut c = ModelConfig::qwen3_30b();
         c.architecture = ModelArchitecture::Qwen35Moe;
@@ -480,6 +558,39 @@ mod tests {
             30_532_122_624
         );
         assert_eq!(config.kv_cache_elements_per_token()?, 49_152);
+        Ok(())
+    }
+
+    #[test]
+    fn dense_qwen3_inventories_use_tied_embeddings() -> Result<()> {
+        for (config, parameters) in [
+            (ModelConfig::qwen3_0_6b(), 596_049_920),
+            (ModelConfig::qwen3_1_7b(), 1_720_574_976),
+        ] {
+            let specs = weight_specs(&config)?;
+            assert_eq!(specs.len(), 311);
+            assert_eq!(
+                specs
+                    .iter()
+                    .map(|spec| spec.gguf_name.as_str())
+                    .collect::<HashSet<_>>()
+                    .len(),
+                310
+            );
+            assert_eq!(specs.first().unwrap().gguf_name, "token_embd.weight");
+            assert_eq!(specs.last().unwrap().gguf_name, "token_embd.weight");
+            assert_eq!(physical_parameter_count(&specs), parameters);
+            assert!(
+                specs
+                    .iter()
+                    .any(|spec| spec.gguf_name == "blk.0.ffn_gate.weight")
+            );
+            assert!(
+                !specs
+                    .iter()
+                    .any(|spec| spec.gguf_name.contains("ffn_gate_exps"))
+            );
+        }
         Ok(())
     }
     #[test]

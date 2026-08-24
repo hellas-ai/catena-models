@@ -6,6 +6,10 @@ implementation. The Catena path executes all 48 layers, uses a persistent KV
 cache, and performs greedy generation directly from a HIP-registered BF16
 GGUF mapping.
 
+The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
+including the tied-embedding 0.6B and 1.7B layouts. The conversion and measured
+performance notes below remain specific to Qwen3-30B-A3B.
+
 The scripts assume the Nix development environment; invoke them with
 `nix develop --command` as shown below.
 
@@ -127,7 +131,7 @@ most `4.92e-7` across the complete 32,768-position context.
 Normal inference compiles the dimension-free helpers in
 `src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
 `src/catena/qwen3_model.hex`. Rust fills its embedding, normalization,
-projection, RoPE, cache, attention, and MoE dimensions from GGUF metadata and
+projection, RoPE, cache, attention, and dense/MoE feed-forward dimensions from GGUF metadata and
 appends a linear-use entrypoint with the metadata-derived layer and tensor
 counts. To inspect the exact generated model source for the selected GGUF,
 write it under

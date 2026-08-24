@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     env,
     ffi::{CStr, c_char, c_int, c_uint, c_void},
     fs::{self, File},
@@ -335,9 +335,12 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     }
     let architecture_name = architecture.context("GGUF is missing general.architecture")?;
     let architecture = match architecture_name.as_str() {
+        "qwen3" => ModelArchitecture::Qwen3Dense,
         "qwen3moe" => ModelArchitecture::Qwen3Moe,
         "qwen35moe" | "qwen35" => ModelArchitecture::Qwen35Moe,
-        other => bail!("unsupported GGUF architecture {other:?}; expected qwen3moe or qwen35moe"),
+        other => {
+            bail!("unsupported GGUF architecture {other:?}; expected qwen3, qwen3moe, or qwen35moe")
+        }
     };
     let prefix = architecture_name.as_str();
     let u = |suffix: &str| -> Result<usize> {
@@ -373,7 +376,11 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
             .or(tokenizer_vocabulary_size)
             .context("GGUF has neither architecture vocab_size nor tokenizer tokens")?,
         hidden_size: u("embedding_length")?,
-        intermediate_size: u("expert_feed_forward_length")?,
+        intermediate_size: if architecture == ModelArchitecture::Qwen3Dense {
+            u("feed_forward_length")?
+        } else {
+            u("expert_feed_forward_length")?
+        },
         num_layers: u("block_count")?,
         num_attention_heads: u("attention.head_count")?,
         num_key_value_heads: u("attention.head_count_kv")?,
@@ -382,8 +389,8 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         rms_norm_eps: f("attention.layer_norm_rms_epsilon")?,
         rope_theta: f("rope.freq_base")?,
         rope_dimension_count: optional_u("rope.dimension_count")?.unwrap_or(head_dim),
-        num_experts: u("expert_count")?,
-        experts_per_token: u("expert_used_count")?,
+        num_experts: optional_u("expert_count")?.unwrap_or(0),
+        experts_per_token: optional_u("expert_used_count")?.unwrap_or(0),
         shared_expert_intermediate_size: optional_u("expert_shared_feed_forward_length")?,
         full_attention_interval: optional_u("full_attention_interval")?,
         linear_conv_kernel: optional_u("ssm.conv_kernel")?,
@@ -401,6 +408,7 @@ fn is_model_scalar_key(key: &str) -> bool {
     [
         ".vocab_size",
         ".embedding_length",
+        ".feed_forward_length",
         ".expert_feed_forward_length",
         ".block_count",
         ".attention.head_count",
@@ -438,16 +446,16 @@ fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<St
         }
     }
 
-    ensure!(
-        tensor_files.len() == specs.len(),
-        "GGUF shard set contains {} tensors, expected {} for selected model",
-        tensor_files.len(),
-        specs.len()
-    );
     let expected_names = specs
         .iter()
         .map(|spec| spec.gguf_name.as_str())
         .collect::<BTreeSet<_>>();
+    ensure!(
+        tensor_files.len() == expected_names.len(),
+        "GGUF shard set contains {} tensors, expected {} for selected model",
+        tensor_files.len(),
+        expected_names.len()
+    );
     let actual_names = tensor_files
         .keys()
         .map(String::as_str)
@@ -470,10 +478,10 @@ fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<St
 
     for (file_index, file) in files.iter().enumerate() {
         let mut ranges = Vec::new();
-        for spec in specs
-            .iter()
-            .filter(|spec| tensor_files[&spec.gguf_name] == file_index)
-        {
+        let mut seen = HashSet::new();
+        for spec in specs.iter().filter(|spec| {
+            tensor_files[&spec.gguf_name] == file_index && seen.insert(spec.gguf_name.as_str())
+        }) {
             let view = file.tensor_view(spec, file_index)?;
             ranges.push((
                 view.file_offset,
@@ -1081,6 +1089,16 @@ mod tests {
         push_string(bytes, value);
     }
 
+    fn push_u32_metadata(bytes: &mut Vec<u8>, key: &str, value: u32) {
+        push_metadata_key(bytes, key, ValueType::U32);
+        push_u32(bytes, value);
+    }
+
+    fn push_f32_metadata(bytes: &mut Vec<u8>, key: &str, value: f32) {
+        push_metadata_key(bytes, key, ValueType::F32);
+        bytes.extend(value.to_le_bytes());
+    }
+
     fn push_string_array_metadata(bytes: &mut Vec<u8>, key: &str, values: &[&str]) {
         push_metadata_key(bytes, key, ValueType::Array);
         push_u32(bytes, ValueType::String as u32);
@@ -1164,6 +1182,41 @@ mod tests {
         assert_eq!(metadata.token_types, [1, 1, 3]);
         assert_eq!(metadata.eos_token_id, Some(2));
         assert!(metadata.add_eos_token);
+        Ok(())
+    }
+
+    #[test]
+    fn parses_dense_qwen3_configuration() -> Result<()> {
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, GGUF_MAGIC);
+        push_u32(&mut bytes, GGUF_VERSION);
+        push_u64(&mut bytes, 0);
+        push_u64(&mut bytes, 13);
+        push_string_metadata(&mut bytes, "general.architecture", "qwen3");
+        push_string_metadata(&mut bytes, "general.name", "Qwen3-0.6B");
+        for (key, value) in [
+            ("qwen3.vocab_size", 151_936),
+            ("qwen3.embedding_length", 1_024),
+            ("qwen3.feed_forward_length", 3_072),
+            ("qwen3.block_count", 28),
+            ("qwen3.attention.head_count", 16),
+            ("qwen3.attention.head_count_kv", 8),
+            ("qwen3.attention.key_length", 128),
+            ("qwen3.context_length", 40_960),
+            ("qwen3.rope.dimension_count", 128),
+        ] {
+            push_u32_metadata(&mut bytes, key, value);
+        }
+        push_f32_metadata(&mut bytes, "qwen3.attention.layer_norm_rms_epsilon", 1.0e-6);
+        push_f32_metadata(&mut bytes, "qwen3.rope.freq_base", 1_000_000.0);
+
+        let config = parse_gguf_model_config(&bytes)?;
+        assert_eq!(config.architecture, ModelArchitecture::Qwen3Dense);
+        assert_eq!(config.hidden_size, 1_024);
+        assert_eq!(config.intermediate_size, 3_072);
+        assert_eq!(config.head_dim, 128);
+        assert_eq!(config.num_experts, 0);
+        assert_eq!(weight_specs(&config)?.len(), 311);
         Ok(())
     }
 

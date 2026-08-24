@@ -1568,6 +1568,150 @@
   }
 ))
 
+# A dense layer is represented as one routed slot selecting expert zero. This
+# lets the paired BF16 projection and down-projection kernels share their exact
+# reduction trees with the MoE path without duplicating compiler primitives.
+(def program qwen3.dense-selected-expert-at :
+  ([n.] {1 ([.n] ix val)})
+  ->
+  ([n.] (u64 val))
+= ([_env _index.]
+  (const.u64.0x0000000000000000)
+))
+
+(def program qwen3.dense-selected-experts :
+  (u64 val)
+  ->
+  (cap.own mem)
+= ([row-count.]
+  ([.row-count] u64.name [rows.])
+  {
+    [.rows]
+    ({[.rows] unit.intro (([.rows] :.param) name.qwen3.dense-selected-expert-at)}
+      materializec)
+  } buf.to-mem
+))
+
+(def program qwen3.dense-activate-at :
+  ([n.] {({(cap.own mem) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([gate-and-up output-index.]
+  ([.gate-and-up] *.elim [gate up.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  ([.gate] mem.cast.f32 [gate-count gate-buffer.])
+  ({[.gate-count] [.gate-buffer] [.flat-output-index]}
+    qwen3.f32-buffer-at [gate-value.])
+  ([.up] mem.cast.f32 [up-count up-buffer.])
+  ({[.up-count] [.up-buffer] [.flat-output-index]}
+    qwen3.f32-buffer-at [up-value.])
+  ([.gate-value] qwen3.silu [activated-gate.])
+  ([.activated-gate up-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.dense-activate :
+  {(cap.own mem) (cap.own mem)}
+  ->
+  (cap.own mem)
+= ([gate up.]
+  ([.gate] mem.cast.f32 [output-count _gate-buffer.])
+  ({[.gate] [.up]} *.intro [env.])
+  {
+    [.output-count]
+    ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.dense-activate-at)}
+      materializec)
+  } buf.to-mem
+))
+
+# Dense decoder layer for both prefill and decode.
+(def program qwen3.cached-dense-decoder-layer :
+  {
+    (cap.own mem)
+    (cap.own mem)
+    (u64 val)
+    (cap.own mem)
+    (u64 val)
+    (u64 val)
+    (u64 val)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+    (cap.ref mem)
+  }
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([hidden rope sequence cache token-capacity start layer input-norm q-weight k-weight v-weight o-weight q-norm k-norm post-norm gate-weight up-weight down-weight.]
+  ([.hidden] qwen3.rms-inv [attention-inverse.])
+  (const.u64.0x{{QUERY_SIZE}} [query-features.])
+  (const.u64.0x{{KEY_VALUE_SIZE}} [key-value-features.])
+  ({[.hidden] [.input-norm] [.q-weight] [.attention-inverse] [.query-features]}
+    qwen3.linear-norm [query-raw.])
+  ({[.hidden] [.input-norm] [.k-weight] [.attention-inverse] [.key-value-features]}
+    qwen3.linear-norm [key-raw.])
+  ({[.hidden] [.input-norm] [.v-weight] [.attention-inverse] [.key-value-features]}
+    qwen3.linear-norm [value.])
+  ({[.query-raw] [.q-norm]} qwen3.head-rmsnorm [query.])
+  ({[.key-raw] [.k-norm]} qwen3.head-rmsnorm [key.])
+  ({[.cache] [.key] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cache-append-key [cache-with-key.])
+  ({[.key] [.cache-with-key]}
+    qwen3.free-f32-before [cache-after-key.])
+  ({[.cache-after-key] [.value] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cache-append-value [cache-with-value.])
+  ({[.value] [.cache-with-value]}
+    qwen3.free-f32-before [cache-after-value.])
+  ({[.cache-after-value] [.query] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cached-attention [cache-after-attention context.])
+  ({[.attention-inverse] [.context]}
+    qwen3.free-f32-before [context-after-attention-inverse.])
+  ({[.query] [.context-after-attention-inverse]}
+    qwen3.free-f32-before [context-after-query.])
+  (const.u64.0x{{QUERY_SIZE}} [attention-input-features.])
+  ({[.context-after-query] [.o-weight] [.hidden] [.attention-input-features]}
+    qwen3.linear-residual [attention-hidden.])
+  ({[.context-after-query] [.attention-hidden]}
+    qwen3.free-f32-before [attention-hidden-after-context.])
+  ({[.hidden] [.attention-hidden-after-context]}
+    qwen3.free-f32-before [attention-hidden-after-residual.])
+  ([.attention-hidden-after-residual] qwen3.rms-inv [mlp-inverse.])
+  ({[.attention-hidden-after-residual] [.post-norm] [.mlp-inverse]}
+    qwen3.apply-rmsnorm [normalized-mlp-input.])
+  ([.sequence] qwen3.dense-selected-experts [selected-experts.])
+  ({
+    [.normalized-mlp-input]
+    [.gate-weight]
+    [.up-weight]
+    [.selected-experts]
+  } qwen3.expert-linear-pair
+    [normalized-mlp-input-after-pair selected-experts-after-pair gate up.])
+  ({[.gate] [.up]} qwen3.dense-activate [activated.])
+  ({[.activated] [.down-weight] [.selected-experts-after-pair] [.attention-hidden-after-residual]}
+    qwen3.moe-down-residual [activated-after output.])
+  ({[.mlp-inverse] [.output]}
+    qwen3.free-f32-before [output-after-mlp-inverse.])
+  ({[.normalized-mlp-input-after-pair] [.output-after-mlp-inverse]}
+    qwen3.free-f32-before [output-after-normalized.])
+  ({[.gate] [.output-after-normalized]}
+    qwen3.free-f32-before [output-after-gate.])
+  ({[.up] [.output-after-gate]}
+    qwen3.free-f32-before [output-after-up.])
+  ({[.activated-after] [.output-after-up]}
+    qwen3.free-f32-before [output-after-activated.])
+  ({[.selected-experts-after-pair] [.output-after-activated]}
+    qwen3.free-u64-before [output-after-experts.])
+  ({[.attention-hidden-after-residual] [.output-after-experts]}
+    qwen3.free-f32-before [output-after-residual.])
+  {[.output-after-residual] [.cache-after-attention]}
+))
+
 # Decoder layer for both prefill and decode. New K/V rows are appended to the
 # owned persistent cache before the fused attention producer borrows it.
 (def program qwen3.cached-decoder-layer :

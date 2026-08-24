@@ -332,4 +332,15 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn dense_qwen3_gguf_tokenizer_round_trips_when_present() -> Result<()> {
+        if let Some(path) = std::env::var_os("CATENA_QWEN3_DENSE_GGUF") {
+            let tokenizer = QwenTokenizer::from_gguf(path)?.context("missing GGUF tokenizer")?;
+            let prompt = "The capital of France is";
+            let tokens = tokenizer.encode(prompt)?;
+            assert_eq!(tokenizer.decode(&tokens, false)?, prompt);
+        }
+        Ok(())
+    }
 }

@@ -52,10 +52,16 @@
   ([x.]
     (const.u32.0x00000000 u32.to-f32 [zero.])
     (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    # exp-nonneg constructs 2^k through exponent bits. Saturate before k can
+    # cross the finite F32 exponent range and wrap those bits back to zero.
+    (const.u32.0x42B17218 u32.bitcast-f32 [maximum-log.])
+    (const.u32.0x7F800000 u32.bitcast-f32 [positive-infinity.])
     ([.x] f32.neg [negated.])
     ([.x zero] f32.lt [is-negative.])
     ([.is-negative negated x] f32.select [magnitude.])
-    ([.magnitude] qwen3.exp-nonneg [positive-result.])
+    ([.magnitude] qwen3.exp-nonneg [finite-result.])
+    ([.magnitude maximum-log] f32.gt [overflows.])
+    ([.overflows positive-infinity finite-result] f32.select [positive-result.])
     ([.one positive-result] f32.div [reciprocal.])
     ([.is-negative reciprocal positive-result] f32.select [result.])
     [.result]

@@ -1,4 +1,7 @@
-use std::fmt::Write;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write,
+};
 
 use anyhow::{Result, ensure};
 use catena_lang::stdlib;
@@ -20,7 +23,7 @@ pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a st
 
 const ENTRYPOINT_MARKER: &str = "# Explicit metadata-derived Qwen3 MoE composition.";
 
-const LAYER_WEIGHT_NAMES: [&str; 12] = [
+const MOE_LAYER_WEIGHT_NAMES: [&str; 12] = [
     "input-norm",
     "q-weight",
     "k-weight",
@@ -35,11 +38,37 @@ const LAYER_WEIGHT_NAMES: [&str; 12] = [
     "expert-down-weight",
 ];
 
+const DENSE_LAYER_WEIGHT_NAMES: [&str; 11] = [
+    "input-norm",
+    "q-weight",
+    "k-weight",
+    "v-weight",
+    "o-weight",
+    "q-norm",
+    "k-norm",
+    "post-norm",
+    "gate-weight",
+    "up-weight",
+    "down-weight",
+];
+
+fn layer_weight_names(architecture: ModelArchitecture) -> Result<&'static [&'static str]> {
+    match architecture {
+        ModelArchitecture::Qwen3Dense => Ok(&DENSE_LAYER_WEIGHT_NAMES),
+        ModelArchitecture::Qwen3Moe => Ok(&MOE_LAYER_WEIGHT_NAMES),
+        ModelArchitecture::Qwen35Moe => anyhow::bail!(
+            "Qwen3.5/3.6 source generation requires gated-delta-net, shared-expert, \
+             gated-attention, partial-RoPE, and offset-RMSNorm Catena primitives"
+        ),
+    }
+}
+
 fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     let weight_count = weight_specs(config)?.len();
+    let layer_weight_names = layer_weight_names(config.architecture)?;
     let described_weight_count = config
         .num_layers
-        .checked_mul(LAYER_WEIGHT_NAMES.len())
+        .checked_mul(layer_weight_names.len())
         .and_then(|count| count.checked_add(3))
         .ok_or_else(|| anyhow::anyhow!("Qwen3 MoE entrypoint weight count overflowed"))?;
     ensure!(
@@ -63,7 +92,7 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     }
     source.push_str("  }\n  ->\n  {(cap.own mem) (cap.own mem) (cap.own mem)}\n= ([tokens cache token-capacity cache-start embed-weight");
     for layer in 0..config.num_layers {
-        for name in LAYER_WEIGHT_NAMES {
+        for name in layer_weight_names {
             write!(source, " layer-{layer:02}-{name}").unwrap();
         }
     }
@@ -82,12 +111,17 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
         writeln!(source, "    [.{cache_in}]").unwrap();
         source.push_str("    [.token-capacity]\n    [.cache-start]\n");
         writeln!(source, "    (const.u64.0x{layer:016X})").unwrap();
-        for name in LAYER_WEIGHT_NAMES {
+        for name in layer_weight_names {
             writeln!(source, "    [.layer-{layer:02}-{name}]").unwrap();
         }
+        let decoder = match config.architecture {
+            ModelArchitecture::Qwen3Dense => "qwen3.cached-dense-decoder-layer",
+            ModelArchitecture::Qwen3Moe => "qwen3.cached-decoder-layer",
+            ModelArchitecture::Qwen35Moe => unreachable!("rejected above"),
+        };
         writeln!(
             source,
-            "  }} qwen3.cached-decoder-layer [hidden-{:02} cache-{:02}.])",
+            "  }} {decoder} [hidden-{:02} cache-{:02}.])",
             layer + 1,
             layer + 1
         )
@@ -177,9 +211,19 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
         "rotary dimension must be even"
     );
     let query_heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
+    let routed_experts = if config.architecture == ModelArchitecture::Qwen3Dense {
+        1
+    } else {
+        config.experts_per_token
+    };
+    let rendered_expert_count = if config.architecture == ModelArchitecture::Qwen3Dense {
+        1
+    } else {
+        config.num_experts
+    };
     let active_intermediate = config
         .intermediate_size
-        .checked_mul(config.experts_per_token)
+        .checked_mul(routed_experts)
         .ok_or_else(|| anyhow::anyhow!("active expert intermediate size overflow"))?;
     let expert_stride = config
         .intermediate_size
@@ -218,11 +262,8 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
             "{{QUERY_HEADS_PER_KV_HEAD}}",
             format!("{query_heads_per_kv:016X}"),
         ),
-        ("{{EXPERT_COUNT}}", format!("{:016X}", config.num_experts)),
-        (
-            "{{EXPERTS_PER_TOKEN}}",
-            format!("{:016X}", config.experts_per_token),
-        ),
+        ("{{EXPERT_COUNT}}", format!("{rendered_expert_count:016X}")),
+        ("{{EXPERTS_PER_TOKEN}}", format!("{routed_experts:016X}")),
         (
             "{{ACTIVE_INTERMEDIATE_SIZE}}",
             format!("{active_intermediate:016X}"),
@@ -257,6 +298,74 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
     Ok(source)
 }
 
+fn qwen3_program_references(source: &str) -> BTreeMap<String, BTreeSet<String>> {
+    const DEFINITION: &str = "(def program ";
+    let definitions = source
+        .match_indices(DEFINITION)
+        .filter_map(|(offset, _)| {
+            let name_start = offset + DEFINITION.len();
+            let name = source[name_start..].split_whitespace().next()?;
+            (name == "qwen3" || name.starts_with("qwen3.")).then_some((offset, name))
+        })
+        .collect::<Vec<_>>();
+    definitions
+        .iter()
+        .enumerate()
+        .map(|(index, (offset, name))| {
+            let end = definitions
+                .get(index + 1)
+                .map_or(source.len(), |(offset, _)| *offset);
+            let mut references = source[*offset..end]
+                .lines()
+                .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
+                .flat_map(|line| {
+                    line.split(|character: char| {
+                        !(character.is_ascii_alphanumeric() || character == '.' || character == '-')
+                    })
+                })
+                .map(|token| token.strip_prefix("name.").unwrap_or(token))
+                .filter(|token| *token == "qwen3" || token.starts_with("qwen3."))
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>();
+            references.remove(*name);
+            ((*name).to_owned(), references)
+        })
+        .collect()
+}
+
+fn retain_reachable_model_programs(source: &str) -> String {
+    const DEFINITION: &str = "(def program ";
+    let programs = qwen3_program_references(source);
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec!["qwen3".to_owned()];
+    while let Some(program) = pending.pop() {
+        if !reachable.insert(program.clone()) {
+            continue;
+        }
+        pending.extend(programs.get(&program).into_iter().flatten().cloned());
+    }
+    let definitions = source
+        .match_indices(DEFINITION)
+        .filter_map(|(offset, _)| {
+            let name = source[offset + DEFINITION.len()..]
+                .split_whitespace()
+                .next()?;
+            (name == "qwen3" || name.starts_with("qwen3.")).then_some((offset, name))
+        })
+        .collect::<Vec<_>>();
+    let mut retained =
+        source[..definitions.first().map_or(source.len(), |entry| entry.0)].to_owned();
+    for (index, (start, name)) in definitions.iter().enumerate() {
+        let end = definitions
+            .get(index + 1)
+            .map_or(source.len(), |entry| entry.0);
+        if reachable.contains(*name) {
+            retained.push_str(&source[*start..end]);
+        }
+    }
+    retained
+}
+
 /// Generate all model-specific programs plus the explicit linear-use entrypoint.
 pub fn generated_model_source() -> String {
     generated_model_source_for(&ModelConfig::qwen3_30b())
@@ -264,19 +373,15 @@ pub fn generated_model_source() -> String {
 }
 
 /// Generate the source for a selected GGUF configuration. The current Catena
-/// core implements conventional Qwen3 MoE attention only; rejecting the hybrid
+/// core implements conventional dense and MoE Qwen3 attention; rejecting the hybrid
 /// architecture here prevents writing a plausible-looking but invalid program.
 pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
     config.validate()?;
-    ensure!(
-        config.architecture == ModelArchitecture::Qwen3Moe,
-        "Qwen3.5/3.6 source generation requires gated-delta-net, shared-expert, \
-         gated-attention, partial-RoPE, and offset-RMSNorm Catena primitives"
-    );
+    layer_weight_names(config.architecture)?;
     let mut source = render_model_template(config)?;
     source.push('\n');
     source.push_str(&generated_entrypoint(config)?);
-    Ok(source)
+    Ok(retain_reachable_model_programs(&source))
 }
 
 #[cfg(test)]
@@ -287,44 +392,6 @@ mod tests {
         codegen::GpuDialect,
         runtime::{Runtime, Value},
     };
-    use std::collections::{BTreeMap, BTreeSet};
-
-    fn qwen3_program_references(source: &str) -> BTreeMap<String, BTreeSet<String>> {
-        const DEFINITION: &str = "(def program ";
-        let definitions = source
-            .match_indices(DEFINITION)
-            .filter_map(|(offset, _)| {
-                let name_start = offset + DEFINITION.len();
-                let name = source[name_start..].split_whitespace().next()?;
-                (name == "qwen3" || name.starts_with("qwen3.")).then_some((offset, name))
-            })
-            .collect::<Vec<_>>();
-        definitions
-            .iter()
-            .enumerate()
-            .map(|(index, (offset, name))| {
-                let end = definitions
-                    .get(index + 1)
-                    .map_or(source.len(), |(offset, _)| *offset);
-                let mut references = source[*offset..end]
-                    .lines()
-                    .map(|line| line.split_once('#').map_or(line, |(code, _)| code))
-                    .flat_map(|line| {
-                        line.split(|character: char| {
-                            !(character.is_ascii_alphanumeric()
-                                || character == '.'
-                                || character == '-')
-                        })
-                    })
-                    .map(|token| token.strip_prefix("name.").unwrap_or(token))
-                    .filter(|token| *token == "qwen3" || token.starts_with("qwen3."))
-                    .map(str::to_owned)
-                    .collect::<BTreeSet<_>>();
-                references.remove(*name);
-                ((*name).to_owned(), references)
-            })
-            .collect()
-    }
 
     #[test]
     fn entrypoint_uses_metadata_layer_and_input_counts() -> Result<()> {
@@ -367,6 +434,13 @@ mod tests {
     }
 
     #[test]
+    fn exponential_helper_saturates_before_f32_exponent_bits_wrap() {
+        assert!(HELPER_SOURCE.contains("const.u32.0x42B17218"));
+        assert!(HELPER_SOURCE.contains("const.u32.0x7F800000"));
+        assert!(HELPER_SOURCE.contains("[.magnitude maximum-log] f32.gt"));
+    }
+
+    #[test]
     fn model_constants_are_rendered_from_configuration() -> Result<()> {
         let mut config = ModelConfig::qwen3_30b();
         config.vocabulary_size = 42;
@@ -405,26 +479,52 @@ mod tests {
     }
 
     #[test]
-    fn every_qwen3_program_is_reachable_from_the_model_entrypoint() {
-        let source = format!("{HELPER_SOURCE}\n{}", generated_model_source());
-        let programs = qwen3_program_references(&source);
-        let mut reachable = BTreeSet::new();
-        let mut pending = vec!["qwen3".to_owned()];
-        while let Some(program) = pending.pop() {
-            if !reachable.insert(program.clone()) {
-                continue;
-            }
-            pending.extend(programs.get(&program).into_iter().flatten().cloned());
-        }
-        let unreachable = programs
-            .keys()
-            .filter(|program| !reachable.contains(*program))
-            .cloned()
-            .collect::<Vec<_>>();
-        assert!(
-            unreachable.is_empty(),
-            "programs unreachable from qwen3: {unreachable:?}"
+    fn dense_qwen3_uses_dense_layers_and_tensor_arity() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let model = generated_model_source_for(&config)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.cached-dense-decoder-layer")
+                .count(),
+            config.num_layers
         );
+        assert_eq!(
+            entrypoint.matches("(cap.ref mem)").count(),
+            1 + weight_specs(&config)?.len()
+        );
+        assert!(model.contains("(def program qwen3.dense-activate :"));
+        assert!(!model.contains("(def program qwen3.cached-decoder-layer :"));
+        assert!(!model.contains("(def program qwen3.router-select-experts :"));
+        assert!(!model.contains("(def program qwen3.moe-activate :"));
+        Ok(())
+    }
+
+    #[test]
+    fn every_qwen3_program_is_reachable_from_the_model_entrypoint() {
+        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen3_0_6b()] {
+            let model = generated_model_source_for(&config).unwrap();
+            let source = format!("{HELPER_SOURCE}\n{model}");
+            let programs = qwen3_program_references(&source);
+            let mut reachable = BTreeSet::new();
+            let mut pending = vec!["qwen3".to_owned()];
+            while let Some(program) = pending.pop() {
+                if !reachable.insert(program.clone()) {
+                    continue;
+                }
+                pending.extend(programs.get(&program).into_iter().flatten().cloned());
+            }
+            let unreachable = programs
+                .keys()
+                .filter(|program| !reachable.contains(*program))
+                .cloned()
+                .collect::<Vec<_>>();
+            assert!(
+                unreachable.is_empty(),
+                "programs unreachable from {:?} qwen3: {unreachable:?}",
+                config.architecture
+            );
+        }
     }
 
     #[test]
@@ -463,6 +563,32 @@ mod tests {
         );
         assert!(max_sine_error <= 1.0e-6, "sine error is too large");
         assert!(max_cosine_error <= 1.0e-6, "cosine error is too large");
+        Ok(())
+    }
+
+    #[test]
+    fn dense_gpu_program_compiles_when_requested() -> Result<()> {
+        if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
+            return Ok(());
+        }
+        for (index, config) in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen3_1_7b()]
+            .into_iter()
+            .enumerate()
+        {
+            let model = generated_model_source_for(&config)?;
+            let runtime = Runtime::from_sources(runtime_sources(&model), GpuDialect::Hip)?;
+            if index == 0 {
+                let [Value::F32(positive)] = runtime.exec("qwen3.exp", [100.0_f32.into()])? else {
+                    anyhow::bail!("qwen3.exp returned an unexpected value")
+                };
+                let [Value::F32(negative)] = runtime.exec("qwen3.exp", [(-100.0_f32).into()])?
+                else {
+                    anyhow::bail!("qwen3.exp returned an unexpected value")
+                };
+                assert!(positive.is_infinite() && positive.is_sign_positive());
+                assert_eq!(negative, 0.0);
+            }
+        }
         Ok(())
     }
 }
