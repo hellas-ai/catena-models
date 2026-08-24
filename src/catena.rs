@@ -15,13 +15,6 @@ pub const HELPER_SOURCE: &str = include_str!("catena/qwen3_helpers.hex");
 const MODEL_TEMPLATE: &str = include_str!("catena/qwen3_model.hex");
 const QWEN35_TEMPLATE: &str = include_str!("catena/qwen35_model.hex");
 
-// These are execution limits of the reduction kernels in the pinned Catena
-// compiler revision, not properties of Qwen. Ordinary and paired reductions
-// reserve one or two F32 shared-memory arrays; the borrowed form reserves one.
-const MAX_REDUCE_F32_TERMS: usize = 4_096;
-const MAX_BORROW_REDUCE_F32_TERMS: usize = 8_192;
-pub(crate) const MAX_SOFTMAX_F32_COLUMNS: usize = 8_192;
-
 /// Catena stdlib, fixed helpers, and one generated model in compilation order.
 pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a str> {
     stdlib::sources()
@@ -133,49 +126,6 @@ fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'
             Ok(&QWEN35_MOE_LINEAR_LAYER_WEIGHT_NAMES)
         }
     }
-}
-
-fn validate_execution_reductions(config: &ModelConfig) -> Result<()> {
-    let routed_slots = match config.architecture {
-        ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense => 1,
-        ModelArchitecture::Qwen3Moe | ModelArchitecture::Qwen35Moe => config.experts_per_token,
-    };
-    let active_intermediate = config
-        .intermediate_size
-        .checked_mul(routed_slots)
-        .ok_or_else(|| anyhow::anyhow!("active intermediate width overflowed"))?;
-
-    ensure!(
-        config.hidden_size <= MAX_REDUCE_F32_TERMS,
-        "{} has hidden size {}, but the pinned Catena ordinary/paired F32 reduction cap is {}; this affects RMSNorm, Q/K/V and final projections, and the paired gate/up projection",
-        config
-            .model_name
-            .as_deref()
-            .unwrap_or("selected Qwen3 model"),
-        config.hidden_size,
-        MAX_REDUCE_F32_TERMS,
-    );
-    ensure!(
-        config.query_size() <= MAX_REDUCE_F32_TERMS,
-        "{} has attention output width {}, but the pinned Catena ordinary F32 reduction cap is {}; this affects the attention output projection",
-        config
-            .model_name
-            .as_deref()
-            .unwrap_or("selected Qwen3 model"),
-        config.query_size(),
-        MAX_REDUCE_F32_TERMS,
-    );
-    ensure!(
-        active_intermediate <= MAX_BORROW_REDUCE_F32_TERMS,
-        "{} has active feed-forward reduction width {}, but the pinned Catena borrowed F32 reduction cap is {}; dense models use intermediate_size and MoE models use intermediate_size * experts_per_token",
-        config
-            .model_name
-            .as_deref()
-            .unwrap_or("selected Qwen3 model"),
-        active_intermediate,
-        MAX_BORROW_REDUCE_F32_TERMS,
-    );
-    Ok(())
 }
 
 fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
@@ -580,7 +530,6 @@ pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
     }
-    validate_execution_reductions(config)?;
     let mut source = render_model_template(config)?;
     source.push('\n');
     source.push_str(&generated_entrypoint(config)?);
@@ -753,33 +702,6 @@ mod tests {
         assert!(model.contains("(def program qwen3.qwen35-moe-ffn :"));
         assert!(model.contains("(def program qwen3.qwen35-shared-linear-pair :"));
         Ok(())
-    }
-
-    #[test]
-    fn rejects_model_dimensions_above_pinned_reduction_limits() {
-        let mut qwen3_4b = ModelConfig::qwen3_1_7b();
-        qwen3_4b.model_name = Some("Qwen3-4B".into());
-        qwen3_4b.hidden_size = 2_560;
-        qwen3_4b.intermediate_size = 9_728;
-        qwen3_4b.num_attention_heads = 32;
-        let error = generated_model_source_for(&qwen3_4b).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("borrowed F32 reduction cap is 8192")
-        );
-
-        let mut qwen3_14b = qwen3_4b;
-        qwen3_14b.model_name = Some("Qwen3-14B".into());
-        qwen3_14b.hidden_size = 5_120;
-        qwen3_14b.intermediate_size = 17_408;
-        qwen3_14b.num_attention_heads = 40;
-        let error = generated_model_source_for(&qwen3_14b).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("ordinary/paired F32 reduction cap is 4096")
-        );
     }
 
     #[test]
