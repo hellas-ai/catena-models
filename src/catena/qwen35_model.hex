@@ -1,0 +1,854 @@
+# Metadata-parameterized Qwen3.5 dense hybrid operations.
+
+# Extract Q from the per-head [Q, gate] projection layout.
+(def program qwen3.qwen35-query-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([qg output-index.]
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x{{QUERY_SIZE}} [query-size.])
+  (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  ([.flat-index query-size] u64.div [row.])
+  ([.flat-index query-size] u64.rem [query-channel.])
+  ([.query-channel head-dim] u64.div [head.])
+  ([.query-channel head-dim] u64.rem [channel.])
+  ([.query-size query-size] u64.add [qg-row-size.])
+  ([.head head-dim] u64.mul [head-offset.])
+  ([.head-offset head-offset] u64.add [qg-head-offset.])
+  ([.row qg-row-size] u64.mul [row-offset.])
+  ([.row-offset qg-head-offset] u64.add [head-base.])
+  ([.head-base channel] u64.add [qg-index.])
+  ([.qg] mem.cast.f32 [qg-count qg-buffer.])
+  ({[.qg-count] [.qg-buffer] [.qg-index]} qwen3.f32-buffer-at [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-extract-query :
+  (cap.own mem)
+  ->
+  (cap.own mem)
+= ([qg.]
+  ([.qg] mem.cast.f32 [qg-count qg-buffer.])
+  ([.qg-count] :.forget [qg-count-value.])
+  (const.u64.0x0000000000000002 [two.])
+  ([.qg-count-value two] u64.div [query-count-value.])
+  ([.query-count-value] u64.name [query-count.])
+  {
+    [.query-count]
+    ({[.query-count] [.qg] (([.query-count] :.param) name.qwen3.qwen35-query-at)} materializec)
+  } buf.to-mem
+))
+
+# Multiply full-attention context by sigmoid of the Q projection's gate half.
+(def program qwen3.qwen35-gate-context-at :
+  ([n.] {({(cap.own mem) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [qg context.])
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x{{QUERY_SIZE}} [query-size.])
+  (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  ([.flat-index query-size] u64.div [row.])
+  ([.flat-index query-size] u64.rem [query-channel.])
+  ([.query-channel head-dim] u64.div [head.])
+  ([.query-channel head-dim] u64.rem [channel.])
+  ([.query-size query-size] u64.add [qg-row-size.])
+  ([.head head-dim] u64.mul [head-offset.])
+  ([.head-offset head-offset] u64.add [qg-head-offset.])
+  ([.qg-head-offset head-dim] u64.add [gate-head-offset.])
+  ([.row qg-row-size] u64.mul [row-offset.])
+  ([.row-offset gate-head-offset] u64.add [gate-base.])
+  ([.gate-base channel] u64.add [gate-index.])
+  ([.qg] mem.cast.f32 [qg-count qg-buffer.])
+  ({[.qg-count] [.qg-buffer] [.gate-index]} qwen3.f32-buffer-at [gate.])
+  ([.gate] qwen3.sigmoid [gate-sigmoid.])
+  ([.context] mem.cast.f32 [context-count context-buffer.])
+  ({[.context-count] [.context-buffer] [.flat-index]} qwen3.f32-buffer-at [context-value.])
+  ([.context-value gate-sigmoid] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-gate-context :
+  {(cap.own mem) (cap.own mem)}
+  ->
+  (cap.own mem)
+= ([qg context.]
+  ([.qg] mem.cast.f32 [qg-count qg-buffer.])
+  ([.context] mem.cast.f32 [context-count _context-buffer.])
+  ({[.qg] [.context]} *.intro [env.])
+  {
+    [.context-count]
+    ({[.context-count] [.env] (([.context-count] :.param) name.qwen3.qwen35-gate-context-at)} materializec)
+  } buf.to-mem [gated.]
+  ({[.qg] [.gated]} qwen3.free-f32-before [gated-after-qg.])
+  ({[.context] [.gated-after-qg]} qwen3.free-f32-before [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-full-decoder-layer :
+  {
+    (cap.own mem) (cap.own mem) (u64 val) (cap.own mem)
+    (u64 val) (u64 val) (u64 val)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem)
+  }
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([hidden rope sequence cache token-capacity start layer
+    input-norm q-weight k-weight v-weight o-weight q-norm k-norm
+    post-norm gate-weight up-weight down-weight.]
+  ([.hidden] qwen3.rms-inv [attention-inverse.])
+  (const.u64.0x{{QWEN35_QUERY_PROJECTION_SIZE}} [qg-features.])
+  (const.u64.0x{{KEY_VALUE_SIZE}} [key-value-features.])
+  ({[.hidden] [.input-norm] [.q-weight] [.attention-inverse] [.qg-features]}
+    qwen3.linear-norm [query-and-gate.])
+  ([.query-and-gate] qwen3.qwen35-extract-query [query-raw.])
+  ({[.hidden] [.input-norm] [.k-weight] [.attention-inverse] [.key-value-features]}
+    qwen3.linear-norm [key-raw.])
+  ({[.hidden] [.input-norm] [.v-weight] [.attention-inverse] [.key-value-features]}
+    qwen3.linear-norm [value.])
+  ({[.query-raw] [.q-norm]} qwen3.head-rmsnorm [query.])
+  ({[.key-raw] [.k-norm]} qwen3.head-rmsnorm [key.])
+  ({[.cache] [.key] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cache-append-key [cache-with-key.])
+  ({[.key] [.cache-with-key]} qwen3.free-f32-before [cache-after-key.])
+  ({[.cache-after-key] [.value] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cache-append-value [cache-with-value.])
+  ({[.value] [.cache-with-value]} qwen3.free-f32-before [cache-after-value.])
+  ({[.cache-after-value] [.query] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
+    qwen3.cached-attention [cache-after-attention context.])
+  ({[.query-and-gate] [.context]} qwen3.qwen35-gate-context [gated-context.])
+  ({[.attention-inverse] [.gated-context]} qwen3.free-f32-before [context-after-inverse.])
+  ({[.query] [.context-after-inverse]} qwen3.free-f32-before [context-after-query.])
+  (const.u64.0x{{QUERY_SIZE}} [attention-input-features.])
+  ({[.context-after-query] [.o-weight] [.hidden] [.attention-input-features]}
+    qwen3.linear-residual [attention-hidden.])
+  ({[.context-after-query] [.attention-hidden]} qwen3.free-f32-before [attention-hidden-after-context.])
+  ({[.hidden] [.attention-hidden-after-context]} qwen3.free-f32-before [attention-hidden-after-residual.])
+  ([.attention-hidden-after-residual] qwen3.rms-inv [mlp-inverse.])
+  ({[.attention-hidden-after-residual] [.post-norm] [.mlp-inverse]}
+    qwen3.apply-rmsnorm [normalized-mlp-input.])
+  ([.sequence] qwen3.dense-selected-experts [selected-experts.])
+  ({[.normalized-mlp-input] [.gate-weight] [.up-weight] [.selected-experts]}
+    qwen3.expert-linear-pair
+    [normalized-mlp-input-after-pair selected-experts-after-pair gate up.])
+  ({[.gate] [.up]} qwen3.dense-activate [activated.])
+  ({[.activated] [.down-weight] [.selected-experts-after-pair] [.attention-hidden-after-residual]}
+    qwen3.moe-down-residual [activated-after output.])
+  ({[.mlp-inverse] [.output]} qwen3.free-f32-before [output-after-mlp-inverse.])
+  ({[.normalized-mlp-input-after-pair] [.output-after-mlp-inverse]}
+    qwen3.free-f32-before [output-after-normalized.])
+  ({[.gate] [.output-after-normalized]} qwen3.free-f32-before [output-after-gate.])
+  ({[.up] [.output-after-gate]} qwen3.free-f32-before [output-after-up.])
+  ({[.activated-after] [.output-after-up]} qwen3.free-f32-before [output-after-activated.])
+  ({[.selected-experts-after-pair] [.output-after-activated]}
+    qwen3.free-u64-before [output-after-experts.])
+  ({[.attention-hidden-after-residual] [.output-after-experts]}
+    qwen3.free-f32-before [output-after-residual.])
+  {[.output-after-residual] [.cache-after-attention]}
+))
+
+# Copy a contiguous recurrent-cache range while returning the cache owner.
+(def program qwen3.qwen35-copy-cache-range-at :
+  ([capacity n.] {
+    ({cap.ref [.capacity] f32} buf val)
+    ({({({[.capacity] u64} :) (u64 val)} *) ([.n] ix val)} *)
+  })
+  ->
+  ([capacity n.] (f32 val))
+= ([cache-buffer env.]
+  ([.env] *.elim [inputs output-index.])
+  ([.inputs] *.elim [capacity-value offset.])
+  ([.output-index] ix.to-u64 [local-index.])
+  ([.offset local-index] u64.add [cache-index.])
+  ({[.capacity-value] [.cache-buffer] [.cache-index]} qwen3.f32-buffer-at [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-copy-cache-range :
+  {(cap.own mem) (u64 val) (u64 val)}
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([cache offset len.]
+  ([.cache] mem.cast.f32 [cache-count cache-buffer.])
+  ([.len] u64.name [copy-count.])
+  ({[.cache-count] [.offset]} *.intro [env.])
+  {
+    [.cache-buffer] [.cache-count] [.copy-count] [.env]
+    ({([.cache-count] :.param) ([.copy-count] :.param)} name.qwen3.qwen35-copy-cache-range-at)
+  } materializec.borrow [cache-after copied-buffer.]
+  {
+    ({[.cache-count] [.cache-after]} buf.to-mem)
+    ({[.copy-count] [.copied-buffer]} buf.to-mem)
+  }
+))
+
+# Depthwise causal convolution over one projected token and its ring history.
+(def program qwen3.qwen35-conv-term-at :
+  ([n k.] {
+    ({
+      ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
+      ({([.n] ix val) ([.k] ix val)} *)
+    } *)
+  })
+  ->
+  ([n k.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [env indices.])
+  ([.env] *.elim [buffers start.])
+  ([.buffers] *.elim [history-and-qkv conv-weight.])
+  ([.history-and-qkv] *.elim [history qkv.])
+  ([.indices] *.elim [output-index kernel-index.])
+  ([.output-index] ix.to-u64 [channel.])
+  ([.kernel-index] ix.to-u64 [kernel.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
+  (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size.])
+  (const.u64.0x0000000000000001 [one.])
+  ([.kernel-size one] u64.sub [history-slots.])
+  ([.kernel history-slots] u64.ne bool.not [is-current.])
+  ([.history-slots kernel] u64.sub [lag.])
+  ([.start lag] u64.gte [history-valid.])
+  ([.start kernel] u64.add [ring-numerator.])
+  ([.ring-numerator history-slots] u64.rem [slot.])
+  ([.slot qkv-size] u64.mul [slot-base.])
+  ([.slot-base channel] u64.add [history-index.])
+  ([.history] mem.cast.f32 [history-count history-buffer.])
+  ({[.history-count] [.history-buffer] [.history-index]} qwen3.f32-buffer-at [history-value-raw.])
+  (const.u32.0x00000000 u32.bitcast-f32 [zero.])
+  ([.history-valid history-value-raw zero] f32.select [history-value.])
+  ([.qkv] mem.cast.f32 [qkv-count qkv-buffer.])
+  ({[.qkv-count] [.qkv-buffer] [.channel]} qwen3.f32-buffer-at [current-value.])
+  ([.is-current current-value history-value] f32.select [input-value.])
+  ([.channel kernel-size] u64.mul [weight-row-base.])
+  ([.weight-row-base kernel] u64.add [weight-index.])
+  ([.conv-weight] mem.cast.f32 [weight-count weight-buffer.])
+  ({[.weight-count] [.weight-buffer] [.weight-index]} qwen3.f32-buffer-at [weight-value.])
+  ([.input-value weight-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-conv-epilogue :
+  ([n.] {
+    ({
+      ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
+      ({([.n] ix val) (f32 val)} *)
+    } *)
+  })
+  ->
+  ([n.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [_env index-and-sum.])
+  ([.index-and-sum] *.elim [_index sum.])
+  [.sum]
+))
+
+(def program qwen3.qwen35-conv :
+  {(cap.own mem) (cap.own mem) (cap.ref mem) (u64 val)}
+  ->
+  (cap.own mem)
+= ([history qkv conv-weight start.]
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size-value.])
+  (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size-value.])
+  ([.qkv-size-value] u64.name [qkv-size.])
+  ([.kernel-size-value] u64.name [kernel-size.])
+  ({[.history] [.qkv]} *.intro [history-and-qkv.])
+  ({[.history-and-qkv] [.conv-weight]} *.intro [buffers.])
+  ({[.buffers] [.start]} *.intro [env.])
+  {
+    [.qkv-size] [.kernel-size] [.env]
+    ({([.qkv-size] :.param) ([.kernel-size] :.param)} name.qwen3.qwen35-conv-term-at)
+    (([.qkv-size] :.param) name.qwen3.qwen35-conv-epilogue)
+  } materializec.reduce-f32 [output.]
+  ({[.qkv-size] [.output]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-copy-qkv-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([qkv output-index.]
+  ([.output-index] ix.to-u64 [index.])
+  ([.qkv] mem.cast.f32 [qkv-count qkv-buffer.])
+  ({[.qkv-count] [.qkv-buffer] [.index]} qwen3.f32-buffer-at [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-update-conv-cache :
+  {(cap.own mem) (cap.own mem) (u64 val) (u64 val) (u64 val)}
+  ->
+  (cap.own mem)
+= ([cache qkv token-capacity start layer.]
+  ([.cache] mem.cast.f32 [cache-count cache-buffer.])
+  (const.u64.0x{{KV_CACHE_ELEMENTS_PER_TOKEN}} [kv-elements-per-token.])
+  ([.token-capacity kv-elements-per-token] u64.mul [recurrent-base.])
+  (const.u64.0x{{LINEAR_CONV_STATE_SIZE}} [conv-state-size.])
+  (const.u64.0x{{LINEAR_RECURRENT_STATE_SIZE}} [matrix-state-size.])
+  ([.conv-state-size matrix-state-size] u64.add [layer-stride.])
+  ([.layer layer-stride] u64.mul [layer-offset.])
+  ([.recurrent-base layer-offset] u64.add [conv-base.])
+  (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size.])
+  (const.u64.0x0000000000000001 [one.])
+  ([.kernel-size one] u64.sub [history-slots.])
+  ([.start history-slots] u64.rem [slot.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size-value.])
+  ([.slot qkv-size-value] u64.mul [slot-offset.])
+  ([.conv-base slot-offset] u64.add [write-offset.])
+  ([.qkv-size-value] u64.name [qkv-size.])
+  {
+    [.cache-buffer] [.cache-count] [.write-offset] [.qkv-size] [.qkv]
+    (([.qkv-size] :.param) name.qwen3.qwen35-copy-qkv-at)
+  } materializec.into [cache-after.]
+  ({[.cache-count] [.cache-after]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-silu-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([input output-index.]
+  ([.output-index] ix.to-u64 [index.])
+  ([.input] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.index]} qwen3.f32-buffer-at qwen3.silu [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-silu-buffer :
+  (cap.own mem)
+  ->
+  (cap.own mem)
+= ([input.]
+  ([.input] mem.cast.f32 [count _buffer.])
+  { [.count] ({[.count] [.input] (([.count] :.param) name.qwen3.qwen35-silu-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-l2-term-at :
+  ([n.] {({({(cap.own mem) (u64 val)} *) (u64 val)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env channel-index.]
+  ([.env] *.elim [input-and-base head.])
+  ([.input-and-base] *.elim [input base.])
+  ([.channel-index] ix.to-u64 [channel.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [head-dim.])
+  ([.head head-dim] u64.mul [head-offset.])
+  ([.base head-offset] u64.add [head-base.])
+  ([.head-base channel] u64.add [index.])
+  ([.input] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.index]} qwen3.f32-buffer-at [value.])
+  ([.value value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-l2-at :
+  ([n.] {({(cap.own mem) (u64 val)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([input-and-base output-index.]
+  ([.input-and-base] *.elim [input base.])
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [head-dim-value.])
+  ([.flat-index head-dim-value] u64.div [head.])
+  ([.flat-index head-dim-value] u64.rem [channel.])
+  ({[.input] [.base]} *.intro [term-input-and-base.])
+  ({[.term-input-and-base] [.head]} *.intro [term-env.])
+  ([.head-dim-value] u64.name [head-dim.])
+  ({
+    (const.u32.0x00000000 u32.bitcast-f32)
+    unit.intro name.f32.add-env
+    ({[.term-env] (([.head-dim] :.param) name.qwen3.qwen35-l2-term-at)})
+    [.head-dim]
+  } reducec [sum-squared.])
+  (const.u32.0x358637BD u32.bitcast-f32 [epsilon.])
+  ([.sum-squared epsilon] f32.add qwen3.sqrt [norm.])
+  ([.base flat-index] u64.add [input-index.])
+  ([.input] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.input-index]} qwen3.f32-buffer-at [value.])
+  ([.value norm] f32.div [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-l2 :
+  {(cap.own mem) (u64 val)}
+  ->
+  (cap.own mem)
+= ([input base.]
+  (const.u64.0x{{LINEAR_KEY_SIZE}} [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ({[.input] [.base]} *.intro [env.])
+  { [.output-count] ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.qwen35-l2-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-beta-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([input output-index.]
+  ([.output-index] ix.to-u64 [index.])
+  ([.input] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.index]} qwen3.f32-buffer-at qwen3.sigmoid [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-beta :
+  (cap.own mem) -> (cap.own mem)
+= ([input.]
+  ([.input] mem.cast.f32 [count _buffer.])
+  { [.count] ({[.count] [.input] (([.count] :.param) name.qwen3.qwen35-beta-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-decay-gate-at :
+  ([n.] {({({(cap.own mem) (cap.ref mem)} *) (cap.ref mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [alpha-and-dt a-log.])
+  ([.alpha-and-dt] *.elim [alpha dt-bias.])
+  ([.output-index] ix.to-u64 [index.])
+  ([.alpha] mem.cast.f32 [alpha-count alpha-buffer.])
+  ({[.alpha-count] [.alpha-buffer] [.index]} qwen3.f32-buffer-at [alpha-value.])
+  ([.dt-bias] mem.cast.f32 [dt-count dt-buffer.])
+  ({[.dt-count] [.dt-buffer] [.index]} qwen3.f32-buffer-at [dt-value.])
+  ([.a-log] mem.cast.f32 [a-count a-buffer.])
+  ({[.a-count] [.a-buffer] [.index]} qwen3.f32-buffer-at [a-value.])
+  ([.alpha-value dt-value] f32.add qwen3.softplus [time-step.])
+  ([.time-step a-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-decay-gate :
+  {(cap.own mem) (cap.ref mem) (cap.ref mem)} -> (cap.own mem)
+= ([alpha dt-bias a-log.]
+  (const.u64.0x{{LINEAR_VALUE_HEADS}} [count-value.])
+  ([.count-value] u64.name [count.])
+  ({[.alpha] [.dt-bias]} *.intro [alpha-and-dt.])
+  ({[.alpha-and-dt] [.a-log]} *.intro [env.])
+  { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-decay-gate-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-decay-state-at :
+  ([n.] {({(cap.own mem) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [state gate.])
+  ([.output-index] ix.to-u64 [index.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  ([.key-dim value-dim] u64.mul [head-stride.])
+  ([.index head-stride] u64.div [head.])
+  ([.state] mem.cast.f32 [state-count state-buffer.])
+  ({[.state-count] [.state-buffer] [.index]} qwen3.f32-buffer-at [state-value.])
+  ([.gate] mem.cast.f32 [gate-count gate-buffer.])
+  ({[.gate-count] [.gate-buffer] [.head]} qwen3.f32-buffer-at qwen3.exp [decay.])
+  ([.state-value decay] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-decay-state :
+  {(cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([state gate.]
+  (const.u64.0x{{LINEAR_RECURRENT_STATE_SIZE}} [count-value.])
+  ([.count-value] u64.name [count.])
+  ({[.state] [.gate]} *.intro [env.])
+  { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-decay-state-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-prediction-term-at :
+  ([n k.] {
+    ({
+      ({(cap.own mem) (cap.own mem)} *)
+      ({([.n] ix val) ([.k] ix val)} *)
+    } *)
+  })
+  ->
+  ([n k.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [env indices.])
+  ([.env] *.elim [state key.])
+  ([.indices] *.elim [output-index key-index.])
+  ([.output-index] ix.to-u64 [flat-output.])
+  ([.key-index] ix.to-u64 [key-channel.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim.])
+  (const.u64.0x{{LINEAR_KEY_HEADS}} [key-heads.])
+  ([.flat-output value-dim] u64.div [value-head.])
+  ([.flat-output value-dim] u64.rem [value-channel.])
+  ([.value-head key-heads] u64.rem [key-head.])
+  ([.value-head key-dim] u64.mul [state-head-base-0.])
+  ([.state-head-base-0 value-dim] u64.mul [state-head-base.])
+  ([.key-channel value-dim] u64.mul [state-key-offset.])
+  ([.state-head-base state-key-offset] u64.add [state-key-base.])
+  ([.state-key-base value-channel] u64.add [state-index.])
+  ([.state] mem.cast.f32 [state-count state-buffer.])
+  ({[.state-count] [.state-buffer] [.state-index]} qwen3.f32-buffer-at [state-value.])
+  ([.key-head key-dim] u64.mul [key-head-base.])
+  ([.key-head-base key-channel] u64.add [flat-key-index.])
+  ([.key] mem.cast.f32 [key-count key-buffer.])
+  ({[.key-count] [.key-buffer] [.flat-key-index]} qwen3.f32-buffer-at [key-value.])
+  ([.state-value key-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-sum-epilogue :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) ({([.n] ix val) (f32 val)} *)} *)})
+  ->
+  ([n.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [_env index-and-sum.])
+  ([.index-and-sum] *.elim [_index sum.])
+  [.sum]
+))
+
+(def program qwen3.qwen35-prediction :
+  {(cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([state key.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [output-count-value.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ([.key-dim-value] u64.name [key-dim.])
+  ({[.state] [.key]} *.intro [env.])
+  {
+    [.output-count] [.key-dim] [.env]
+    ({([.output-count] :.param) ([.key-dim] :.param)} name.qwen3.qwen35-prediction-term-at)
+    (([.output-count] :.param) name.qwen3.qwen35-sum-epilogue)
+  } materializec.reduce-f32 [output.]
+  ({[.output-count] [.output]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-delta-at :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [conv-and-prediction beta.])
+  ([.conv-and-prediction] *.elim [conv prediction.])
+  ([.output-index] ix.to-u64 [index.])
+  (const.u64.0x{{LINEAR_KEY_SIZE}} [key-size.])
+  ([.key-size key-size] u64.add [value-base.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  ([.index value-dim] u64.div [head.])
+  ([.value-base index] u64.add [conv-index.])
+  ([.conv] mem.cast.f32 [conv-count conv-buffer.])
+  ({[.conv-count] [.conv-buffer] [.conv-index]} qwen3.f32-buffer-at [value.])
+  ([.prediction] mem.cast.f32 [prediction-count prediction-buffer.])
+  ({[.prediction-count] [.prediction-buffer] [.index]} qwen3.f32-buffer-at [predicted.])
+  ([.beta] mem.cast.f32 [beta-count beta-buffer.])
+  ({[.beta-count] [.beta-buffer] [.head]} qwen3.f32-buffer-at [beta-value.])
+  ([.value predicted] f32.sub [difference.])
+  ([.difference beta-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-delta :
+  {(cap.own mem) (cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([conv prediction beta.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [count-value.])
+  ([.count-value] u64.name [count.])
+  ({[.conv] [.prediction]} *.intro [conv-and-prediction.])
+  ({[.conv-and-prediction] [.beta]} *.intro [env.])
+  { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-delta-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-update-state-at :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [state-and-key delta.])
+  ([.state-and-key] *.elim [state key.])
+  ([.output-index] ix.to-u64 [index.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  (const.u64.0x{{LINEAR_KEY_HEADS}} [key-heads.])
+  ([.key-dim value-dim] u64.mul [head-stride.])
+  ([.index head-stride] u64.div [value-head.])
+  ([.index head-stride] u64.rem [within-head.])
+  ([.within-head value-dim] u64.div [key-channel.])
+  ([.within-head value-dim] u64.rem [value-channel.])
+  ([.value-head key-heads] u64.rem [key-head.])
+  ([.key-head key-dim] u64.mul [key-head-base.])
+  ([.key-head-base key-channel] u64.add [key-index.])
+  ([.value-head value-dim] u64.mul [delta-head-base.])
+  ([.delta-head-base value-channel] u64.add [delta-index.])
+  ([.state] mem.cast.f32 [state-count state-buffer.])
+  ({[.state-count] [.state-buffer] [.index]} qwen3.f32-buffer-at [state-value.])
+  ([.key] mem.cast.f32 [key-count key-buffer.])
+  ({[.key-count] [.key-buffer] [.key-index]} qwen3.f32-buffer-at [key-value.])
+  ([.delta] mem.cast.f32 [delta-count delta-buffer.])
+  ({[.delta-count] [.delta-buffer] [.delta-index]} qwen3.f32-buffer-at [delta-value.])
+  ([.key-value delta-value] f32.mul [outer.])
+  ([.state-value outer] f32.add [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-update-state :
+  {(cap.own mem) (cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([state key delta.]
+  (const.u64.0x{{LINEAR_RECURRENT_STATE_SIZE}} [count-value.])
+  ([.count-value] u64.name [count.])
+  ({[.state] [.key]} *.intro [state-and-key.])
+  ({[.state-and-key] [.delta]} *.intro [env.])
+  { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-update-state-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-output-term-at :
+  ([n k.] {
+    ({
+      ({(cap.own mem) (cap.own mem)} *)
+      ({([.n] ix val) ([.k] ix val)} *)
+    } *)
+  })
+  ->
+  ([n k.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [env indices.])
+  ([.env] *.elim [state query.])
+  ([.indices] *.elim [output-index key-index.])
+  ([.output-index] ix.to-u64 [flat-output.])
+  ([.key-index] ix.to-u64 [key-channel.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim.])
+  (const.u64.0x{{LINEAR_KEY_HEADS}} [key-heads.])
+  ([.flat-output value-dim] u64.div [value-head.])
+  ([.flat-output value-dim] u64.rem [value-channel.])
+  ([.value-head key-heads] u64.rem [key-head.])
+  ([.value-head key-dim] u64.mul [state-head-base-0.])
+  ([.state-head-base-0 value-dim] u64.mul [state-head-base.])
+  ([.key-channel value-dim] u64.mul [state-key-offset.])
+  ([.state-head-base state-key-offset] u64.add [state-key-base.])
+  ([.state-key-base value-channel] u64.add [state-index.])
+  ([.state] mem.cast.f32 [state-count state-buffer.])
+  ({[.state-count] [.state-buffer] [.state-index]} qwen3.f32-buffer-at [state-value.])
+  ([.key-head key-dim] u64.mul [query-head-base.])
+  ([.query-head-base key-channel] u64.add [query-index.])
+  ([.query] mem.cast.f32 [query-count query-buffer.])
+  ({[.query-count] [.query-buffer] [.query-index]} qwen3.f32-buffer-at [query-value.])
+  ([.state-value query-value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-output-epilogue :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) ({([.n] ix val) (f32 val)} *)} *)})
+  ->
+  ([n.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [_env index-and-sum.])
+  ([.index-and-sum] *.elim [_index sum.])
+  (const.u32.0x{{LINEAR_ATTENTION_SCALE_BITS}} u32.bitcast-f32 [scale.])
+  ([.sum scale] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-output :
+  {(cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([state query.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [output-count-value.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [key-dim-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ([.key-dim-value] u64.name [key-dim.])
+  ({[.state] [.query]} *.intro [env.])
+  {
+    [.output-count] [.key-dim] [.env]
+    ({([.output-count] :.param) ([.key-dim] :.param)} name.qwen3.qwen35-output-term-at)
+    (([.output-count] :.param) name.qwen3.qwen35-output-epilogue)
+  } materializec.reduce-f32 [output.]
+  ({[.output-count] [.output]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-update-state-cache-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([state output-index.]
+  ([.output-index] ix.to-u64 [index.])
+  ([.state] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.index]} qwen3.f32-buffer-at [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-update-state-cache :
+  {(cap.own mem) (cap.own mem) (u64 val) (u64 val)} -> (cap.own mem)
+= ([cache state token-capacity layer.]
+  ([.cache] mem.cast.f32 [cache-count cache-buffer.])
+  (const.u64.0x{{KV_CACHE_ELEMENTS_PER_TOKEN}} [kv-elements-per-token.])
+  ([.token-capacity kv-elements-per-token] u64.mul [recurrent-base.])
+  (const.u64.0x{{LINEAR_CONV_STATE_SIZE}} [conv-state-size.])
+  (const.u64.0x{{LINEAR_RECURRENT_STATE_SIZE}} [matrix-state-size-value.])
+  ([.conv-state-size matrix-state-size-value] u64.add [layer-stride.])
+  ([.layer layer-stride] u64.mul [layer-offset.])
+  ([.recurrent-base layer-offset] u64.add [layer-base.])
+  ([.layer-base conv-state-size] u64.add [write-offset.])
+  ([.matrix-state-size-value] u64.name [matrix-state-size.])
+  {
+    [.cache-buffer] [.cache-count] [.write-offset] [.matrix-state-size] [.state]
+    (([.matrix-state-size] :.param) name.qwen3.qwen35-update-state-cache-at)
+  } materializec.into [cache-after.]
+  ({[.cache-count] [.cache-after]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-gated-norm-term-at :
+  ([n.] {({(cap.own mem) (u64 val)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([input-and-head channel-index.]
+  ([.input-and-head] *.elim [input head.])
+  ([.channel-index] ix.to-u64 [channel.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim.])
+  ([.head value-dim] u64.mul [head-base.])
+  ([.head-base channel] u64.add [index.])
+  ([.input] mem.cast.f32 [count buffer.])
+  ({[.count] [.buffer] [.index]} qwen3.f32-buffer-at [value.])
+  ([.value value] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-gated-norm-at :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [input-and-z norm-weight.])
+  ([.input-and-z] *.elim [input z.])
+  ([.output-index] ix.to-u64 [index.])
+  (const.u64.0x{{LINEAR_VALUE_HEAD_DIM}} [value-dim-value.])
+  ([.index value-dim-value] u64.div [head.])
+  ([.index value-dim-value] u64.rem [channel.])
+  ({[.input] [.head]} *.intro [term-env.])
+  ([.value-dim-value] u64.name [value-dim.])
+  ({
+    (const.u32.0x00000000 u32.bitcast-f32)
+    unit.intro name.f32.add-env
+    ({[.term-env] (([.value-dim] :.param) name.qwen3.qwen35-gated-norm-term-at)})
+    [.value-dim]
+  } reducec [sum-squared.])
+  ([.value-dim-value] u64.to-f32 [value-dim-f32.])
+  ([.sum-squared value-dim-f32] f32.div [mean-squared.])
+  (const.u32.0x{{RMS_EPSILON_BITS}} u32.bitcast-f32 [epsilon.])
+  ([.mean-squared epsilon] f32.add qwen3.sqrt [rms.])
+  ([.input] mem.cast.f32 [input-count input-buffer.])
+  ({[.input-count] [.input-buffer] [.index]} qwen3.f32-buffer-at [input-value.])
+  ([.input-value rms] f32.div [normalized.])
+  ([.norm-weight] mem.cast.f32 [norm-count norm-buffer.])
+  ({[.norm-count] [.norm-buffer] [.channel]} qwen3.f32-buffer-at [norm-value.])
+  ([.z] mem.cast.f32 [z-count z-buffer.])
+  ({[.z-count] [.z-buffer] [.index]} qwen3.f32-buffer-at qwen3.silu [z-gate.])
+  ([.normalized norm-value] f32.mul [scaled.])
+  ([.scaled z-gate] f32.mul [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-gated-norm :
+  {(cap.own mem) (cap.own mem) (cap.ref mem)} -> (cap.own mem)
+= ([input z norm-weight.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [count-value.])
+  ([.count-value] u64.name [count.])
+  ({[.input] [.z]} *.intro [input-and-z.])
+  ({[.input-and-z] [.norm-weight]} *.intro [env.])
+  { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-gated-norm-at)} materializec) }
+  buf.to-mem
+))
+
+(def program qwen3.qwen35-linear-decoder-layer :
+  {
+    (cap.own mem) (cap.own mem) (u64 val) (cap.own mem)
+    (u64 val) (u64 val) (u64 val)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+    (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+    (cap.ref mem) (cap.ref mem)
+  }
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([hidden _rope sequence cache token-capacity start layer
+    input-norm qkv-weight z-weight alpha-weight beta-weight dt-bias
+    a-log linear-norm linear-out-weight conv-weight post-norm
+    gate-weight up-weight down-weight.]
+  ([.hidden] qwen3.rms-inv [attention-inverse.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-features.])
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-features.])
+  (const.u64.0x{{LINEAR_VALUE_HEADS}} [value-heads.])
+  ({[.hidden] [.input-norm] [.qkv-weight] [.attention-inverse] [.qkv-features]}
+    qwen3.linear-norm [qkv.])
+  ({[.hidden] [.input-norm] [.z-weight] [.attention-inverse] [.value-features]}
+    qwen3.linear-norm [z.])
+  ({[.hidden] [.input-norm] [.alpha-weight] [.attention-inverse] [.value-heads]}
+    qwen3.linear-norm [alpha.])
+  ({[.hidden] [.input-norm] [.beta-weight] [.attention-inverse] [.value-heads]}
+    qwen3.linear-norm [beta-raw.])
+  (const.u64.0x{{KV_CACHE_ELEMENTS_PER_TOKEN}} [kv-elements-per-token.])
+  ([.token-capacity kv-elements-per-token] u64.mul [recurrent-base.])
+  (const.u64.0x{{LINEAR_CONV_STATE_SIZE}} [conv-state-size.])
+  (const.u64.0x{{LINEAR_RECURRENT_STATE_SIZE}} [matrix-state-size.])
+  ([.conv-state-size matrix-state-size] u64.add [layer-stride.])
+  ([.layer layer-stride] u64.mul [layer-offset.])
+  ([.recurrent-base layer-offset] u64.add [conv-base.])
+  ({[.cache] [.conv-base] [.conv-state-size]}
+    qwen3.qwen35-copy-cache-range [cache-after-conv-copy conv-history.])
+  ({[.conv-history] [.qkv] [.conv-weight] [.start]}
+    qwen3.qwen35-conv [conv-raw.])
+  ({[.cache-after-conv-copy] [.qkv] [.token-capacity] [.start] [.layer]}
+    qwen3.qwen35-update-conv-cache [cache-after-conv.])
+  ([.conv-raw] qwen3.qwen35-silu-buffer [conv.])
+  (const.u64.0x0000000000000000 [query-base.])
+  (const.u64.0x{{LINEAR_KEY_SIZE}} [key-base.])
+  ({[.conv] [.query-base]} qwen3.qwen35-l2 [query.])
+  ({[.conv] [.key-base]} qwen3.qwen35-l2 [key.])
+  ([.beta-raw] qwen3.qwen35-beta [beta.])
+  ({[.alpha] [.dt-bias] [.a-log]} qwen3.qwen35-decay-gate [decay-gate.])
+  ([.conv-base conv-state-size] u64.add [matrix-base.])
+  ({[.cache-after-conv] [.matrix-base] [.matrix-state-size]}
+    qwen3.qwen35-copy-cache-range [cache-after-state-copy old-state.])
+  ({[.old-state] [.decay-gate]} qwen3.qwen35-decay-state [decayed-state.])
+  ({[.decayed-state] [.key]} qwen3.qwen35-prediction [prediction.])
+  ({[.conv] [.prediction] [.beta]} qwen3.qwen35-delta [delta.])
+  ({[.decayed-state] [.key] [.delta]} qwen3.qwen35-update-state [updated-state.])
+  ({[.updated-state] [.query]} qwen3.qwen35-output [core-output.])
+  ({[.cache-after-state-copy] [.updated-state] [.token-capacity] [.layer]}
+    qwen3.qwen35-update-state-cache [cache-after-state.])
+  ({[.core-output] [.z] [.linear-norm]} qwen3.qwen35-gated-norm [linear-context.])
+  ({[.linear-context] [.linear-out-weight] [.hidden] [.value-features]}
+    qwen3.linear-residual [attention-hidden.])
+  ([.attention-hidden] qwen3.rms-inv [mlp-inverse.])
+  ({[.attention-hidden] [.post-norm] [.mlp-inverse]}
+    qwen3.apply-rmsnorm [normalized-mlp-input.])
+  ([.sequence] qwen3.dense-selected-experts [selected-experts.])
+  ({[.normalized-mlp-input] [.gate-weight] [.up-weight] [.selected-experts]}
+    qwen3.expert-linear-pair
+    [normalized-mlp-input-after-pair selected-experts-after-pair gate up.])
+  ({[.gate] [.up]} qwen3.dense-activate [activated.])
+  ({[.activated] [.down-weight] [.selected-experts-after-pair] [.attention-hidden]}
+    qwen3.moe-down-residual [activated-after output.])
+  ({[.mlp-inverse] [.output]} qwen3.free-f32-before [output-after-mlp-inverse.])
+  ({[.attention-inverse] [.output-after-mlp-inverse]}
+    qwen3.free-f32-before [output-after-attention-inverse.])
+  ({[.hidden] [.output-after-attention-inverse]}
+    qwen3.free-f32-before [output-after-hidden.])
+  ({[.attention-hidden] [.output-after-hidden]}
+    qwen3.free-f32-before [output-after-residual.])
+  {[.output-after-residual] [.cache-after-state]}
+))
+
+# Constants consumed by the generated Qwen3.5 implementation.
+# {{QWEN35_QUERY_PROJECTION_SIZE}}
+# {{KV_CACHE_ELEMENTS_PER_TOKEN}}
+# {{LINEAR_QKV_SIZE}}
+# {{LINEAR_KEY_SIZE}}
+# {{LINEAR_VALUE_SIZE}}
+# {{LINEAR_KEY_HEADS}}
+# {{LINEAR_VALUE_HEADS}}
+# {{LINEAR_KEY_HEAD_DIM}}
+# {{LINEAR_VALUE_HEAD_DIM}}
+# {{LINEAR_CONV_KERNEL}}
+# {{LINEAR_CONV_STATE_SIZE}}
+# {{LINEAR_RECURRENT_STATE_SIZE}}
+# {{LINEAR_ATTENTION_SCALE_BITS}}

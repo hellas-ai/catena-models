@@ -92,6 +92,7 @@ impl Model {
             .unwrap_or(match self.config.architecture {
                 ModelArchitecture::Qwen3Dense => "Qwen3 dense",
                 ModelArchitecture::Qwen3Moe => "Qwen3 MoE",
+                ModelArchitecture::Qwen35Dense => "Qwen3.5 dense",
                 ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
             })
     }
@@ -106,10 +107,8 @@ impl Model {
 
     /// Run a full causal prefill and return final-position vocabulary logits.
     pub fn logits(&self, tokens: &[u64]) -> Result<Vec<f32>> {
-        self.ensure_execution_supported()?;
-        let cache = self.allocate_cache(tokens.len())?;
-        let (_cache, logits, _next_token) = self.cached_outputs(tokens, 0, tokens.len(), cache)?;
-        read_logits(logits, self.config.vocabulary_size)
+        let mut session = self.session(tokens.len())?;
+        session.prefill_logits(tokens)
     }
 
     pub fn session(&self, capacity: usize) -> Result<Session<'_>> {
@@ -133,13 +132,10 @@ impl Model {
     }
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
-        let elements_per_token = self.config.kv_cache_elements_per_token()?;
-        let elements = capacity
-            .checked_mul(elements_per_token)
-            .context("KV cache element count overflowed")?;
+        let elements = self.config.cache_elements(capacity)?;
         self.runtime
             .mem_f32_zeroed(elements)
-            .context("failed to allocate the KV cache")
+            .context("failed to allocate the model cache")
     }
 
     fn cached_outputs(
@@ -215,20 +211,20 @@ impl Model {
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
-        self.ensure_execution_supported()?;
-        let cache = self.allocate_cache(tokens.len())?;
-        let (_cache, _logits, next_token) = self.cached_outputs(tokens, 0, tokens.len(), cache)?;
-        Ok(next_token)
+        let mut session = self.session(tokens.len())?;
+        session.prefill_next_token(tokens)
     }
 
     fn ensure_execution_supported(&self) -> Result<()> {
         ensure!(
             matches!(
                 self.config.architecture,
-                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen3Moe
+                ModelArchitecture::Qwen3Dense
+                    | ModelArchitecture::Qwen3Moe
+                    | ModelArchitecture::Qwen35Dense
             ),
-            "Qwen3.5/3.6 GGUF metadata and all {} tensors were validated, but the hybrid \
-             linear-attention Catena program is not implemented yet",
+            "Qwen3.6 MoE GGUF metadata and all {} tensors were validated, but its routed/shared \
+             expert Catena composition is not implemented yet",
             self.weights.len()
         );
         Ok(())
@@ -277,6 +273,13 @@ impl Session<'_> {
     }
 
     fn forward(&mut self, tokens: &[u64]) -> Result<(MemOwn, u64)> {
+        if self.model.config.architecture == ModelArchitecture::Qwen35Dense && tokens.len() > 1 {
+            let mut last = None;
+            for &token in tokens {
+                last = Some(self.forward(std::slice::from_ref(&token))?);
+            }
+            return last.context("the token prefix must not be empty");
+        }
         let cache = self
             .cache
             .take()

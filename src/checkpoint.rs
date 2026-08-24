@@ -337,9 +337,12 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     let architecture = match architecture_name.as_str() {
         "qwen3" => ModelArchitecture::Qwen3Dense,
         "qwen3moe" => ModelArchitecture::Qwen3Moe,
-        "qwen35moe" | "qwen35" => ModelArchitecture::Qwen35Moe,
+        "qwen35" => ModelArchitecture::Qwen35Dense,
+        "qwen35moe" => ModelArchitecture::Qwen35Moe,
         other => {
-            bail!("unsupported GGUF architecture {other:?}; expected qwen3, qwen3moe, or qwen35moe")
+            bail!(
+                "unsupported GGUF architecture {other:?}; expected qwen3, qwen3moe, qwen35, or qwen35moe"
+            )
         }
     };
     let prefix = architecture_name.as_str();
@@ -376,7 +379,10 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
             .or(tokenizer_vocabulary_size)
             .context("GGUF has neither architecture vocab_size nor tokenizer tokens")?,
         hidden_size: u("embedding_length")?,
-        intermediate_size: if architecture == ModelArchitecture::Qwen3Dense {
+        intermediate_size: if matches!(
+            architecture,
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+        ) {
             u("feed_forward_length")?
         } else {
             u("expert_feed_forward_length")?
@@ -1256,6 +1262,27 @@ mod tests {
         assert_eq!(config.head_dim, 256);
         assert_eq!(config.full_attention_interval, Some(4));
         assert_eq!(weight_specs(&config)?.len(), 733);
+        validate_gguf_tensors(&path, &config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reads_qwen35_dense_configuration_when_present() -> Result<()> {
+        let Some(path) = std::env::var_os("CATENA_QWEN35_GGUF").map(PathBuf::from) else {
+            return Ok(());
+        };
+        let config = read_gguf_model_config(&path)?;
+        assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
+        assert_eq!(config.vocabulary_size, 248_320);
+        assert_eq!(config.hidden_size, 1_024);
+        assert_eq!(config.intermediate_size, 3_584);
+        assert_eq!(config.num_layers, 24);
+        assert_eq!(config.num_attention_heads, 8);
+        assert_eq!(config.num_key_value_heads, 2);
+        assert_eq!(config.head_dim, 256);
+        assert_eq!(config.rope_dimension_count, 64);
+        assert_eq!(config.full_attention_interval, Some(4));
+        assert_eq!(config.linear_qkv_size(), Some(6_144));
         validate_gguf_tensors(&path, &config)?;
         Ok(())
     }

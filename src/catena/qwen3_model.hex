@@ -643,7 +643,10 @@
   ([.cosine-term sine-term] f32.sub [rotated-first.])
   ([.cosine-term sine-term] f32.add [rotated-second.])
   ([.is-second-half rotated-second rotated-first] f32.select [result.])
-  [.result]
+  (const.u64.0x{{ROPE_DIM}} [rope-dim.])
+  ([.channel rope-dim] u64.lt [is-rotary.])
+  ([.is-rotary result projection-value] f32.select [partial-result.])
+  [.partial-result]
 ))
 
 # One term of a bias-free linear projection with a residual epilogue.

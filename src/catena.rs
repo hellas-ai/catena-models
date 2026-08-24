@@ -6,13 +6,14 @@ use std::{
 use anyhow::{Result, ensure};
 use catena_lang::stdlib;
 
-use crate::spec::{ModelArchitecture, ModelConfig, weight_specs};
+use crate::spec::{LayerType, ModelArchitecture, ModelConfig, weight_specs};
 
 /// Fixed, dimension-free Catena helpers compiled before the generated model.
 pub const HELPER_SOURCE: &str = include_str!("catena/qwen3_helpers.hex");
 
 /// Model-specific Catena programs rendered from GGUF metadata at runtime.
 const MODEL_TEMPLATE: &str = include_str!("catena/qwen3_model.hex");
+const QWEN35_TEMPLATE: &str = include_str!("catena/qwen35_model.hex");
 
 // These are execution limits of the reduction kernels in the pinned Catena
 // compiler revision, not properties of Qwen. Ordinary and paired reductions
@@ -59,20 +60,40 @@ const DENSE_LAYER_WEIGHT_NAMES: [&str; 11] = [
     "down-weight",
 ];
 
-fn layer_weight_names(architecture: ModelArchitecture) -> Result<&'static [&'static str]> {
-    match architecture {
-        ModelArchitecture::Qwen3Dense => Ok(&DENSE_LAYER_WEIGHT_NAMES),
-        ModelArchitecture::Qwen3Moe => Ok(&MOE_LAYER_WEIGHT_NAMES),
-        ModelArchitecture::Qwen35Moe => anyhow::bail!(
-            "Qwen3.5/3.6 source generation requires hybrid gated-delta-net/full-attention, \
-             gated-attention, partial-RoPE, and dense/MoE FFN composition"
+const QWEN35_LINEAR_LAYER_WEIGHT_NAMES: [&str; 14] = [
+    "input-norm",
+    "qkv-weight",
+    "z-weight",
+    "alpha-weight",
+    "beta-weight",
+    "dt-bias",
+    "a-log",
+    "linear-norm",
+    "linear-out-weight",
+    "conv-weight",
+    "post-norm",
+    "gate-weight",
+    "up-weight",
+    "down-weight",
+];
+
+fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'static str]> {
+    match (config.architecture, config.layer_type(layer)) {
+        (ModelArchitecture::Qwen3Dense, _) => Ok(&DENSE_LAYER_WEIGHT_NAMES),
+        (ModelArchitecture::Qwen3Moe, _) => Ok(&MOE_LAYER_WEIGHT_NAMES),
+        (ModelArchitecture::Qwen35Dense, LayerType::FullAttention) => Ok(&DENSE_LAYER_WEIGHT_NAMES),
+        (ModelArchitecture::Qwen35Dense, LayerType::LinearAttention) => {
+            Ok(&QWEN35_LINEAR_LAYER_WEIGHT_NAMES)
+        }
+        (ModelArchitecture::Qwen35Moe, _) => anyhow::bail!(
+            "Qwen3.6 MoE source generation still requires routed/shared expert composition"
         ),
     }
 }
 
 fn validate_execution_reductions(config: &ModelConfig) -> Result<()> {
     let routed_slots = match config.architecture {
-        ModelArchitecture::Qwen3Dense => 1,
+        ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense => 1,
         ModelArchitecture::Qwen3Moe => config.experts_per_token,
         ModelArchitecture::Qwen35Moe => return Ok(()),
     };
@@ -116,11 +137,14 @@ fn validate_execution_reductions(config: &ModelConfig) -> Result<()> {
 
 fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     let weight_count = weight_specs(config)?.len();
-    let layer_weight_names = layer_weight_names(config.architecture)?;
-    let described_weight_count = config
-        .num_layers
-        .checked_mul(layer_weight_names.len())
-        .and_then(|count| count.checked_add(3))
+    let described_layer_weight_count =
+        (0..config.num_layers).try_fold(0_usize, |total, layer| {
+            total
+                .checked_add(layer_weight_names(config, layer)?.len())
+                .ok_or_else(|| anyhow::anyhow!("Qwen3 entrypoint weight count overflowed"))
+        })?;
+    let described_weight_count = described_layer_weight_count
+        .checked_add(3)
         .ok_or_else(|| anyhow::anyhow!("Qwen3 entrypoint weight count overflowed"))?;
     ensure!(
         weight_count == described_weight_count,
@@ -143,7 +167,7 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     }
     source.push_str("  }\n  ->\n  {(cap.own mem) (cap.own mem) (cap.own mem)}\n= ([tokens cache token-capacity cache-start embed-weight");
     for layer in 0..config.num_layers {
-        for name in layer_weight_names {
+        for name in layer_weight_names(config, layer)? {
             write!(source, " layer-{layer:02}-{name}").unwrap();
         }
     }
@@ -162,13 +186,19 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
         writeln!(source, "    [.{cache_in}]").unwrap();
         source.push_str("    [.token-capacity]\n    [.cache-start]\n");
         writeln!(source, "    (const.u64.0x{layer:016X})").unwrap();
-        for name in layer_weight_names {
+        for name in layer_weight_names(config, layer)? {
             writeln!(source, "    [.layer-{layer:02}-{name}]").unwrap();
         }
-        let decoder = match config.architecture {
-            ModelArchitecture::Qwen3Dense => "qwen3.cached-dense-decoder-layer",
-            ModelArchitecture::Qwen3Moe => "qwen3.cached-decoder-layer",
-            ModelArchitecture::Qwen35Moe => unreachable!("rejected above"),
+        let decoder = match (config.architecture, config.layer_type(layer)) {
+            (ModelArchitecture::Qwen3Dense, _) => "qwen3.cached-dense-decoder-layer",
+            (ModelArchitecture::Qwen3Moe, _) => "qwen3.cached-decoder-layer",
+            (ModelArchitecture::Qwen35Dense, LayerType::FullAttention) => {
+                "qwen3.qwen35-full-decoder-layer"
+            }
+            (ModelArchitecture::Qwen35Dense, LayerType::LinearAttention) => {
+                "qwen3.qwen35-linear-decoder-layer"
+            }
+            (ModelArchitecture::Qwen35Moe, _) => unreachable!("rejected above"),
         };
         writeln!(
             source,
@@ -254,20 +284,16 @@ fn rope_frequency_program(config: &ModelConfig) -> String {
 
 fn render_model_template(config: &ModelConfig) -> Result<String> {
     ensure!(
-        config.rope_dimension_count == config.head_dim,
-        "the current Qwen3 attention template requires full-head RoPE"
-    );
-    ensure!(
         config.rope_dimension_count.is_multiple_of(2),
         "rotary dimension must be even"
     );
     let query_heads_per_kv = config.num_attention_heads / config.num_key_value_heads;
-    let routed_experts = if config.architecture == ModelArchitecture::Qwen3Dense {
+    let routed_experts = if config.is_dense() {
         1
     } else {
         config.experts_per_token
     };
-    let rendered_expert_count = if config.architecture == ModelArchitecture::Qwen3Dense {
+    let rendered_expert_count = if config.is_dense() {
         1
     } else {
         config.num_experts
@@ -335,12 +361,82 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
         ("{{ROPE_FREQUENCY_PROGRAM}}", rope_frequency_program(config)),
     ];
     let mut source = MODEL_TEMPLATE.to_owned();
+    if config.is_qwen35() {
+        source.push('\n');
+        source.push_str(QWEN35_TEMPLATE);
+    }
     for (placeholder, value) in values {
         ensure!(
             source.contains(placeholder),
             "model template is missing {placeholder}"
         );
         source = source.replace(placeholder, &value);
+    }
+    if config.is_qwen35() {
+        let linear_qkv_size = config.linear_qkv_size().unwrap();
+        let linear_key_size = config.linear_key_size().unwrap();
+        let linear_value_size = config.linear_inner_size.unwrap();
+        let linear_key_heads = config.linear_group_count.unwrap();
+        let linear_value_heads = config.linear_time_step_rank.unwrap();
+        let linear_key_head_dim = config.linear_state_size.unwrap();
+        let linear_value_head_dim = config.linear_value_head_size().unwrap();
+        let linear_conv_kernel = config.linear_conv_kernel.unwrap();
+        let linear_conv_state_size = linear_qkv_size
+            .checked_mul(linear_conv_kernel - 1)
+            .ok_or_else(|| anyhow::anyhow!("linear convolution state size overflowed"))?;
+        let linear_recurrent_state_size = linear_value_heads
+            .checked_mul(linear_key_head_dim)
+            .and_then(|value| value.checked_mul(linear_value_head_dim))
+            .ok_or_else(|| anyhow::anyhow!("linear recurrent state size overflowed"))?;
+        let linear_attention_scale = (linear_key_head_dim as f32).sqrt().recip();
+        for (placeholder, value) in [
+            (
+                "{{QWEN35_QUERY_PROJECTION_SIZE}}",
+                format!("{:016X}", config.query_size() * 2),
+            ),
+            (
+                "{{KV_CACHE_ELEMENTS_PER_TOKEN}}",
+                format!("{:016X}", config.kv_cache_elements_per_token()?),
+            ),
+            ("{{LINEAR_QKV_SIZE}}", format!("{linear_qkv_size:016X}")),
+            ("{{LINEAR_KEY_SIZE}}", format!("{linear_key_size:016X}")),
+            ("{{LINEAR_VALUE_SIZE}}", format!("{linear_value_size:016X}")),
+            ("{{LINEAR_KEY_HEADS}}", format!("{linear_key_heads:016X}")),
+            (
+                "{{LINEAR_VALUE_HEADS}}",
+                format!("{linear_value_heads:016X}"),
+            ),
+            (
+                "{{LINEAR_KEY_HEAD_DIM}}",
+                format!("{linear_key_head_dim:016X}"),
+            ),
+            (
+                "{{LINEAR_VALUE_HEAD_DIM}}",
+                format!("{linear_value_head_dim:016X}"),
+            ),
+            (
+                "{{LINEAR_CONV_KERNEL}}",
+                format!("{linear_conv_kernel:016X}"),
+            ),
+            (
+                "{{LINEAR_CONV_STATE_SIZE}}",
+                format!("{linear_conv_state_size:016X}"),
+            ),
+            (
+                "{{LINEAR_RECURRENT_STATE_SIZE}}",
+                format!("{linear_recurrent_state_size:016X}"),
+            ),
+            (
+                "{{LINEAR_ATTENTION_SCALE_BITS}}",
+                format!("{:08X}", linear_attention_scale.to_bits()),
+            ),
+        ] {
+            ensure!(
+                source.contains(placeholder),
+                "model template is missing {placeholder}"
+            );
+            source = source.replace(placeholder, &value);
+        }
     }
     ensure!(
         !source.contains("{{"),
@@ -423,12 +519,14 @@ pub fn generated_model_source() -> String {
         .expect("the built-in Qwen3 configuration must be renderable")
 }
 
-/// Generate the source for a selected GGUF configuration. The current Catena
-/// core implements conventional dense and MoE Qwen3 attention; rejecting the hybrid
-/// architecture here prevents writing a plausible-looking but invalid program.
+/// Generate model source for the selected GGUF configuration. Qwen3.5 dense
+/// models compose metadata-selected full-attention and Gated DeltaNet layers;
+/// Qwen3.5 MoE remains rejected until its routed/shared FFN is composed.
 pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
     config.validate()?;
-    layer_weight_names(config.architecture)?;
+    for layer in 0..config.num_layers {
+        layer_weight_names(config, layer)?;
+    }
     validate_execution_reductions(config)?;
     let mut source = render_model_template(config)?;
     source.push('\n');
@@ -553,6 +651,32 @@ mod tests {
     }
 
     #[test]
+    fn dense_qwen35_uses_metadata_selected_hybrid_layers() -> Result<()> {
+        let config = ModelConfig::qwen35_0_8b();
+        let model = generated_model_source_for(&config)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-full-decoder-layer")
+                .count(),
+            6
+        );
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-linear-decoder-layer")
+                .count(),
+            18
+        );
+        assert_eq!(
+            entrypoint.matches("(cap.ref mem)").count(),
+            1 + weight_specs(&config)?.len()
+        );
+        assert!(model.contains("(def program qwen3.qwen35-delta :"));
+        assert!(HELPER_SOURCE.contains("(def program qwen3.softplus :"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_model_dimensions_above_pinned_reduction_limits() {
         let mut qwen3_4b = ModelConfig::qwen3_1_7b();
         qwen3_4b.model_name = Some("Qwen3-4B".into());
@@ -580,11 +704,18 @@ mod tests {
     }
 
     #[test]
-    fn every_qwen3_program_is_reachable_from_the_model_entrypoint() {
-        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen3_0_6b()] {
+    fn every_qwen3_program_is_used_by_a_supported_model_entrypoint() {
+        let mut all_programs = BTreeSet::new();
+        let mut all_reachable = BTreeSet::new();
+        for config in [
+            ModelConfig::qwen3_30b(),
+            ModelConfig::qwen3_0_6b(),
+            ModelConfig::qwen35_0_8b(),
+        ] {
             let model = generated_model_source_for(&config).unwrap();
             let source = format!("{HELPER_SOURCE}\n{model}");
             let programs = qwen3_program_references(&source);
+            all_programs.extend(programs.keys().cloned());
             let mut reachable = BTreeSet::new();
             let mut pending = vec!["qwen3".to_owned()];
             while let Some(program) = pending.pop() {
@@ -593,17 +724,16 @@ mod tests {
                 }
                 pending.extend(programs.get(&program).into_iter().flatten().cloned());
             }
-            let unreachable = programs
-                .keys()
-                .filter(|program| !reachable.contains(*program))
-                .cloned()
-                .collect::<Vec<_>>();
-            assert!(
-                unreachable.is_empty(),
-                "programs unreachable from {:?} qwen3: {unreachable:?}",
-                config.architecture
-            );
+            all_reachable.extend(reachable);
         }
+        let unreachable = all_programs
+            .difference(&all_reachable)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            unreachable.is_empty(),
+            "programs unreachable from every supported qwen3 entrypoint: {unreachable:?}"
+        );
     }
 
     #[test]

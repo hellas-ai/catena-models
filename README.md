@@ -7,8 +7,12 @@ cache, and performs greedy generation directly from a HIP-registered BF16
 GGUF mapping.
 
 The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
-including the tied-embedding 0.6B and 1.7B layouts. The conversion and measured
-performance notes below remain specific to Qwen3-30B-A3B.
+including the tied-embedding 0.6B and 1.7B layouts, and dense hybrid Qwen3.5
+GGUFs such as `unsloth/Qwen3.5-0.8B-GGUF:BF16`. Qwen3.5 selects full-attention
+or Gated DeltaNet per layer from GGUF metadata and uses partial RoPE, gated
+attention, depthwise causal convolution, and recurrent DeltaNet state. The
+conversion and measured performance notes below remain specific to
+Qwen3-30B-A3B.
 
 The pinned Catena code generator currently limits ordinary and paired F32
 reductions to 4,096 terms and borrowed F32 reductions to 8,192 terms because
@@ -153,11 +157,15 @@ most `4.92e-7` across the complete 32,768-position context.
 
 Normal inference compiles the dimension-free helpers in
 `src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
-`src/catena/qwen3_model.hex`. Rust fills its embedding, normalization,
-projection, RoPE, cache, attention, and dense/MoE feed-forward dimensions from GGUF metadata and
-appends a linear-use entrypoint with the metadata-derived layer and tensor
-counts. To inspect the exact generated model source for the selected GGUF,
-write it under
+`src/catena/qwen3_model.hex` and, for Qwen3.5, the hybrid layer definitions in
+`src/catena/qwen35_model.hex`. Rust fills its embedding, normalization,
+projection, RoPE, cache, attention, DeltaNet, and dense/MoE feed-forward
+dimensions from GGUF metadata and appends a linear-use entrypoint with the
+metadata-derived layer types and tensor counts. Qwen3.5 prompt processing is
+currently deliberately sequential, one token per graph invocation, so the
+first implementation favors a directly testable recurrent transition over a
+parallel scan. To inspect the exact generated model source for the selected
+GGUF, write it under
 `target/catena/generated-qwen3.hex` with:
 
 ```bash

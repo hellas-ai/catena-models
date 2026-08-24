@@ -79,6 +79,35 @@
   )
 )
 
+(def program qwen3.sigmoid : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    ([.x] f32.neg [negative-x.])
+    ([.negative-x] qwen3.exp [exp-negative-x.])
+    ([.one exp-negative-x] f32.add [denominator.])
+    ([.one denominator] f32.div [result.])
+    [.result]
+  )
+)
+
+# Stable softplus: max(x, 0) + log(1 + exp(-abs(x))). DeltaNet only uses
+# this in F32 for the decay time-step projection.
+(def program qwen3.softplus : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x00000000 u32.bitcast-f32 [zero.])
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    ([.x zero] f32.gt [positive.])
+    ([.positive x zero] f32.select [maximum.])
+    ([.x] f32.neg [negative.])
+    ([.positive negative x] f32.select [negative-absolute.])
+    ([.negative-absolute] qwen3.exp [exponential.])
+    ([.one exponential] f32.add [one-plus.])
+    ([.one-plus] math.log-approx [logarithm.])
+    ([.maximum logarithm] f32.add [result.])
+    [.result]
+  )
+)
+
 # Square root with an exponent-derived initial estimate followed by four
 # Newton-Raphson refinements. RMS inputs span several orders of magnitude in
 # this checkpoint; starting the iteration at x does not converge in a fixed

@@ -6,6 +6,7 @@ use anyhow::{Result, ensure};
 pub enum ModelArchitecture {
     Qwen3Dense,
     Qwen3Moe,
+    Qwen35Dense,
     Qwen35Moe,
 }
 
@@ -43,6 +44,20 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    pub fn is_qwen35(&self) -> bool {
+        matches!(
+            self.architecture,
+            ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
+        )
+    }
+
+    pub fn is_dense(&self) -> bool {
+        matches!(
+            self.architecture,
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+        )
+    }
+
     pub fn qwen3_0_6b() -> Self {
         let mut config = Self::qwen3_30b();
         config.model_name = Some("Qwen3-0.6B".into());
@@ -94,6 +109,34 @@ impl ModelConfig {
         }
     }
 
+    pub fn qwen35_0_8b() -> Self {
+        Self {
+            model_name: Some("Qwen3.5-0.8B".into()),
+            architecture: ModelArchitecture::Qwen35Dense,
+            vocabulary_size: 248_320,
+            hidden_size: 1_024,
+            intermediate_size: 3_584,
+            num_layers: 24,
+            num_attention_heads: 8,
+            num_key_value_heads: 2,
+            head_dim: 256,
+            max_position_embeddings: 262_144,
+            rms_norm_eps: 1.0e-6,
+            rope_theta: 10_000_000.0,
+            rope_dimension_count: 64,
+            num_experts: 0,
+            experts_per_token: 0,
+            shared_expert_intermediate_size: None,
+            full_attention_interval: Some(4),
+            linear_conv_kernel: Some(4),
+            linear_state_size: Some(128),
+            linear_group_count: Some(16),
+            linear_time_step_rank: Some(16),
+            linear_inner_size: Some(2_048),
+            eos_token_id: Some(248_044),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         for (name, value) in [
             ("vocabulary size", self.vocabulary_size),
@@ -113,9 +156,9 @@ impl ModelConfig {
             "attention head count must be divisible by KV head count"
         );
         match self.architecture {
-            ModelArchitecture::Qwen3Dense => ensure!(
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense => ensure!(
                 self.num_experts == 0 && self.experts_per_token == 0,
-                "dense Qwen3 metadata must not define routed experts"
+                "dense Qwen metadata must not define routed experts"
             ),
             ModelArchitecture::Qwen3Moe | ModelArchitecture::Qwen35Moe => {
                 ensure!(self.num_experts > 0, "GGUF expert count must be non-zero");
@@ -133,9 +176,8 @@ impl ModelConfig {
             self.rope_dimension_count > 0 && self.rope_dimension_count <= self.head_dim,
             "rotary dimension must be within the attention head"
         );
-        if self.architecture == ModelArchitecture::Qwen35Moe {
+        if self.is_qwen35() {
             for (name, value) in [
-                ("shared expert size", self.shared_expert_intermediate_size),
                 ("full-attention interval", self.full_attention_interval),
                 ("linear convolution kernel", self.linear_conv_kernel),
                 ("linear state size", self.linear_state_size),
@@ -145,6 +187,18 @@ impl ModelConfig {
             ] {
                 ensure!(value.is_some_and(|v| v > 0), "GGUF is missing {name}");
             }
+            if self.architecture == ModelArchitecture::Qwen35Moe {
+                ensure!(
+                    self.shared_expert_intermediate_size.is_some_and(|v| v > 0),
+                    "GGUF is missing shared expert size"
+                );
+            }
+            ensure!(
+                self.linear_inner_size
+                    .unwrap()
+                    .is_multiple_of(self.linear_time_step_rank.unwrap()),
+                "linear inner size must be divisible by the value-head count"
+            );
         }
         Ok(())
     }
@@ -162,12 +216,58 @@ impl ModelConfig {
     pub fn key_value_size(&self) -> usize {
         self.num_key_value_heads * self.head_dim
     }
+    pub fn linear_key_size(&self) -> Option<usize> {
+        self.linear_group_count?
+            .checked_mul(self.linear_state_size?)
+    }
+    pub fn linear_value_head_size(&self) -> Option<usize> {
+        Some(self.linear_inner_size? / self.linear_time_step_rank?)
+    }
+    pub fn linear_qkv_size(&self) -> Option<usize> {
+        self.linear_key_size()?
+            .checked_mul(2)?
+            .checked_add(self.linear_inner_size?)
+    }
     pub fn kv_cache_elements_per_token(&self) -> Result<usize> {
         self.num_layers
             .checked_mul(2)
             .and_then(|value| value.checked_mul(self.num_key_value_heads))
             .and_then(|value| value.checked_mul(self.head_dim))
             .ok_or_else(|| anyhow::anyhow!("KV cache stride overflowed"))
+    }
+    pub fn cache_elements(&self, capacity: usize) -> Result<usize> {
+        let kv = capacity
+            .checked_mul(self.kv_cache_elements_per_token()?)
+            .ok_or_else(|| anyhow::anyhow!("KV cache element count overflowed"))?;
+        if !self.is_qwen35() {
+            return Ok(kv);
+        }
+        let conv_kernel = self
+            .linear_conv_kernel
+            .ok_or_else(|| anyhow::anyhow!("linear convolution kernel is missing"))?;
+        let value_heads = self
+            .linear_time_step_rank
+            .ok_or_else(|| anyhow::anyhow!("linear value-head count is missing"))?;
+        let key_dim = self
+            .linear_state_size
+            .ok_or_else(|| anyhow::anyhow!("linear key-head dimension is missing"))?;
+        let conv = self
+            .linear_qkv_size()
+            .and_then(|value| value.checked_mul(conv_kernel - 1))
+            .ok_or_else(|| anyhow::anyhow!("linear convolution cache size overflowed"))?;
+        let recurrent = value_heads
+            .checked_mul(key_dim)
+            .and_then(|value| value.checked_mul(self.linear_value_head_size()?))
+            .ok_or_else(|| anyhow::anyhow!("linear recurrent cache size overflowed"))?;
+        let per_layer = conv
+            .checked_add(recurrent)
+            .ok_or_else(|| anyhow::anyhow!("linear layer cache size overflowed"))?;
+        let linear = self
+            .num_layers
+            .checked_mul(per_layer)
+            .ok_or_else(|| anyhow::anyhow!("linear model cache size overflowed"))?;
+        kv.checked_add(linear)
+            .ok_or_else(|| anyhow::anyhow!("hybrid cache size overflowed"))
     }
 }
 
@@ -267,13 +367,9 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
         match (c.architecture, c.layer_type(l)) {
             (ModelArchitecture::Qwen3Dense, _)
             | (ModelArchitecture::Qwen3Moe, _)
+            | (ModelArchitecture::Qwen35Dense, LayerType::FullAttention)
             | (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
-                let q = c.query_size()
-                    * if c.architecture == ModelArchitecture::Qwen35Moe {
-                        2
-                    } else {
-                        1
-                    };
+                let q = c.query_size() * if c.is_qwen35() { 2 } else { 1 };
                 out.extend([
                     layer_tensor(
                         l,
@@ -319,16 +415,20 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
                     ),
                 ]);
             }
-            (ModelArchitecture::Qwen35Moe, LayerType::LinearAttention) => {
+            (
+                ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe,
+                LayerType::LinearAttention,
+            ) => {
                 let inner = c.linear_inner_size.unwrap();
                 let rank = c.linear_time_step_rank.unwrap();
+                let qkv = c.linear_qkv_size().unwrap();
                 out.extend([
                     layer_tensor(
                         l,
                         "linear_attn.in_proj_qkv.weight",
                         "attn_qkv.weight",
                         WeightDtype::Bf16,
-                        vec![2 * inner, c.hidden_size],
+                        vec![qkv, c.hidden_size],
                     ),
                     layer_tensor(
                         l,
@@ -370,7 +470,7 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
                         "linear_attn.norm.weight",
                         "ssm_norm.weight",
                         WeightDtype::F32,
-                        vec![c.linear_state_size.unwrap()],
+                        vec![c.linear_value_head_size().unwrap()],
                     ),
                     layer_tensor(
                         l,
@@ -384,12 +484,12 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
                         "linear_attn.conv1d.weight",
                         "ssm_conv1d.weight",
                         WeightDtype::F32,
-                        vec![2 * inner, c.linear_conv_kernel.unwrap()],
+                        vec![qkv, c.linear_conv_kernel.unwrap()],
                     ),
                 ]);
             }
         }
-        let post_norm = if c.architecture == ModelArchitecture::Qwen35Moe {
+        let post_norm = if c.is_qwen35() {
             "post_attention_norm.weight"
         } else {
             "ffn_norm.weight"
@@ -401,7 +501,7 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
             WeightDtype::F32,
             vec![c.hidden_size],
         ));
-        if c.architecture == ModelArchitecture::Qwen3Dense {
+        if c.is_dense() {
             out.extend([
                 layer_tensor(
                     l,
@@ -499,7 +599,7 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
         ),
         TensorSpec::one(
             "lm_head.weight".into(),
-            if c.architecture == ModelArchitecture::Qwen3Dense {
+            if c.is_dense() {
                 "token_embd.weight"
             } else {
                 "output.weight"
@@ -610,6 +710,41 @@ mod tests {
                 .count(),
             30
         );
+        Ok(())
+    }
+
+    #[test]
+    fn qwen35_dense_inventory_uses_dense_ffn_and_tied_embeddings() -> Result<()> {
+        let mut c = qwen35();
+        c.architecture = ModelArchitecture::Qwen35Dense;
+        c.hidden_size = 1_024;
+        c.intermediate_size = 3_584;
+        c.num_layers = 24;
+        c.num_attention_heads = 8;
+        c.num_key_value_heads = 2;
+        c.num_experts = 0;
+        c.experts_per_token = 0;
+        c.shared_expert_intermediate_size = None;
+        c.linear_time_step_rank = Some(16);
+        c.linear_inner_size = Some(2_048);
+        let specs = weight_specs(&c)?;
+        assert_eq!(specs.len(), 321);
+        assert_eq!(specs.first().unwrap().gguf_name, "token_embd.weight");
+        assert_eq!(specs.last().unwrap().gguf_name, "token_embd.weight");
+        assert!(specs.iter().any(|spec| {
+            spec.gguf_name == "blk.0.attn_qkv.weight" && spec.shape == [6_144, 1_024]
+        }));
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.gguf_name == "blk.0.ffn_gate.weight")
+        );
+        assert!(
+            !specs
+                .iter()
+                .any(|spec| spec.gguf_name.contains("ffn_gate_exps"))
+        );
+        assert_eq!(c.cache_elements(1)?, 6_758_400);
         Ok(())
     }
 }
