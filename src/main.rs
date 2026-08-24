@@ -19,7 +19,7 @@ struct Args {
     #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
     prompt: Option<String>,
 
-    /// Write the generated model entrypoint under target/, then exit.
+    /// Write the generated model-specific Hex source under target/, then exit.
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
 

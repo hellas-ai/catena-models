@@ -2,7 +2,8 @@
 
 use anyhow::{Result, ensure};
 
-// Kept for the fixed Qwen3-30B-A3B helper source and generated entrypoint.
+// Kept for the Qwen3-30B-A3B host ABI and generated entrypoint until those
+// descriptors become metadata-driven in the next refactor.
 pub const VOCAB_SIZE: usize = 151_936;
 pub const HIDDEN_SIZE: usize = 2_048;
 pub const INTERMEDIATE_SIZE: usize = 768;

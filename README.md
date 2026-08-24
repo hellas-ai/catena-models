@@ -124,9 +124,13 @@ sine/cosine polynomials, then reuses that owned table across all 48 layers.
 The generated table differs from the previous host `sinf`/`cosf` values by at
 most `4.92e-7` across the complete 32,768-position context.
 
-Normal inference compiles the fixed `src/catena/qwen3_helpers.hex` together
-with an in-memory generated 48-layer model entrypoint. To inspect the exact
-generated model source for the selected GGUF, write it under
+Normal inference compiles the dimension-free helpers in
+`src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
+`src/catena/qwen3_model.hex`. Rust fills its embedding, normalization,
+projection, RoPE, cache, attention, and MoE dimensions from GGUF metadata and
+appends the explicit 48-layer linear-use entrypoint. (The entrypoint's tensor
+ABI remains fixed until the next refactor.) To inspect the exact generated
+model source for the selected GGUF, write it under
 `target/catena/generated-qwen3.hex` with:
 
 ```bash
