@@ -137,6 +137,34 @@ impl ModelConfig {
         }
     }
 
+    pub fn qwen36_35b_a3b() -> Self {
+        Self {
+            model_name: Some("Qwen3.6-35B-A3B".into()),
+            architecture: ModelArchitecture::Qwen35Moe,
+            vocabulary_size: 248_320,
+            hidden_size: 2_048,
+            intermediate_size: 512,
+            num_layers: 40,
+            num_attention_heads: 16,
+            num_key_value_heads: 2,
+            head_dim: 256,
+            max_position_embeddings: 262_144,
+            rms_norm_eps: 1.0e-6,
+            rope_theta: 10_000_000.0,
+            rope_dimension_count: 64,
+            num_experts: 256,
+            experts_per_token: 8,
+            shared_expert_intermediate_size: Some(512),
+            full_attention_interval: Some(4),
+            linear_conv_kernel: Some(4),
+            linear_state_size: Some(128),
+            linear_group_count: Some(16),
+            linear_time_step_rank: Some(32),
+            linear_inner_size: Some(4_096),
+            eos_token_id: Some(248_044),
+        }
+    }
+
     pub fn validate(&self) -> Result<()> {
         for (name, value) in [
             ("vocabulary size", self.vocabulary_size),
@@ -627,26 +655,7 @@ mod tests {
     }
 
     fn qwen35() -> ModelConfig {
-        let mut c = ModelConfig::qwen3_30b();
-        c.architecture = ModelArchitecture::Qwen35Moe;
-        c.vocabulary_size = 248_320;
-        c.intermediate_size = 512;
-        c.num_layers = 40;
-        c.num_attention_heads = 16;
-        c.num_key_value_heads = 2;
-        c.head_dim = 256;
-        c.max_position_embeddings = 262_144;
-        c.rope_theta = 10_000_000.;
-        c.rope_dimension_count = 64;
-        c.num_experts = 256;
-        c.shared_expert_intermediate_size = Some(512);
-        c.full_attention_interval = Some(4);
-        c.linear_conv_kernel = Some(4);
-        c.linear_state_size = Some(128);
-        c.linear_group_count = Some(16);
-        c.linear_time_step_rank = Some(32);
-        c.linear_inner_size = Some(4096);
-        c
+        ModelConfig::qwen36_35b_a3b()
     }
     #[test]
     fn qwen3_inventory() -> Result<()> {

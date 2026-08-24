@@ -77,6 +77,47 @@ const QWEN35_LINEAR_LAYER_WEIGHT_NAMES: [&str; 14] = [
     "down-weight",
 ];
 
+const QWEN35_MOE_FULL_LAYER_WEIGHT_NAMES: [&str; 16] = [
+    "input-norm",
+    "q-weight",
+    "k-weight",
+    "v-weight",
+    "o-weight",
+    "q-norm",
+    "k-norm",
+    "post-norm",
+    "router-weight",
+    "expert-gate-weight",
+    "expert-up-weight",
+    "expert-down-weight",
+    "shared-router-weight",
+    "shared-gate-weight",
+    "shared-up-weight",
+    "shared-down-weight",
+];
+
+const QWEN35_MOE_LINEAR_LAYER_WEIGHT_NAMES: [&str; 19] = [
+    "input-norm",
+    "qkv-weight",
+    "z-weight",
+    "alpha-weight",
+    "beta-weight",
+    "dt-bias",
+    "a-log",
+    "linear-norm",
+    "linear-out-weight",
+    "conv-weight",
+    "post-norm",
+    "router-weight",
+    "expert-gate-weight",
+    "expert-up-weight",
+    "expert-down-weight",
+    "shared-router-weight",
+    "shared-gate-weight",
+    "shared-up-weight",
+    "shared-down-weight",
+];
+
 fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'static str]> {
     match (config.architecture, config.layer_type(layer)) {
         (ModelArchitecture::Qwen3Dense, _) => Ok(&DENSE_LAYER_WEIGHT_NAMES),
@@ -85,17 +126,19 @@ fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'
         (ModelArchitecture::Qwen35Dense, LayerType::LinearAttention) => {
             Ok(&QWEN35_LINEAR_LAYER_WEIGHT_NAMES)
         }
-        (ModelArchitecture::Qwen35Moe, _) => anyhow::bail!(
-            "Qwen3.6 MoE source generation still requires routed/shared expert composition"
-        ),
+        (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
+            Ok(&QWEN35_MOE_FULL_LAYER_WEIGHT_NAMES)
+        }
+        (ModelArchitecture::Qwen35Moe, LayerType::LinearAttention) => {
+            Ok(&QWEN35_MOE_LINEAR_LAYER_WEIGHT_NAMES)
+        }
     }
 }
 
 fn validate_execution_reductions(config: &ModelConfig) -> Result<()> {
     let routed_slots = match config.architecture {
         ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense => 1,
-        ModelArchitecture::Qwen3Moe => config.experts_per_token,
-        ModelArchitecture::Qwen35Moe => return Ok(()),
+        ModelArchitecture::Qwen3Moe | ModelArchitecture::Qwen35Moe => config.experts_per_token,
     };
     let active_intermediate = config
         .intermediate_size
@@ -151,9 +194,9 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
         "Qwen3 entrypoint describes {described_weight_count} weights, but metadata produced {weight_count}"
     );
     let mut source = String::new();
+    source.push_str("(def program qwen3 :\n");
     source.push_str(ENTRYPOINT_MARKER);
-    source.push('\n');
-    source.push_str("(def program qwen3 :\n  {\n");
+    source.push_str("\n  {\n");
     for ty in [
         "    (cap.ref mem)\n", // tokens
         "    (cap.own mem)\n", // cache
@@ -198,7 +241,12 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
             (ModelArchitecture::Qwen35Dense, LayerType::LinearAttention) => {
                 "qwen3.qwen35-linear-decoder-layer"
             }
-            (ModelArchitecture::Qwen35Moe, _) => unreachable!("rejected above"),
+            (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
+                "qwen3.qwen35-full-moe-decoder-layer"
+            }
+            (ModelArchitecture::Qwen35Moe, LayerType::LinearAttention) => {
+                "qwen3.qwen35-linear-moe-decoder-layer"
+            }
         };
         writeln!(
             source,
@@ -389,6 +437,7 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
             .and_then(|value| value.checked_mul(linear_value_head_dim))
             .ok_or_else(|| anyhow::anyhow!("linear recurrent state size overflowed"))?;
         let linear_attention_scale = (linear_key_head_dim as f32).sqrt().recip();
+        let shared_intermediate_size = config.shared_expert_intermediate_size.unwrap_or(1);
         for (placeholder, value) in [
             (
                 "{{QWEN35_QUERY_PROJECTION_SIZE}}",
@@ -429,6 +478,10 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
             (
                 "{{LINEAR_ATTENTION_SCALE_BITS}}",
                 format!("{:08X}", linear_attention_scale.to_bits()),
+            ),
+            (
+                "{{SHARED_INTERMEDIATE_SIZE}}",
+                format!("{shared_intermediate_size:016X}"),
             ),
         ] {
             ensure!(
@@ -520,8 +573,8 @@ pub fn generated_model_source() -> String {
 }
 
 /// Generate model source for the selected GGUF configuration. Qwen3.5 dense
-/// models compose metadata-selected full-attention and Gated DeltaNet layers;
-/// Qwen3.5 MoE remains rejected until its routed/shared FFN is composed.
+/// models compose metadata-selected full-attention and Gated DeltaNet layers,
+/// with either dense FFNs or routed plus shared-expert MoE FFNs.
 pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
     config.validate()?;
     for layer in 0..config.num_layers {
@@ -677,6 +730,32 @@ mod tests {
     }
 
     #[test]
+    fn qwen36_moe_uses_hybrid_layers_and_shared_experts() -> Result<()> {
+        let config = ModelConfig::qwen36_35b_a3b();
+        let model = generated_model_source_for(&config)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-full-moe-decoder-layer")
+                .count(),
+            10
+        );
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-linear-moe-decoder-layer")
+                .count(),
+            30
+        );
+        assert_eq!(
+            entrypoint.matches("(cap.ref mem)").count(),
+            1 + weight_specs(&config)?.len()
+        );
+        assert!(model.contains("(def program qwen3.qwen35-moe-ffn :"));
+        assert!(model.contains("(def program qwen3.qwen35-shared-linear-pair :"));
+        Ok(())
+    }
+
+    #[test]
     fn rejects_model_dimensions_above_pinned_reduction_limits() {
         let mut qwen3_4b = ModelConfig::qwen3_1_7b();
         qwen3_4b.model_name = Some("Qwen3-4B".into());
@@ -711,6 +790,7 @@ mod tests {
             ModelConfig::qwen3_30b(),
             ModelConfig::qwen3_0_6b(),
             ModelConfig::qwen35_0_8b(),
+            ModelConfig::qwen36_35b_a3b(),
         ] {
             let model = generated_model_source_for(&config).unwrap();
             let source = format!("{HELPER_SOURCE}\n{model}");

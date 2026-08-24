@@ -222,9 +222,9 @@ impl Model {
                 ModelArchitecture::Qwen3Dense
                     | ModelArchitecture::Qwen3Moe
                     | ModelArchitecture::Qwen35Dense
+                    | ModelArchitecture::Qwen35Moe
             ),
-            "Qwen3.6 MoE GGUF metadata and all {} tensors were validated, but its routed/shared \
-             expert Catena composition is not implemented yet",
+            "unsupported model architecture with {} validated tensors",
             self.weights.len()
         );
         Ok(())
@@ -273,7 +273,7 @@ impl Session<'_> {
     }
 
     fn forward(&mut self, tokens: &[u64]) -> Result<(MemOwn, u64)> {
-        if self.model.config.architecture == ModelArchitecture::Qwen35Dense && tokens.len() > 1 {
+        if self.model.config.is_qwen35() && tokens.len() > 1 {
             let mut last = None;
             for &token in tokens {
                 last = Some(self.forward(std::slice::from_ref(&token))?);
