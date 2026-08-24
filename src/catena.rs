@@ -1,11 +1,19 @@
 use std::fmt::Write;
 
 use anyhow::{Result, ensure};
+use catena_lang::stdlib;
 
 use crate::spec::{ModelArchitecture, ModelConfig, NUM_LAYERS, TENSORS_PER_LAYER, WEIGHT_COUNT};
 
-/// Complete checked-in Catena program used by normal inference.
-pub const MODEL_SOURCE: &str = include_str!("catena/qwen3.hex");
+/// Fixed Catena helpers compiled before the generated model entrypoint.
+pub const HELPER_SOURCE: &str = include_str!("catena/qwen3_helpers.hex");
+
+/// Catena stdlib, fixed helpers, and one generated model in compilation order.
+pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a str> {
+    stdlib::sources()
+        .map(|source| -> &'a str { source })
+        .chain([HELPER_SOURCE, model_source])
+}
 
 const ENTRYPOINT_MARKER: &str = "# Explicit 48-layer Qwen3-30B-A3B composition.";
 
@@ -24,18 +32,9 @@ const LAYER_WEIGHT_NAMES: [&str; TENSORS_PER_LAYER] = [
     "expert-down-weight",
 ];
 
-/// Regenerate the complete Catena source, including the explicit 48-layer
-/// linear-use composition.
-///
-/// Normal inference uses [`MODEL_SOURCE`] directly. This function exists only
-/// for the opt-in `--generate-entrypoint` maintenance command.
+/// Generate the explicit 48-layer linear-use model entrypoint.
 pub fn generated_model_source() -> String {
-    let core = MODEL_SOURCE
-        .split_once(ENTRYPOINT_MARKER)
-        .map_or(MODEL_SOURCE, |(core, _entrypoint)| core)
-        .trim_end();
-    let mut source = String::from(core);
-    source.push_str("\n\n");
+    let mut source = String::new();
     source.push_str(ENTRYPOINT_MARKER);
     source.push('\n');
     source.push_str("(def program qwen3 :\n  {\n");
@@ -136,7 +135,6 @@ mod tests {
     use catena_lang::{
         codegen::GpuDialect,
         runtime::{Runtime, Value},
-        stdlib,
     };
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -179,9 +177,9 @@ mod tests {
 
     #[test]
     fn entrypoint_has_all_layers_and_inputs() {
-        let entrypoint = MODEL_SOURCE
-            .split(ENTRYPOINT_MARKER)
-            .nth(1)
+        let source = generated_model_source();
+        let entrypoint = source
+            .strip_prefix(ENTRYPOINT_MARKER)
             .expect("entrypoint marker");
         assert_eq!(
             entrypoint.matches("(cap.ref mem)").count(),
@@ -199,13 +197,18 @@ mod tests {
     }
 
     #[test]
-    fn checked_in_entrypoint_matches_generator() {
-        assert_eq!(MODEL_SOURCE, generated_model_source());
+    fn helpers_and_generated_model_are_separate_sources() {
+        assert!(!HELPER_SOURCE.contains(ENTRYPOINT_MARKER));
+        assert!(!HELPER_SOURCE.contains("(def program qwen3 :"));
+        let model = generated_model_source();
+        assert!(model.starts_with(ENTRYPOINT_MARKER));
+        assert!(!model.contains("(def program qwen3.embedding :"));
     }
 
     #[test]
     fn every_qwen3_program_is_reachable_from_the_model_entrypoint() {
-        let programs = qwen3_program_references(MODEL_SOURCE);
+        let source = format!("{HELPER_SOURCE}\n{}", generated_model_source());
+        let programs = qwen3_program_references(&source);
         let mut reachable = BTreeSet::new();
         let mut pending = vec!["qwen3".to_owned()];
         while let Some(program) = pending.pop() {
@@ -230,8 +233,8 @@ mod tests {
         if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
             return Ok(());
         }
-        let runtime =
-            Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)?;
+        let model = generated_model_source();
+        let runtime = Runtime::from_sources(runtime_sources(&model), GpuDialect::Hip)?;
         let sequence = crate::spec::MAX_POSITION_EMBEDDINGS;
         let [output] =
             runtime.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;

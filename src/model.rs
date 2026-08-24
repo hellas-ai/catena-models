@@ -4,11 +4,10 @@ use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
     runtime::{MemOwn, Runtime, Value},
-    stdlib,
 };
 
 use crate::{
-    catena::MODEL_SOURCE,
+    catena::{generated_model_source_for, runtime_sources},
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
@@ -38,9 +37,9 @@ impl Model {
                 total.checked_add(spec.element_count())
             })
             .context("model parameter count overflowed")?;
-        let runtime =
-            Runtime::from_sources(stdlib::sources().chain([MODEL_SOURCE]), GpuDialect::Hip)
-                .context("failed to compile the Qwen3 Catena GPU program")?;
+        let model_source = generated_model_source_for(&config)?;
+        let runtime = Runtime::from_sources(runtime_sources(&model_source), GpuDialect::Hip)
+            .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open(gguf_path, &config)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;

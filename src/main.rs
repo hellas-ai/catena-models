@@ -19,7 +19,7 @@ struct Args {
     #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
     prompt: Option<String>,
 
-    /// Regenerate the explicit entrypoint in src/catena/qwen3.hex, then exit.
+    /// Write the generated model entrypoint under target/, then exit.
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
 
@@ -68,9 +68,11 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
     if args.generate_entrypoint {
         let config = read_gguf_model_config(&selected_gguf)?;
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/catena/qwen3.hex");
+        let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join("generated-qwen3.hex");
         std::fs::write(&path, generated_model_source_for(&config)?)?;
-        println!("regenerated {}", path.display());
+        println!("generated {}", path.display());
         return Ok(());
     }
     if args.bench {

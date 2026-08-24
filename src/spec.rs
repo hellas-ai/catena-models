@@ -2,7 +2,7 @@
 
 use anyhow::{Result, ensure};
 
-// Kept for the checked-in legacy Catena core and its tests.
+// Kept for the fixed Qwen3-30B-A3B helper source and generated entrypoint.
 pub const VOCAB_SIZE: usize = 151_936;
 pub const HIDDEN_SIZE: usize = 2_048;
 pub const INTERMEDIATE_SIZE: usize = 768;
