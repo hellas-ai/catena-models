@@ -64,8 +64,8 @@ fn layer_weight_names(architecture: ModelArchitecture) -> Result<&'static [&'sta
         ModelArchitecture::Qwen3Dense => Ok(&DENSE_LAYER_WEIGHT_NAMES),
         ModelArchitecture::Qwen3Moe => Ok(&MOE_LAYER_WEIGHT_NAMES),
         ModelArchitecture::Qwen35Moe => anyhow::bail!(
-            "Qwen3.5/3.6 source generation requires gated-delta-net, shared-expert, \
-             gated-attention, partial-RoPE, and offset-RMSNorm Catena primitives"
+            "Qwen3.5/3.6 source generation requires hybrid gated-delta-net/full-attention, \
+             gated-attention, partial-RoPE, and dense/MoE FFN composition"
         ),
     }
 }

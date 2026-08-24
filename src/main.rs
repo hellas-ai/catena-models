@@ -7,8 +7,8 @@ use std::{
 
 use anyhow::{Result, ensure};
 use catena_qwen3::{
-    catena::generated_model_source_for, checkpoint::read_gguf_model_config, model::Model,
-    tokenizer::QwenTokenizer,
+    catena::generated_model_source_for, checkpoint::read_gguf_model_config, hfhub::download_gguf,
+    model::Model, tokenizer::QwenTokenizer,
 };
 use clap::Parser;
 
@@ -48,8 +48,12 @@ struct Args {
     tokenizer: Option<PathBuf>,
 
     /// GGUF file, shard, or shard directory (defaults to <model-dir>/model-bf16.gguf).
-    #[arg(long)]
+    #[arg(long, conflicts_with = "model")]
     gguf: Option<PathBuf>,
+
+    /// Hugging Face model as owner/repo[:variant], e.g. unsloth/Qwen3.5-0.8B-GGUF:BF16.
+    #[arg(long, value_name = "MODEL", conflicts_with = "gguf")]
+    model: Option<String>,
 
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, default_value_t = 20)]
@@ -62,10 +66,19 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
-    let selected_gguf = args
-        .gguf
-        .clone()
-        .unwrap_or_else(|| args.model_dir.join("model-bf16.gguf"));
+    let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
+    let selected_gguf = match (&args.gguf, &hub_gguf) {
+        (Some(path), None) => path.clone(),
+        (None, Some(checkpoint)) => {
+            eprintln!(
+                "selected {} GGUF file(s) from the Hugging Face cache",
+                checkpoint.files.len()
+            );
+            checkpoint.primary.clone()
+        }
+        (None, None) => args.model_dir.join("model-bf16.gguf"),
+        (Some(_), Some(_)) => unreachable!("clap rejects --gguf with --model"),
+    };
     if args.generate_entrypoint {
         let config = read_gguf_model_config(&selected_gguf)?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
@@ -387,6 +400,21 @@ mod tests {
     fn benchmark_and_entrypoint_generation_conflict() {
         assert!(
             Args::try_parse_from(["catena-qwen3", "--bench", "--generate-entrypoint"]).is_err()
+        );
+    }
+
+    #[test]
+    fn hub_model_and_local_gguf_conflict() {
+        assert!(
+            Args::try_parse_from([
+                "catena-qwen3",
+                "--model",
+                "unsloth/Qwen3.5-0.8B-GGUF:BF16",
+                "--gguf",
+                "model.gguf",
+                "prompt",
+            ])
+            .is_err()
         );
     }
 

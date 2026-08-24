@@ -118,6 +118,20 @@ from the GGUF's `tokenizer.ggml.*` metadata. Use
 `--tokenizer /path/to/tokenizer.json` as an explicit override; when the GGUF has
 no embedded tokenizer, `<model-dir>/tokenizer.json` remains the fallback.
 
+Alternatively, let the runner list and cache a checkpoint from Hugging Face:
+
+```bash
+nix develop --command cargo run --release -- \
+  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 "The capital of France is"
+```
+
+The optional suffix after `:` selects a quantization or variant by directory
+or filename. It is required when a repository contains more than one GGUF
+checkpoint and selection would otherwise be ambiguous. Every member of a
+standard sharded checkpoint is downloaded; `--model` and `--gguf` are mutually
+exclusive. Normal Hugging Face environment variables such as `HF_TOKEN`,
+`HF_HOME`, and `HF_HUB_CACHE` are honored.
+
 Run llama.cpp-style prompt-processing and token-generation measurements with:
 
 ```bash
