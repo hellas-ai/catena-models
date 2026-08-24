@@ -10,6 +10,15 @@ The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
 including the tied-embedding 0.6B and 1.7B layouts. The conversion and measured
 performance notes below remain specific to Qwen3-30B-A3B.
 
+The pinned Catena code generator currently limits ordinary and paired F32
+reductions to 4,096 terms and borrowed F32 reductions to 8,192 terms because
+their complete term arrays live in per-block shared memory. Consequently,
+Qwen3-4B and 8B exceed the borrowed down-projection limit with intermediate
+widths 9,728 and 12,288, while 14B and 32B also exceed the ordinary projection
+limit with hidden width 5,120. The runner rejects these shapes before compiling
+the GPU program. Attention history is likewise limited to 8,192 columns by the
+current softmax primitive.
+
 The scripts assume the Nix development environment; invoke them with
 `nix develop --command` as shown below.
 

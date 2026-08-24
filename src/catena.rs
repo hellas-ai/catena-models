@@ -14,6 +14,13 @@ pub const HELPER_SOURCE: &str = include_str!("catena/qwen3_helpers.hex");
 /// Model-specific Catena programs rendered from GGUF metadata at runtime.
 const MODEL_TEMPLATE: &str = include_str!("catena/qwen3_model.hex");
 
+// These are execution limits of the reduction kernels in the pinned Catena
+// compiler revision, not properties of Qwen. Ordinary and paired reductions
+// reserve one or two F32 shared-memory arrays; the borrowed form reserves one.
+const MAX_REDUCE_F32_TERMS: usize = 4_096;
+const MAX_BORROW_REDUCE_F32_TERMS: usize = 8_192;
+pub(crate) const MAX_SOFTMAX_F32_COLUMNS: usize = 8_192;
+
 /// Catena stdlib, fixed helpers, and one generated model in compilation order.
 pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a str> {
     stdlib::sources()
@@ -21,7 +28,7 @@ pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a st
         .chain([HELPER_SOURCE, model_source])
 }
 
-const ENTRYPOINT_MARKER: &str = "# Explicit metadata-derived Qwen3 MoE composition.";
+const ENTRYPOINT_MARKER: &str = "# Explicit metadata-derived Qwen3 composition.";
 
 const MOE_LAYER_WEIGHT_NAMES: [&str; 12] = [
     "input-norm",
@@ -63,6 +70,50 @@ fn layer_weight_names(architecture: ModelArchitecture) -> Result<&'static [&'sta
     }
 }
 
+fn validate_execution_reductions(config: &ModelConfig) -> Result<()> {
+    let routed_slots = match config.architecture {
+        ModelArchitecture::Qwen3Dense => 1,
+        ModelArchitecture::Qwen3Moe => config.experts_per_token,
+        ModelArchitecture::Qwen35Moe => return Ok(()),
+    };
+    let active_intermediate = config
+        .intermediate_size
+        .checked_mul(routed_slots)
+        .ok_or_else(|| anyhow::anyhow!("active intermediate width overflowed"))?;
+
+    ensure!(
+        config.hidden_size <= MAX_REDUCE_F32_TERMS,
+        "{} has hidden size {}, but the pinned Catena ordinary/paired F32 reduction cap is {}; this affects RMSNorm, Q/K/V and final projections, and the paired gate/up projection",
+        config
+            .model_name
+            .as_deref()
+            .unwrap_or("selected Qwen3 model"),
+        config.hidden_size,
+        MAX_REDUCE_F32_TERMS,
+    );
+    ensure!(
+        config.query_size() <= MAX_REDUCE_F32_TERMS,
+        "{} has attention output width {}, but the pinned Catena ordinary F32 reduction cap is {}; this affects the attention output projection",
+        config
+            .model_name
+            .as_deref()
+            .unwrap_or("selected Qwen3 model"),
+        config.query_size(),
+        MAX_REDUCE_F32_TERMS,
+    );
+    ensure!(
+        active_intermediate <= MAX_BORROW_REDUCE_F32_TERMS,
+        "{} has active feed-forward reduction width {}, but the pinned Catena borrowed F32 reduction cap is {}; dense models use intermediate_size and MoE models use intermediate_size * experts_per_token",
+        config
+            .model_name
+            .as_deref()
+            .unwrap_or("selected Qwen3 model"),
+        active_intermediate,
+        MAX_BORROW_REDUCE_F32_TERMS,
+    );
+    Ok(())
+}
+
 fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     let weight_count = weight_specs(config)?.len();
     let layer_weight_names = layer_weight_names(config.architecture)?;
@@ -70,10 +121,10 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
         .num_layers
         .checked_mul(layer_weight_names.len())
         .and_then(|count| count.checked_add(3))
-        .ok_or_else(|| anyhow::anyhow!("Qwen3 MoE entrypoint weight count overflowed"))?;
+        .ok_or_else(|| anyhow::anyhow!("Qwen3 entrypoint weight count overflowed"))?;
     ensure!(
         weight_count == described_weight_count,
-        "Qwen3 MoE entrypoint describes {described_weight_count} weights, but metadata produced {weight_count}"
+        "Qwen3 entrypoint describes {described_weight_count} weights, but metadata produced {weight_count}"
     );
     let mut source = String::new();
     source.push_str(ENTRYPOINT_MARKER);
@@ -378,6 +429,7 @@ pub fn generated_model_source() -> String {
 pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
     config.validate()?;
     layer_weight_names(config.architecture)?;
+    validate_execution_reductions(config)?;
     let mut source = render_model_template(config)?;
     source.push('\n');
     source.push_str(&generated_entrypoint(config)?);
@@ -498,6 +550,33 @@ mod tests {
         assert!(!model.contains("(def program qwen3.router-select-experts :"));
         assert!(!model.contains("(def program qwen3.moe-activate :"));
         Ok(())
+    }
+
+    #[test]
+    fn rejects_model_dimensions_above_pinned_reduction_limits() {
+        let mut qwen3_4b = ModelConfig::qwen3_1_7b();
+        qwen3_4b.model_name = Some("Qwen3-4B".into());
+        qwen3_4b.hidden_size = 2_560;
+        qwen3_4b.intermediate_size = 9_728;
+        qwen3_4b.num_attention_heads = 32;
+        let error = generated_model_source_for(&qwen3_4b).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("borrowed F32 reduction cap is 8192")
+        );
+
+        let mut qwen3_14b = qwen3_4b;
+        qwen3_14b.model_name = Some("Qwen3-14B".into());
+        qwen3_14b.hidden_size = 5_120;
+        qwen3_14b.intermediate_size = 17_408;
+        qwen3_14b.num_attention_heads = 40;
+        let error = generated_model_source_for(&qwen3_14b).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ordinary/paired F32 reduction cap is 4096")
+        );
     }
 
     #[test]

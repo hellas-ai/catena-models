@@ -7,7 +7,7 @@ use catena_lang::{
 };
 
 use crate::{
-    catena::{generated_model_source_for, runtime_sources},
+    catena::{MAX_SOFTMAX_F32_COLUMNS, generated_model_source_for, runtime_sources},
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
@@ -119,6 +119,10 @@ impl Model {
             "cache capacity {capacity} exceeds the model maximum {}",
             self.config.max_position_embeddings
         );
+        ensure!(
+            capacity <= MAX_SOFTMAX_F32_COLUMNS,
+            "cache capacity {capacity} exceeds the pinned Catena F32 softmax column cap of {MAX_SOFTMAX_F32_COLUMNS}"
+        );
         self.ensure_execution_supported()?;
         Ok(Session {
             model: self,
@@ -153,6 +157,10 @@ impl Model {
                 .is_some_and(|end| end <= capacity),
             "token range {start}..{} exceeds cache capacity {capacity}",
             start.saturating_add(tokens.len())
+        );
+        ensure!(
+            capacity <= MAX_SOFTMAX_F32_COLUMNS,
+            "cache capacity {capacity} exceeds the pinned Catena F32 softmax column cap of {MAX_SOFTMAX_F32_COLUMNS}"
         );
         ensure!(
             tokens
