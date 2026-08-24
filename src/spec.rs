@@ -2,27 +2,6 @@
 
 use anyhow::{Result, ensure};
 
-// Kept for the Qwen3-30B-A3B host ABI and generated entrypoint until those
-// descriptors become metadata-driven in the next refactor.
-pub const VOCAB_SIZE: usize = 151_936;
-pub const HIDDEN_SIZE: usize = 2_048;
-pub const INTERMEDIATE_SIZE: usize = 768;
-pub const NUM_LAYERS: usize = 48;
-pub const NUM_ATTENTION_HEADS: usize = 32;
-pub const NUM_KEY_VALUE_HEADS: usize = 4;
-pub const HEAD_DIM: usize = 128;
-pub const ROPE_HALF_DIM: usize = HEAD_DIM / 2;
-pub const MAX_POSITION_EMBEDDINGS: usize = 32_768;
-pub const RMS_NORM_EPS: f32 = 1.0e-6;
-pub const ROPE_THETA: f32 = 1_000_000.0;
-pub const NUM_EXPERTS: usize = 128;
-pub const EXPERTS_PER_TOKEN: usize = 8;
-pub const EOS_TOKEN_ID: u64 = 151_643;
-pub const TENSORS_PER_LAYER: usize = 12;
-pub const WEIGHT_COUNT: usize = 579;
-pub const MODEL_INPUT_COUNT: usize = 583;
-pub const KV_CACHE_ELEMENTS_PER_TOKEN: usize = 49_152;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelArchitecture {
     Qwen3Moe,
@@ -67,19 +46,19 @@ impl ModelConfig {
         Self {
             model_name: Some("Qwen3-30B-A3B-Base".into()),
             architecture: ModelArchitecture::Qwen3Moe,
-            vocabulary_size: VOCAB_SIZE,
-            hidden_size: HIDDEN_SIZE,
-            intermediate_size: INTERMEDIATE_SIZE,
-            num_layers: NUM_LAYERS,
-            num_attention_heads: NUM_ATTENTION_HEADS,
-            num_key_value_heads: NUM_KEY_VALUE_HEADS,
-            head_dim: HEAD_DIM,
-            max_position_embeddings: MAX_POSITION_EMBEDDINGS,
-            rms_norm_eps: RMS_NORM_EPS,
-            rope_theta: ROPE_THETA,
-            rope_dimension_count: HEAD_DIM,
-            num_experts: NUM_EXPERTS,
-            experts_per_token: EXPERTS_PER_TOKEN,
+            vocabulary_size: 151_936,
+            hidden_size: 2_048,
+            intermediate_size: 768,
+            num_layers: 48,
+            num_attention_heads: 32,
+            num_key_value_heads: 4,
+            head_dim: 128,
+            max_position_embeddings: 32_768,
+            rms_norm_eps: 1.0e-6,
+            rope_theta: 1_000_000.0,
+            rope_dimension_count: 128,
+            num_experts: 128,
+            experts_per_token: 8,
             shared_expert_intermediate_size: None,
             full_attention_interval: None,
             linear_conv_kernel: None,
@@ -87,7 +66,7 @@ impl ModelConfig {
             linear_group_count: None,
             linear_time_step_rank: None,
             linear_inner_size: None,
-            eos_token_id: Some(EOS_TOKEN_ID),
+            eos_token_id: Some(151_643),
         }
     }
 
@@ -147,6 +126,13 @@ impl ModelConfig {
     }
     pub fn key_value_size(&self) -> usize {
         self.num_key_value_heads * self.head_dim
+    }
+    pub fn kv_cache_elements_per_token(&self) -> Result<usize> {
+        self.num_layers
+            .checked_mul(2)
+            .and_then(|value| value.checked_mul(self.num_key_value_heads))
+            .and_then(|value| value.checked_mul(self.head_dim))
+            .ok_or_else(|| anyhow::anyhow!("KV cache stride overflowed"))
     }
 }
 
@@ -486,12 +472,14 @@ mod tests {
     }
     #[test]
     fn qwen3_inventory() -> Result<()> {
-        let s = weight_specs(&ModelConfig::qwen3_30b())?;
+        let config = ModelConfig::qwen3_30b();
+        let s = weight_specs(&config)?;
         assert_eq!(s.len(), 579);
         assert_eq!(
             s.iter().map(TensorSpec::element_count).sum::<usize>(),
             30_532_122_624
         );
+        assert_eq!(config.kv_cache_elements_per_token()?, 49_152);
         Ok(())
     }
     #[test]

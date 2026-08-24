@@ -31,6 +31,7 @@ impl Model {
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
         let specs = weight_specs(&config)?;
+        let weight_count = specs.len();
         let parameter_count = specs
             .iter()
             .try_fold(0_usize, |total, spec| {
@@ -55,7 +56,7 @@ impl Model {
             weights.push(view);
         }
         ensure!(
-            weights.len() + 4 == config_model_input_count(&config),
+            weights.len() == weight_count,
             "internal model weight ABI mismatch"
         );
         eprintln!(
@@ -122,10 +123,9 @@ impl Model {
     }
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
+        let elements_per_token = self.config.kv_cache_elements_per_token()?;
         let elements = capacity
-            .checked_mul(
-                self.config.num_layers * 2 * self.config.num_key_value_heads * self.config.head_dim,
-            )
+            .checked_mul(elements_per_token)
             .context("KV cache element count overflowed")?;
         self.runtime
             .mem_f32_zeroed(elements)
@@ -157,7 +157,8 @@ impl Model {
         );
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
-        let mut inputs = Vec::with_capacity(config_model_input_count(&self.config));
+        let model_input_count = 4 + self.weights.len();
+        let mut inputs = Vec::with_capacity(model_input_count);
         inputs.extend([
             token_buffer.as_ref().into(),
             cache.into(),
@@ -168,7 +169,7 @@ impl Model {
             inputs.push(self.checkpoint.mapped_ref(weight)?.into());
         }
         ensure!(
-            inputs.len() == config_model_input_count(&self.config),
+            inputs.len() == model_input_count,
             "internal model ABI mismatch"
         );
         let mut outputs = self.runtime.exec_values("qwen3", inputs)?;
@@ -270,11 +271,6 @@ impl Session<'_> {
         self.position += tokens.len();
         Ok((logits, next_token))
     }
-}
-
-fn config_model_input_count(config: &ModelConfig) -> usize {
-    // Header validation has already built the same inventory.
-    4 + weight_specs(config).expect("validated model config").len()
 }
 
 fn read_logits(logits_output: MemOwn, vocabulary_size: usize) -> Result<Vec<f32>> {

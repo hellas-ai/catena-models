@@ -128,9 +128,9 @@ Normal inference compiles the dimension-free helpers in
 `src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
 `src/catena/qwen3_model.hex`. Rust fills its embedding, normalization,
 projection, RoPE, cache, attention, and MoE dimensions from GGUF metadata and
-appends the explicit 48-layer linear-use entrypoint. (The entrypoint's tensor
-ABI remains fixed until the next refactor.) To inspect the exact generated
-model source for the selected GGUF, write it under
+appends a linear-use entrypoint with the metadata-derived layer and tensor
+counts. To inspect the exact generated model source for the selected GGUF,
+write it under
 `target/catena/generated-qwen3.hex` with:
 
 ```bash
