@@ -705,6 +705,8 @@ mod tests {
         assert!(entrypoint.contains("mem.cast.bf16 [logit-count logit-buffer.]"));
         assert!(entrypoint.contains("materializec.borrow-argmax-bf16"));
         assert!(model.contains("qwen3.free-bf16-before"));
+        assert_eq!(model.matches("materializec.bf16-gemv").count(), 3);
+        assert!(!model.contains("} materializec.reduce-f32 [logits-buffer.]"));
         assert!(!model.contains("qwen3.expert-linear-pair"));
         assert!(!model.contains("qwen3.moe-down-residual"));
         let unexpected_f32_casts = model

@@ -531,25 +531,24 @@
   ->
   (cap.own mem)
 = ([input linear-weight output-features.]
-  ([.input] mem.cast.bf16 [input-count _input-buffer.])
+  ([.input] mem.cast.bf16 [input-count input-buffer.])
+  ([.linear-weight] mem.cast.bf16 [weight-count weight-buffer.])
   ([.input-count] :.forget [input-count-value.])
   (const.u64.0x{{HIDDEN_SIZE}} [input-features.])
   ([.input-count-value input-features] u64.div [row-count.])
   ([.row-count output-features] u64.mul [output-count-value.])
   ([.output-count-value] u64.name [output-count.])
   ([.input-features] u64.name [input-feature-count.])
-  ({[.input] [.linear-weight]} *.intro [input-and-weight.])
-  ({[.input-and-weight] [.output-features]} *.intro [env.])
   {
+    [.input-buffer]
+    [.input-count]
+    [.weight-buffer]
+    [.weight-count]
     [.output-count]
     [.input-feature-count]
-    [.env]
-    ({
-      ([.output-count] :.param)
-      ([.input-feature-count] :.param)
-    } name.qwen3.linear-reduce-term-at)
-    (([.output-count] :.param) name.qwen3.linear-reduce-epilogue)
-  } materializec.reduce-f32 [output.]
+    (const.u64.0x0000000000000000)
+    [.output-features]
+  } materializec.bf16-gemv [output.]
   ({[.output-count] [.output]} buf.to-mem)
 ))
 
@@ -738,28 +737,53 @@
   [.result]
 ))
 
-# Materialize a linear projection with fused residual addition.
+# Materialize a native BF16 projection, then add its residual in BF16.
+(def program qwen3.add-residual-at :
+  ([n.] {({(cap.own mem) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (bf16 val))
+= ([env output-index.]
+  ([.env] *.elim [projected residual.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  ([.projected] mem.cast.bf16 [projected-count projected-buffer.])
+  ([.residual] mem.cast.bf16 [residual-count residual-buffer.])
+  ({[.projected-count] [.projected-buffer] [.flat-output-index]}
+    qwen3.bf16-buffer-at [projected-value.])
+  ({[.residual-count] [.residual-buffer] [.flat-output-index]}
+    qwen3.bf16-buffer-at [residual-value.])
+  ([.projected-value residual-value] bf16.add [result.])
+  [.result]
+))
+
 (def program qwen3.linear-residual :
   {(cap.own mem) (cap.ref mem) (cap.own mem) (u64 val)}
   ->
   (cap.own mem)
 = ([input linear-weight residual input-features.]
+  ([.input] mem.cast.bf16 [input-count input-buffer.])
+  ([.linear-weight] mem.cast.bf16 [weight-count weight-buffer.])
   ([.residual] mem.cast.bf16 [output-count _residual-buffer.])
-  ({[.input] [.linear-weight]} *.intro [input-and-weight.])
-  ({[.residual] [.input-features]} *.intro [residual-and-features.])
-  ({[.input-and-weight] [.residual-and-features]} *.intro [env.])
   ([.input-features] u64.name [input-feature-count.])
+  (const.u64.0x{{HIDDEN_SIZE}} [output-features.])
   {
+    [.input-buffer]
+    [.input-count]
+    [.weight-buffer]
+    [.weight-count]
     [.output-count]
     [.input-feature-count]
-    [.env]
-    ({
-      ([.output-count] :.param)
-      ([.input-feature-count] :.param)
-    } name.qwen3.linear-residual-reduce-term-at)
-    (([.output-count] :.param) name.qwen3.linear-residual-reduce-epilogue)
-  } materializec.reduce-f32 [output.]
-  ({[.output-count] [.output]} buf.to-mem)
+    (const.u64.0x0000000000000000)
+    [.output-features]
+  } materializec.bf16-gemv [projected-buffer.]
+  ({[.output-count] [.projected-buffer]} buf.to-mem [projected.])
+  ({[.projected] [.residual]} *.intro [env.])
+  {
+    [.output-count]
+    ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.add-residual-at)}
+      materializec)
+  } buf.to-mem [output.]
+  ({[.projected] [.output]} qwen3.free-bf16-before [result.])
+  [.result]
 ))
 
 # Produce one RoPE-applied key cache element from a newly projected K row.
@@ -1884,22 +1908,24 @@
 = ([hidden norm-weight embedding inverse-rms sequence.]
   ({[.hidden] [.norm-weight] [.inverse-rms]}
     qwen3.apply-rmsnorm [normalized.])
+  ([.normalized] mem.cast.bf16 [normalized-count normalized-buffer.])
+  ([.embedding] mem.cast.bf16 [weight-count weight-buffer.])
   (const.u64.0x{{VOCABULARY_SIZE}} [vocabulary-size-value.])
   ([.vocabulary-size-value] u64.name [vocabulary-size.])
-  ({[.normalized] [.embedding]} *.intro [normalized-and-embedding.])
-  ({[.normalized-and-embedding] [.sequence]} *.intro [env.])
   (const.u64.0x{{HIDDEN_SIZE}} [hidden-size-value.])
   ([.hidden-size-value] u64.name [hidden-size.])
+  (const.u64.0x0000000000000001 [one.])
+  ([.sequence one] u64.sub [last-row.])
   {
+    [.normalized-buffer]
+    [.normalized-count]
+    [.weight-buffer]
+    [.weight-count]
     [.vocabulary-size]
     [.hidden-size]
-    [.env]
-    ({
-      ([.vocabulary-size] :.param)
-      ([.hidden-size] :.param)
-    } name.qwen3.final-normalized-logit-term-at)
-    (([.vocabulary-size] :.param) name.qwen3.final-normalized-logit-epilogue)
-  } materializec.reduce-f32 [logits-buffer.]
+    [.last-row]
+    [.vocabulary-size-value]
+  } materializec.bf16-gemv [logits-buffer.]
   ({[.vocabulary-size] [.logits-buffer]} buf.to-mem [logits.])
   ({[.normalized] [.logits]}
     qwen3.free-bf16-before [logits-after-normalized.])

@@ -126,11 +126,12 @@ nix develop --command cargo run --release -- \
   --model unsloth/Qwen3.5-0.8B-GGUF:BF16 "The capital of France is"
 ```
 
-Dense Qwen3 models also have an opt-in mixed-BF16 execution graph. It keeps
+Dense Qwen3 models also have an opt-in native-BF16 execution graph. It keeps
 activations, attention probabilities, logits, and the persistent KV cache in
-BF16 while retaining F32 reduction accumulation and F32 RMSNorm, softmax, and
-RoPE calculations. The original F32-activation graph remains the default so
-the two paths can be compared directly:
+BF16. Dense projections use packed BF16 dot instructions with F32 register
+accumulation on gfx11, while RMSNorm, softmax, and RoPE retain F32 internal
+calculations. The original F32-activation graph remains the default so the two
+paths can be compared directly:
 
 ```bash
 nix develop --command cargo run --release -- \

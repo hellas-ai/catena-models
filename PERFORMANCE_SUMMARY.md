@@ -1,5 +1,24 @@
 # Language features added to achieve performance
 
+## `materializec.bf16-gemv`
+
+Computes row-major BF16 matrix products with F32 accumulation and one final
+BF16 rounding. On AMD gfx11 it loads packed BF16 pairs and emits
+`v_dot2_f32_bf16`, accumulates per thread in registers, and reduces only 256
+partial F32 sums per output instead of materializing every product in shared
+memory. A scalar BF16/F32 fallback keeps other GPU targets compilable.
+
+Dense Qwen3 uses this primitive for Q/K/V, gate/up, attention-output, MLP-down,
+and vocabulary projections. On the local gfx1151 system, matched checkpoints
+measured:
+
+| Model | Test | F32 graph | Native BF16 | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3-0.6B | pp512 | 94.70 tok/s | 154.40 tok/s | +63.0% |
+| Qwen3-0.6B | tg128 | 51.89 tok/s | 81.81 tok/s | +57.7% |
+| Qwen3-4B | pp512 | 11.81 tok/s | 24.01 tok/s | +103.3% |
+| Qwen3-4B | tg128 | 9.91 tok/s | 20.30 tok/s | +104.8% |
+
 ## `materializec.into`
 
 Consumes an owned typed buffer, materializes into a bounds-checked contiguous
