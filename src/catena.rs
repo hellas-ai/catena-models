@@ -16,6 +16,7 @@ pub const BF16_HELPER_SOURCE: &str = include_str!("catena/qwen3_bf16_helpers.hex
 const MODEL_TEMPLATE: &str = include_str!("catena/qwen3_model.hex");
 const BF16_MODEL_TEMPLATE: &str = include_str!("catena/qwen3_bf16_model.hex");
 const QWEN35_TEMPLATE: &str = include_str!("catena/qwen35_model.hex");
+const QWEN35_BF16_TEMPLATE: &str = include_str!("catena/qwen35_bf16_model.hex");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferencePrecision {
@@ -388,7 +389,10 @@ fn render_model_template(config: &ModelConfig, precision: InferencePrecision) ->
     .to_owned();
     if config.is_qwen35() {
         source.push('\n');
-        source.push_str(QWEN35_TEMPLATE);
+        source.push_str(match precision {
+            InferencePrecision::F32 => QWEN35_TEMPLATE,
+            InferencePrecision::Bf16 => QWEN35_BF16_TEMPLATE,
+        });
     }
     for (placeholder, value) in values {
         ensure!(
@@ -563,8 +567,11 @@ pub fn generated_model_source_for_precision(
     config.validate()?;
     ensure!(
         precision == InferencePrecision::F32
-            || config.architecture == ModelArchitecture::Qwen3Dense,
-        "BF16 inference currently supports only dense Qwen3 models"
+            || matches!(
+                config.architecture,
+                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ),
+        "BF16 inference currently supports only dense Qwen3 and Qwen3.5 models"
     );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
@@ -726,12 +733,42 @@ mod tests {
     }
 
     #[test]
-    fn bf16_graph_rejects_moe_and_hybrid_architectures() {
-        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen35_0_8b()] {
+    fn bf16_graph_rejects_moe_architectures() {
+        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen36_35b_a3b()] {
             let error = generated_model_source_for_precision(&config, InferencePrecision::Bf16)
                 .unwrap_err();
-            assert!(error.to_string().contains("only dense Qwen3"));
+            assert!(error.to_string().contains("only dense Qwen3 and Qwen3.5"));
         }
+    }
+
+    #[test]
+    fn dense_qwen35_bf16_uses_native_hybrid_graph() -> Result<()> {
+        let config = ModelConfig::qwen35_0_8b();
+        let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-full-decoder-layer")
+                .count(),
+            6
+        );
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-linear-decoder-layer")
+                .count(),
+            18
+        );
+        assert!(model.contains("materializec.borrow-gated-delta-net-bf16"));
+        assert!(!model.contains("materializec.borrow-gated-delta-net-f32"));
+        assert!(!model.contains("qwen3.expert-linear-pair"));
+        assert!(!model.contains("qwen3.moe-down-residual"));
+        assert!(!model.contains("(def program qwen3.linear-norm :"));
+        assert!(model.contains("materializec.bf16-gemv"));
+        assert!(model.contains("mem.cast.bf16 [state-cap state-buffer.]"));
+        assert!(model.contains("mem.cast.f32 [dt-count dt-buffer.]"));
+        assert!(model.contains("mem.cast.f32 [a-count a-buffer.]"));
+        assert!(model.contains("mem.cast.f32 [norm-count norm-buffer.]"));
+        Ok(())
     }
 
     #[test]
@@ -897,14 +934,13 @@ mod tests {
         if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
             return Ok(());
         }
-        let model = generated_model_source_for_precision(
-            &ModelConfig::qwen3_0_6b(),
-            InferencePrecision::Bf16,
-        )?;
-        Runtime::from_sources(
-            runtime_sources(&model, InferencePrecision::Bf16),
-            GpuDialect::Hip,
-        )?;
+        for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen35_0_8b()] {
+            let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
+            Runtime::from_sources(
+                runtime_sources(&model, InferencePrecision::Bf16),
+                GpuDialect::Hip,
+            )?;
+        }
         Ok(())
     }
 }
