@@ -108,7 +108,7 @@ impl Checkpoint {
             .iter()
             .map(GgufFile::open)
             .collect::<Result<Vec<_>>>()?;
-        let tensor_files = validate_files(&files, &specs)?;
+        let tensor_files = validate_files(&files, &specs, config)?;
         let registered_files = files
             .into_iter()
             .map(|file| {
@@ -267,8 +267,16 @@ pub fn read_gguf_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
     // SAFETY: this temporary read-only mapping is used only for header metadata.
     let bytes = unsafe { MmapOptions::new().map(&file) }
         .with_context(|| format!("failed to map GGUF metadata source {}", path.display()))?;
-    parse_gguf_model_config(&bytes)
-        .with_context(|| format!("failed to parse model metadata from {}", path.display()))
+    let mut config = parse_gguf_model_config(&bytes)
+        .with_context(|| format!("failed to parse model metadata from {}", path.display()))?;
+    config.output_weight_tied = true;
+    for path in paths {
+        let gguf = GgufFile::open(&path)?;
+        if gguf.tensors.contains_key("output.weight") {
+            config.output_weight_tied = false;
+        }
+    }
+    Ok(config)
 }
 
 /// Validate every tensor header in a shard set without registering or reading
@@ -279,7 +287,7 @@ pub fn validate_gguf_tensors(path: impl AsRef<Path>, config: &ModelConfig) -> Re
         .iter()
         .map(GgufFile::open)
         .collect::<Result<Vec<_>>>()?;
-    validate_files(&files, &specs)?;
+    validate_files(&files, &specs, config)?;
     Ok(())
 }
 
@@ -372,6 +380,12 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     };
     let head_dim = optional_u("attention.key_length")?
         .unwrap_or(u("embedding_length")? / u("attention.head_count")?);
+    let total_layers = u("block_count")?;
+    let num_nextn_layers = optional_u("nextn_predict_layers")?.unwrap_or(0);
+    ensure!(
+        num_nextn_layers < total_layers,
+        "GGUF next-token layer count must be smaller than block count"
+    );
     let config = ModelConfig {
         model_name,
         architecture,
@@ -387,7 +401,8 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         } else {
             u("expert_feed_forward_length")?
         },
-        num_layers: u("block_count")?,
+        num_layers: total_layers - num_nextn_layers,
+        num_nextn_layers,
         num_attention_heads: u("attention.head_count")?,
         num_key_value_heads: u("attention.head_count_kv")?,
         head_dim,
@@ -404,6 +419,10 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         linear_group_count: optional_u("ssm.group_count")?,
         linear_time_step_rank: optional_u("ssm.time_step_rank")?,
         linear_inner_size: optional_u("ssm.inner_size")?,
+        output_weight_tied: matches!(
+            architecture,
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+        ),
         eos_token_id,
     };
     config.validate()?;
@@ -417,6 +436,7 @@ fn is_model_scalar_key(key: &str) -> bool {
         ".feed_forward_length",
         ".expert_feed_forward_length",
         ".block_count",
+        ".nextn_predict_layers",
         ".attention.head_count",
         ".attention.head_count_kv",
         ".attention.key_length",
@@ -438,7 +458,11 @@ fn is_model_scalar_key(key: &str) -> bool {
     .any(|suffix| key.ends_with(suffix))
 }
 
-fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<String, usize>> {
+fn validate_files(
+    files: &[GgufFile],
+    specs: &[TensorSpec],
+    config: &ModelConfig,
+) -> Result<HashMap<String, usize>> {
     let mut tensor_files = HashMap::with_capacity(specs.len());
     for (file_index, file) in files.iter().enumerate() {
         for name in file.tensors.keys() {
@@ -456,14 +480,9 @@ fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<St
         .iter()
         .map(|spec| spec.gguf_name.as_str())
         .collect::<BTreeSet<_>>();
-    ensure!(
-        tensor_files.len() == expected_names.len(),
-        "GGUF shard set contains {} tensors, expected {} for selected model",
-        tensor_files.len(),
-        expected_names.len()
-    );
     let actual_names = tensor_files
         .keys()
+        .filter(|name| !is_auxiliary_nextn_tensor(name, config))
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if expected_names != actual_names {
@@ -478,7 +497,9 @@ fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<St
             .copied()
             .collect::<Vec<_>>();
         bail!(
-            "GGUF tensor inventory mismatch; missing(first 16)={missing:?}, unexpected(first 16)={unexpected:?}"
+            "GGUF tensor inventory mismatch ({} actual, {} expected); missing(first 16)={missing:?}, unexpected(first 16)={unexpected:?}",
+            actual_names.len(),
+            expected_names.len()
         );
     }
 
@@ -507,6 +528,22 @@ fn validate_files(files: &[GgufFile], specs: &[TensorSpec]) -> Result<HashMap<St
         }
     }
     Ok(tensor_files)
+}
+
+fn is_auxiliary_nextn_tensor(name: &str, config: &ModelConfig) -> bool {
+    if config.num_nextn_layers == 0 {
+        return false;
+    }
+    let Some(rest) = name.strip_prefix("blk.") else {
+        return false;
+    };
+    let Some((layer, _)) = rest.split_once('.') else {
+        return false;
+    };
+    let Ok(layer) = layer.parse::<usize>() else {
+        return false;
+    };
+    (config.num_layers..config.num_layers + config.num_nextn_layers).contains(&layer)
 }
 
 impl GgufFile {
@@ -1283,6 +1320,21 @@ mod tests {
         assert_eq!(config.rope_dimension_count, 64);
         assert_eq!(config.full_attention_interval, Some(4));
         assert_eq!(config.linear_qkv_size(), Some(6_144));
+        validate_gguf_tensors(&path, &config)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reads_qwen38_dense_configuration_with_auxiliary_nextn_block_when_present() -> Result<()> {
+        let Some(path) = std::env::var_os("CATENA_QWEN38_GGUF").map(PathBuf::from) else {
+            return Ok(());
+        };
+        let config = read_gguf_model_config(&path)?;
+        assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
+        assert_eq!(config.num_layers, 64);
+        assert_eq!(config.num_nextn_layers, 1);
+        assert!(!config.output_weight_tied);
+        assert_eq!(weight_specs(&config)?.len(), 851);
         validate_gguf_tensors(&path, &config)?;
         Ok(())
     }

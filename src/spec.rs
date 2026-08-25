@@ -24,6 +24,7 @@ pub struct ModelConfig {
     pub hidden_size: usize,
     pub intermediate_size: usize,
     pub num_layers: usize,
+    pub num_nextn_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
     pub head_dim: usize,
@@ -40,6 +41,7 @@ pub struct ModelConfig {
     pub linear_group_count: Option<usize>,
     pub linear_time_step_rank: Option<usize>,
     pub linear_inner_size: Option<usize>,
+    pub output_weight_tied: bool,
     pub eos_token_id: Option<u64>,
 }
 
@@ -70,6 +72,7 @@ impl ModelConfig {
         config.max_position_embeddings = 40_960;
         config.num_experts = 0;
         config.experts_per_token = 0;
+        config.output_weight_tied = true;
         config
     }
 
@@ -89,6 +92,7 @@ impl ModelConfig {
             hidden_size: 2_048,
             intermediate_size: 768,
             num_layers: 48,
+            num_nextn_layers: 0,
             num_attention_heads: 32,
             num_key_value_heads: 4,
             head_dim: 128,
@@ -105,6 +109,7 @@ impl ModelConfig {
             linear_group_count: None,
             linear_time_step_rank: None,
             linear_inner_size: None,
+            output_weight_tied: false,
             eos_token_id: Some(151_643),
         }
     }
@@ -117,6 +122,7 @@ impl ModelConfig {
             hidden_size: 1_024,
             intermediate_size: 3_584,
             num_layers: 24,
+            num_nextn_layers: 0,
             num_attention_heads: 8,
             num_key_value_heads: 2,
             head_dim: 256,
@@ -133,6 +139,7 @@ impl ModelConfig {
             linear_group_count: Some(16),
             linear_time_step_rank: Some(16),
             linear_inner_size: Some(2_048),
+            output_weight_tied: true,
             eos_token_id: Some(248_044),
         }
     }
@@ -145,6 +152,7 @@ impl ModelConfig {
             hidden_size: 2_048,
             intermediate_size: 512,
             num_layers: 40,
+            num_nextn_layers: 0,
             num_attention_heads: 16,
             num_key_value_heads: 2,
             head_dim: 256,
@@ -161,6 +169,7 @@ impl ModelConfig {
             linear_group_count: Some(16),
             linear_time_step_rank: Some(32),
             linear_inner_size: Some(4_096),
+            output_weight_tied: false,
             eos_token_id: Some(248_044),
         }
     }
@@ -627,7 +636,7 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
         ),
         TensorSpec::one(
             "lm_head.weight".into(),
-            if c.is_dense() {
+            if c.output_weight_tied {
                 "token_embd.weight"
             } else {
                 "output.weight"
@@ -736,6 +745,7 @@ mod tests {
         c.shared_expert_intermediate_size = None;
         c.linear_time_step_rank = Some(16);
         c.linear_inner_size = Some(2_048);
+        c.output_weight_tied = true;
         let specs = weight_specs(&c)?;
         assert_eq!(specs.len(), 321);
         assert_eq!(specs.first().unwrap().gguf_name, "token_embd.weight");
