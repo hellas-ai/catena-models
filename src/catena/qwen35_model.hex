@@ -357,7 +357,7 @@
   }
 ))
 
-# Depthwise causal convolution over one projected token and its ring history.
+# Depthwise causal convolution over a token block and its ring history.
 (def program qwen3.qwen35-conv-term-at :
   ([n k.] {
     ({
@@ -373,17 +373,19 @@
   ([.buffers] *.elim [history-and-qkv conv-weight.])
   ([.history-and-qkv] *.elim [history qkv.])
   ([.indices] *.elim [output-index kernel-index.])
-  ([.output-index] ix.to-u64 [channel.])
+  ([.output-index] ix.to-u64 [flat-output.])
   ([.kernel-index] ix.to-u64 [kernel.])
   (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
+  ([.flat-output qkv-size] u64.div [token.])
+  ([.flat-output qkv-size] u64.rem [channel.])
   (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size.])
   (const.u64.0x0000000000000001 [one.])
   ([.kernel-size one] u64.sub [history-slots.])
-  ([.kernel history-slots] u64.ne bool.not [is-current.])
-  ([.history-slots kernel] u64.sub [lag.])
-  ([.start lag] u64.gte [history-valid.])
-  ([.start kernel] u64.add [ring-numerator.])
-  ([.ring-numerator history-slots] u64.rem [slot.])
+  ([.token kernel] u64.add [token-plus-kernel.])
+  ([.token-plus-kernel history-slots] u64.gte [is-current.])
+  ([.start token-plus-kernel] u64.add [absolute-plus-kernel.])
+  ([.absolute-plus-kernel history-slots] u64.gte [history-valid.])
+  ([.absolute-plus-kernel history-slots] u64.rem [slot.])
   ([.slot qkv-size] u64.mul [slot-base.])
   ([.slot-base channel] u64.add [history-index.])
   ([.history] mem.cast.f32 [history-count history-buffer.])
@@ -391,7 +393,12 @@
   (const.u32.0x00000000 u32.bitcast-f32 [zero.])
   ([.history-valid history-value-raw zero] f32.select [history-value.])
   ([.qkv] mem.cast.f32 [qkv-count qkv-buffer.])
-  ({[.qkv-count] [.qkv-buffer] [.channel]} qwen3.f32-buffer-at [current-value.])
+  ([.token-plus-kernel history-slots] u64.sub [current-token-raw.])
+  (const.u64.0x0000000000000000 [zero-index.])
+  ([.is-current current-token-raw zero-index] u64.select [current-token.])
+  ([.current-token qkv-size] u64.mul [current-base.])
+  ([.current-base channel] u64.add [current-index.])
+  ({[.qkv-count] [.qkv-buffer] [.current-index]} qwen3.f32-buffer-at [current-value.])
   ([.is-current current-value history-value] f32.select [input-value.])
   ([.channel kernel-size] u64.mul [weight-row-base.])
   ([.weight-row-base kernel] u64.add [weight-index.])
@@ -417,23 +424,24 @@
 ))
 
 (def program qwen3.qwen35-conv :
-  {(cap.own mem) (cap.own mem) (cap.ref mem) (u64 val)}
+  {(cap.own mem) (cap.own mem) (cap.ref mem) (u64 val) (u64 val)}
   ->
   (cap.own mem)
-= ([history qkv conv-weight start.]
+= ([history qkv conv-weight start sequence.]
   (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size-value.])
   (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size-value.])
-  ([.qkv-size-value] u64.name [qkv-size.])
+  ([.sequence qkv-size-value] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
   ([.kernel-size-value] u64.name [kernel-size.])
   ({[.history] [.qkv]} *.intro [history-and-qkv.])
   ({[.history-and-qkv] [.conv-weight]} *.intro [buffers.])
   ({[.buffers] [.start]} *.intro [env.])
   {
-    [.qkv-size] [.kernel-size] [.env]
-    ({([.qkv-size] :.param) ([.kernel-size] :.param)} name.qwen3.qwen35-conv-term-at)
-    (([.qkv-size] :.param) name.qwen3.qwen35-conv-epilogue)
+    [.output-count] [.kernel-size] [.env]
+    ({([.output-count] :.param) ([.kernel-size] :.param)} name.qwen3.qwen35-conv-term-at)
+    (([.output-count] :.param) name.qwen3.qwen35-conv-epilogue)
   } materializec.reduce-f32 [output.]
-  ({[.qkv-size] [.output]} buf.to-mem)
+  ({[.output-count] [.output]} buf.to-mem)
 ))
 
 (def program qwen3.qwen35-copy-qkv-at :
@@ -447,11 +455,48 @@
   [.result]
 ))
 
+(def program qwen3.qwen35-final-conv-cache-at :
+  ([n.] {({({({(cap.own mem) (cap.own mem)} *) (u64 val)} *) (u64 val)} *) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([env output-index.]
+  ([.env] *.elim [buffers-and-sequence start.])
+  ([.buffers-and-sequence] *.elim [buffers sequence.])
+  ([.buffers] *.elim [history qkv.])
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
+  (const.u64.0x0000000000000003 [history-slots.])
+  (const.u64.0x0000000000000001 [one.])
+  ([.flat-index qkv-size] u64.div [slot.])
+  ([.flat-index qkv-size] u64.rem [channel.])
+  ([.start sequence] u64.add [end.])
+  ([.end one] u64.sub [last.])
+  ([.last history-slots] u64.add [last-plus-three.])
+  ([.last-plus-three slot] u64.sub [back-numerator.])
+  ([.back-numerator history-slots] u64.rem [back.])
+  ([.last back] u64.gte [available.])
+  ([.last back] u64.sub [absolute-raw.])
+  (const.u64.0x0000000000000000 [zero.])
+  ([.available absolute-raw zero] u64.select [absolute.])
+  ([.absolute start] u64.gte [at-or-after-start.])
+  ([.available at-or-after-start] bool.and [from-batch.])
+  ([.absolute start] u64.sub [batch-token-raw.])
+  ([.from-batch batch-token-raw zero] u64.select [batch-token.])
+  ([.batch-token qkv-size] u64.mul [batch-base.])
+  ([.batch-base channel] u64.add [batch-index.])
+  ([.qkv] mem.cast.f32 [qkv-count qkv-buffer.])
+  ({[.qkv-count] [.qkv-buffer] [.batch-index]} qwen3.f32-buffer-at [batch-value.])
+  ([.history] mem.cast.f32 [history-count history-buffer.])
+  ({[.history-count] [.history-buffer] [.flat-index]} qwen3.f32-buffer-at [history-value.])
+  ([.from-batch batch-value history-value] f32.select [result.])
+  [.result]
+))
+
 (def program qwen3.qwen35-update-conv-cache :
-  {(cap.own mem) (cap.own mem) (u64 val) (u64 val) (u64 val)}
+  {(cap.own mem) (cap.own mem) (cap.own mem) (u64 val) (u64 val) (u64 val) (u64 val)}
   ->
   (cap.own mem)
-= ([cache qkv token-capacity start layer.]
+= ([cache qkv history token-capacity start layer sequence.]
   ([.cache] mem.cast.f32 [cache-count cache-buffer.])
   (const.u64.0x{{KV_CACHE_ELEMENTS_PER_TOKEN}} [kv-elements-per-token.])
   ([.token-capacity kv-elements-per-token] u64.mul [recurrent-base.])
@@ -460,17 +505,14 @@
   ([.conv-state-size matrix-state-size] u64.add [layer-stride.])
   ([.layer layer-stride] u64.mul [layer-offset.])
   ([.recurrent-base layer-offset] u64.add [conv-base.])
-  (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size.])
-  (const.u64.0x0000000000000001 [one.])
-  ([.kernel-size one] u64.sub [history-slots.])
-  ([.start history-slots] u64.rem [slot.])
-  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size-value.])
-  ([.slot qkv-size-value] u64.mul [slot-offset.])
-  ([.conv-base slot-offset] u64.add [write-offset.])
-  ([.qkv-size-value] u64.name [qkv-size.])
+  (const.u64.0x{{LINEAR_CONV_STATE_SIZE}} [conv-count-value.])
+  ([.conv-count-value] u64.name [conv-count.])
+  ({[.history] [.qkv]} *.intro [buffers.])
+  ({[.buffers] [.sequence]} *.intro [buffers-and-sequence.])
+  ({[.buffers-and-sequence] [.start]} *.intro [env.])
   {
-    [.cache-buffer] [.cache-count] [.write-offset] [.qkv-size] [.qkv]
-    (([.qkv-size] :.param) name.qwen3.qwen35-copy-qkv-at)
+    [.cache-buffer] [.cache-count] [.conv-base] [.conv-count] [.env]
+    (([.conv-count] :.param) name.qwen3.qwen35-final-conv-cache-at)
   } materializec.into [cache-after.]
   ({[.cache-count] [.cache-after]} buf.to-mem)
 ))
@@ -522,9 +564,14 @@
   ([.input-and-base] *.elim [input base.])
   ([.output-index] ix.to-u64 [flat-index.])
   (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [head-dim-value.])
-  ([.flat-index head-dim-value] u64.div [head.])
-  ([.flat-index head-dim-value] u64.rem [channel.])
-  ({[.input] [.base]} *.intro [term-input-and-base.])
+  (const.u64.0x{{LINEAR_KEY_SIZE}} [key-size.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
+  ([.flat-index key-size] u64.div [token.])
+  ([.flat-index key-size] u64.rem [within-key.])
+  ([.within-key head-dim-value] u64.div [head.])
+  ([.token qkv-size] u64.mul [token-base.])
+  ([.token-base base] u64.add [effective-base.])
+  ({[.input] [.effective-base]} *.intro [term-input-and-base.])
   ({[.term-input-and-base] [.head]} *.intro [term-env.])
   ([.head-dim-value] u64.name [head-dim.])
   ({
@@ -535,7 +582,7 @@
   } reducec [sum-squared.])
   (const.u32.0x358637BD u32.bitcast-f32 [epsilon.])
   ([.sum-squared epsilon] f32.add qwen3.sqrt [norm.])
-  ([.base flat-index] u64.add [input-index.])
+  ([.effective-base within-key] u64.add [input-index.])
   ([.input] mem.cast.f32 [count buffer.])
   ({[.count] [.buffer] [.input-index]} qwen3.f32-buffer-at [value.])
   ([.value norm] f32.div [result.])
@@ -543,12 +590,13 @@
 ))
 
 (def program qwen3.qwen35-l2 :
-  {(cap.own mem) (u64 val)}
+  {(cap.own mem) (u64 val) (u64 val)}
   ->
   (cap.own mem)
-= ([input base.]
+= ([input base sequence.]
   (const.u64.0x{{LINEAR_KEY_SIZE}} [output-count-value.])
-  ([.output-count-value] u64.name [output-count.])
+  ([.sequence output-count-value] u64.mul [total-count-value.])
+  ([.total-count-value] u64.name [output-count.])
   ({[.input] [.base]} *.intro [env.])
   { [.output-count] ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.qwen35-l2-at)} materializec) }
   buf.to-mem
@@ -581,21 +629,24 @@
   ([.env] *.elim [alpha-and-dt a-log.])
   ([.alpha-and-dt] *.elim [alpha dt-bias.])
   ([.output-index] ix.to-u64 [index.])
+  (const.u64.0x{{LINEAR_VALUE_HEADS}} [heads.])
+  ([.index heads] u64.rem [head.])
   ([.alpha] mem.cast.f32 [alpha-count alpha-buffer.])
   ({[.alpha-count] [.alpha-buffer] [.index]} qwen3.f32-buffer-at [alpha-value.])
   ([.dt-bias] mem.cast.f32 [dt-count dt-buffer.])
-  ({[.dt-count] [.dt-buffer] [.index]} qwen3.f32-buffer-at [dt-value.])
+  ({[.dt-count] [.dt-buffer] [.head]} qwen3.f32-buffer-at [dt-value.])
   ([.a-log] mem.cast.f32 [a-count a-buffer.])
-  ({[.a-count] [.a-buffer] [.index]} qwen3.f32-buffer-at [a-value.])
+  ({[.a-count] [.a-buffer] [.head]} qwen3.f32-buffer-at [a-value.])
   ([.alpha-value dt-value] f32.add qwen3.softplus [time-step.])
   ([.time-step a-value] f32.mul [result.])
   [.result]
 ))
 
 (def program qwen3.qwen35-decay-gate :
-  {(cap.own mem) (cap.ref mem) (cap.ref mem)} -> (cap.own mem)
-= ([alpha dt-bias a-log.]
-  (const.u64.0x{{LINEAR_VALUE_HEADS}} [count-value.])
+  {(cap.own mem) (cap.ref mem) (cap.ref mem) (u64 val)} -> (cap.own mem)
+= ([alpha dt-bias a-log sequence.]
+  (const.u64.0x{{LINEAR_VALUE_HEADS}} [heads.])
+  ([.sequence heads] u64.mul [count-value.])
   ([.count-value] u64.name [count.])
   ({[.alpha] [.dt-bias]} *.intro [alpha-and-dt.])
   ({[.alpha-and-dt] [.a-log]} *.intro [env.])
@@ -919,14 +970,90 @@
 ))
 
 (def program qwen3.qwen35-gated-norm :
-  {(cap.own mem) (cap.own mem) (cap.ref mem)} -> (cap.own mem)
-= ([input z norm-weight.]
-  (const.u64.0x{{LINEAR_VALUE_SIZE}} [count-value.])
+  {(cap.own mem) (cap.own mem) (cap.ref mem) (u64 val)} -> (cap.own mem)
+= ([input z norm-weight sequence.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-size.])
+  ([.sequence value-size] u64.mul [count-value.])
   ([.count-value] u64.name [count.])
   ({[.input] [.z]} *.intro [input-and-z.])
   ({[.input-and-z] [.norm-weight]} *.intro [env.])
   { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-gated-norm-at)} materializec) }
   buf.to-mem
+))
+
+(def program qwen3.qwen35-value-at :
+  ([n.] {(cap.own mem) ([.n] ix val)})
+  ->
+  ([n.] (f32 val))
+= ([conv output-index.]
+  ([.output-index] ix.to-u64 [flat-index.])
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-size.])
+  (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
+  (const.u64.0x{{LINEAR_KEY_SIZE}} [key-size.])
+  ([.key-size key-size] u64.add [value-base.])
+  ([.flat-index value-size] u64.div [token.])
+  ([.flat-index value-size] u64.rem [channel.])
+  ([.token qkv-size] u64.mul [token-base.])
+  ([.token-base value-base] u64.add [token-value-base.])
+  ([.token-value-base channel] u64.add [conv-index.])
+  ([.conv] mem.cast.f32 [conv-count conv-buffer.])
+  ({[.conv-count] [.conv-buffer] [.conv-index]} qwen3.f32-buffer-at [result.])
+  [.result]
+))
+
+(def program qwen3.qwen35-values :
+  {(cap.own mem) (u64 val)} -> (cap.own mem)
+= ([conv sequence.]
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-size.])
+  ([.sequence value-size] u64.mul [count-value.])
+  ([.count-value] u64.name [count.])
+  { [.count] ({[.count] [.conv] (([.count] :.param) name.qwen3.qwen35-value-at)} materializec) }
+  buf.to-mem
+))
+
+# The recurrent dependency remains sequential in token order, but is kept
+# entirely inside one GPU launch. State is updated in-place in the cache.
+(def program qwen3.qwen35-gated-delta-scan :
+  {
+    (cap.own mem) (cap.own mem) (cap.own mem) (cap.own mem)
+    (cap.own mem) (cap.own mem) (u64 val) (u64 val)
+  }
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([cache query key value gate beta matrix-base sequence.]
+  ([.cache] mem.cast.f32 [state-cap state-buffer.])
+  ([.query] mem.cast.f32 [query-cap query-buffer.])
+  ([.key] mem.cast.f32 [key-cap key-buffer.])
+  ([.value] mem.cast.f32 [value-cap value-buffer.])
+  ([.gate] mem.cast.f32 [gate-cap gate-buffer.])
+  ([.beta] mem.cast.f32 [beta-cap beta-buffer.])
+  (const.u64.0x{{LINEAR_KEY_HEADS}} [key-heads.])
+  (const.u64.0x{{LINEAR_VALUE_HEADS}} [value-heads.])
+  (const.u64.0x{{LINEAR_KEY_HEAD_DIM}} [head-dim.])
+  (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-size.])
+  ([.sequence value-size] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  {
+    [.state-buffer] [.state-cap]
+    [.query-buffer] [.query-cap]
+    [.key-buffer] [.key-cap]
+    [.value-buffer] [.value-cap]
+    [.gate-buffer] [.gate-cap]
+    [.beta-buffer] [.beta-cap]
+    [.matrix-base] [.sequence] [.key-heads] [.value-heads] [.head-dim]
+    [.output-count]
+  } materializec.borrow-gated-delta-net-f32
+  [state-after query-after key-after value-after gate-after beta-after output-buffer.]
+  ({[.output-count] [.output-buffer]} buf.to-mem [output.])
+  ({({[.query-cap] [.query-after]} buf.to-mem) [.output]} qwen3.free-f32-before [after-query.])
+  ({({[.key-cap] [.key-after]} buf.to-mem) [.after-query]} qwen3.free-f32-before [after-key.])
+  ({({[.value-cap] [.value-after]} buf.to-mem) [.after-key]} qwen3.free-f32-before [after-value.])
+  ({({[.gate-cap] [.gate-after]} buf.to-mem) [.after-value]} qwen3.free-f32-before [after-gate.])
+  ({({[.beta-cap] [.beta-after]} buf.to-mem) [.after-gate]} qwen3.free-f32-before [final-output.])
+  {
+    [.final-output]
+    ({[.state-cap] [.state-after]} buf.to-mem)
+  }
 ))
 
 (def program qwen3.qwen35-linear-decoder-layer :
@@ -965,28 +1092,22 @@
   ([.recurrent-base layer-offset] u64.add [conv-base.])
   ({[.cache] [.conv-base] [.conv-state-size]}
     qwen3.qwen35-copy-cache-range [cache-after-conv-copy conv-history.])
-  ({[.conv-history] [.qkv] [.conv-weight] [.start]}
+  ({[.conv-history] [.qkv] [.conv-weight] [.start] [.sequence]}
     qwen3.qwen35-conv [conv-raw.])
-  ({[.cache-after-conv-copy] [.qkv] [.token-capacity] [.start] [.layer]}
+  ({[.cache-after-conv-copy] [.qkv] [.conv-history] [.token-capacity] [.start] [.layer] [.sequence]}
     qwen3.qwen35-update-conv-cache [cache-after-conv.])
   ([.conv-raw] qwen3.qwen35-silu-buffer [conv.])
   (const.u64.0x0000000000000000 [query-base.])
   (const.u64.0x{{LINEAR_KEY_SIZE}} [key-base.])
-  ({[.conv] [.query-base]} qwen3.qwen35-l2 [query.])
-  ({[.conv] [.key-base]} qwen3.qwen35-l2 [key.])
+  ({[.conv] [.query-base] [.sequence]} qwen3.qwen35-l2 [query.])
+  ({[.conv] [.key-base] [.sequence]} qwen3.qwen35-l2 [key.])
+  ({[.conv] [.sequence]} qwen3.qwen35-values [value.])
   ([.beta-raw] qwen3.qwen35-beta [beta.])
-  ({[.alpha] [.dt-bias] [.a-log]} qwen3.qwen35-decay-gate [decay-gate.])
+  ({[.alpha] [.dt-bias] [.a-log] [.sequence]} qwen3.qwen35-decay-gate [decay-gate.])
   ([.conv-base conv-state-size] u64.add [matrix-base.])
-  ({[.cache-after-conv] [.matrix-base] [.matrix-state-size]}
-    qwen3.qwen35-copy-cache-range [cache-after-state-copy old-state.])
-  ({[.old-state] [.decay-gate]} qwen3.qwen35-decay-state [decayed-state.])
-  ({[.decayed-state] [.key]} qwen3.qwen35-prediction [prediction.])
-  ({[.conv] [.prediction] [.beta]} qwen3.qwen35-delta [delta.])
-  ({[.decayed-state] [.key] [.delta]} qwen3.qwen35-update-state [updated-state.])
-  ({[.updated-state] [.query]} qwen3.qwen35-output [core-output.])
-  ({[.cache-after-state-copy] [.updated-state] [.token-capacity] [.layer]}
-    qwen3.qwen35-update-state-cache [cache-after-state.])
-  ({[.core-output] [.z] [.linear-norm]} qwen3.qwen35-gated-norm [linear-context.])
+  ({[.cache-after-conv] [.query] [.key] [.value] [.decay-gate] [.beta] [.matrix-base] [.sequence]}
+    qwen3.qwen35-gated-delta-scan [core-output cache-after-state.])
+  ({[.core-output] [.z] [.linear-norm] [.sequence]} qwen3.qwen35-gated-norm [linear-context.])
   ({[.linear-context] [.linear-out-weight] [.hidden] [.value-features]}
     qwen3.linear-residual [attention-hidden.])
   ([.attention-hidden] qwen3.rms-inv [mlp-inverse.])
@@ -1047,27 +1168,21 @@
   ([.recurrent-base layer-offset] u64.add [conv-base.])
   ({[.cache] [.conv-base] [.conv-state-size]}
     qwen3.qwen35-copy-cache-range [cache-after-conv-copy conv-history.])
-  ({[.conv-history] [.qkv] [.conv-weight] [.start]} qwen3.qwen35-conv [conv-raw.])
-  ({[.cache-after-conv-copy] [.qkv] [.token-capacity] [.start] [.layer]}
+  ({[.conv-history] [.qkv] [.conv-weight] [.start] [.sequence]} qwen3.qwen35-conv [conv-raw.])
+  ({[.cache-after-conv-copy] [.qkv] [.conv-history] [.token-capacity] [.start] [.layer] [.sequence]}
     qwen3.qwen35-update-conv-cache [cache-after-conv.])
   ([.conv-raw] qwen3.qwen35-silu-buffer [conv.])
   (const.u64.0x0000000000000000 [query-base.])
   (const.u64.0x{{LINEAR_KEY_SIZE}} [key-base.])
-  ({[.conv] [.query-base]} qwen3.qwen35-l2 [query.])
-  ({[.conv] [.key-base]} qwen3.qwen35-l2 [key.])
+  ({[.conv] [.query-base] [.sequence]} qwen3.qwen35-l2 [query.])
+  ({[.conv] [.key-base] [.sequence]} qwen3.qwen35-l2 [key.])
+  ({[.conv] [.sequence]} qwen3.qwen35-values [value.])
   ([.beta-raw] qwen3.qwen35-beta [beta.])
-  ({[.alpha] [.dt-bias] [.a-log]} qwen3.qwen35-decay-gate [decay-gate.])
+  ({[.alpha] [.dt-bias] [.a-log] [.sequence]} qwen3.qwen35-decay-gate [decay-gate.])
   ([.conv-base conv-state-size] u64.add [matrix-base.])
-  ({[.cache-after-conv] [.matrix-base] [.matrix-state-size]}
-    qwen3.qwen35-copy-cache-range [cache-after-state-copy old-state.])
-  ({[.old-state] [.decay-gate]} qwen3.qwen35-decay-state [decayed-state.])
-  ({[.decayed-state] [.key]} qwen3.qwen35-prediction [prediction.])
-  ({[.conv] [.prediction] [.beta]} qwen3.qwen35-delta [delta.])
-  ({[.decayed-state] [.key] [.delta]} qwen3.qwen35-update-state [updated-state.])
-  ({[.updated-state] [.query]} qwen3.qwen35-output [core-output.])
-  ({[.cache-after-state-copy] [.updated-state] [.token-capacity] [.layer]}
-    qwen3.qwen35-update-state-cache [cache-after-state.])
-  ({[.core-output] [.z] [.linear-norm]} qwen3.qwen35-gated-norm [linear-context.])
+  ({[.cache-after-conv] [.query] [.key] [.value] [.decay-gate] [.beta] [.matrix-base] [.sequence]}
+    qwen3.qwen35-gated-delta-scan [core-output cache-after-state.])
+  ({[.core-output] [.z] [.linear-norm] [.sequence]} qwen3.qwen35-gated-norm [linear-context.])
   ({[.linear-context] [.linear-out-weight] [.hidden] [.value-features]}
     qwen3.linear-residual [attention-hidden.])
   ([.attention-hidden] qwen3.rms-inv [mlp-inverse.])

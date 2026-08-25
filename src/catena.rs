@@ -673,7 +673,8 @@ mod tests {
             entrypoint.matches("(cap.ref mem)").count(),
             1 + weight_specs(&config)?.len()
         );
-        assert!(model.contains("(def program qwen3.qwen35-delta :"));
+        assert!(model.contains("(def program qwen3.qwen35-gated-delta-scan :"));
+        assert!(!model.contains("(def program qwen3.qwen35-delta :"));
         assert!(HELPER_SOURCE.contains("(def program qwen3.softplus :"));
         Ok(())
     }

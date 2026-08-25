@@ -265,13 +265,6 @@ impl Session<'_> {
     }
 
     fn forward(&mut self, tokens: &[u64]) -> Result<(MemOwn, u64)> {
-        if self.model.config.is_qwen35() && tokens.len() > 1 {
-            let mut last = None;
-            for &token in tokens {
-                last = Some(self.forward(std::slice::from_ref(&token))?);
-            }
-            return last.context("the token prefix must not be empty");
-        }
         let cache = self
             .cache
             .take()
