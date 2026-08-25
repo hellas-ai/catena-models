@@ -10,16 +10,31 @@ use crate::spec::{LayerType, ModelArchitecture, ModelConfig, weight_specs};
 
 /// Fixed, dimension-free Catena helpers compiled before the generated model.
 pub const HELPER_SOURCE: &str = include_str!("catena/qwen3_helpers.hex");
+pub const BF16_HELPER_SOURCE: &str = include_str!("catena/qwen3_bf16_helpers.hex");
 
 /// Model-specific Catena programs rendered from GGUF metadata at runtime.
 const MODEL_TEMPLATE: &str = include_str!("catena/qwen3_model.hex");
+const BF16_MODEL_TEMPLATE: &str = include_str!("catena/qwen3_bf16_model.hex");
 const QWEN35_TEMPLATE: &str = include_str!("catena/qwen35_model.hex");
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferencePrecision {
+    F32,
+    Bf16,
+}
+
 /// Catena stdlib, fixed helpers, and one generated model in compilation order.
-pub fn runtime_sources<'a>(model_source: &'a str) -> impl Iterator<Item = &'a str> {
+pub fn runtime_sources<'a>(
+    model_source: &'a str,
+    precision: InferencePrecision,
+) -> impl Iterator<Item = &'a str> {
+    let helpers = match precision {
+        InferencePrecision::F32 => HELPER_SOURCE,
+        InferencePrecision::Bf16 => BF16_HELPER_SOURCE,
+    };
     stdlib::sources()
         .map(|source| -> &'a str { source })
-        .chain([HELPER_SOURCE, model_source])
+        .chain([helpers, model_source])
 }
 
 const ENTRYPOINT_MARKER: &str = "# Explicit metadata-derived Qwen3 composition.";
@@ -128,7 +143,7 @@ fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'
     }
 }
 
-fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
+fn generated_entrypoint(config: &ModelConfig, precision: InferencePrecision) -> Result<String> {
     let weight_count = weight_specs(config)?.len();
     let described_layer_weight_count =
         (0..config.num_layers).try_fold(0_usize, |total, layer| {
@@ -219,13 +234,21 @@ fn generated_entrypoint(config: &ModelConfig) -> Result<String> {
     source.push_str(
         "  ({[.final-inverse] [.logits]} qwen3.free-f32-before [logits-after-inverse.])\n",
     );
+    let activation_free = match precision {
+        InferencePrecision::F32 => "qwen3.free-f32-before",
+        InferencePrecision::Bf16 => "qwen3.free-bf16-before",
+    };
     writeln!(
         source,
-        "  ({{[.hidden-{:02}] [.logits-after-inverse]}} qwen3.free-f32-before [final-logits.])",
-        config.num_layers
+        "  ({{[.hidden-{:02}] [.logits-after-inverse]}} {activation_free} [final-logits.])",
+        config.num_layers,
     )
     .unwrap();
-    source.push_str("  ({[.rope] [.final-logits]} qwen3.free-f32-before [final-logits-after-rope.])\n  ([.final-logits-after-rope] mem.cast.f32 [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  } materializec.borrow-argmax-f32 [logits-after-argmax next-token-buffer.]\n  {\n");
+    let (logit_cast, argmax) = match precision {
+        InferencePrecision::F32 => ("mem.cast.f32", "materializec.borrow-argmax-f32"),
+        InferencePrecision::Bf16 => ("mem.cast.bf16", "materializec.borrow-argmax-bf16"),
+    };
+    write!(source, "  ({{[.rope] [.final-logits]}} qwen3.free-f32-before [final-logits-after-rope.])\n  ([.final-logits-after-rope] {logit_cast} [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {{\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  }} {argmax} [logits-after-argmax next-token-buffer.]\n  {{\n").unwrap();
     writeln!(source, "    [.cache-{:02}]", config.num_layers).unwrap();
     source.push_str("    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)\n    ({[.one] [.next-token-buffer]} buf.to-mem)\n  }\n))\n");
     Ok(source)
@@ -280,7 +303,7 @@ fn rope_frequency_program(config: &ModelConfig) -> String {
     source
 }
 
-fn render_model_template(config: &ModelConfig) -> Result<String> {
+fn render_model_template(config: &ModelConfig, precision: InferencePrecision) -> Result<String> {
     ensure!(
         config.rope_dimension_count.is_multiple_of(2),
         "rotary dimension must be even"
@@ -358,7 +381,11 @@ fn render_model_template(config: &ModelConfig) -> Result<String> {
         ),
         ("{{ROPE_FREQUENCY_PROGRAM}}", rope_frequency_program(config)),
     ];
-    let mut source = MODEL_TEMPLATE.to_owned();
+    let mut source = match precision {
+        InferencePrecision::F32 => MODEL_TEMPLATE,
+        InferencePrecision::Bf16 => BF16_MODEL_TEMPLATE,
+    }
+    .to_owned();
     if config.is_qwen35() {
         source.push('\n');
         source.push_str(QWEN35_TEMPLATE);
@@ -526,13 +553,25 @@ pub fn generated_model_source() -> String {
 /// models compose metadata-selected full-attention and Gated DeltaNet layers,
 /// with either dense FFNs or routed plus shared-expert MoE FFNs.
 pub fn generated_model_source_for(config: &ModelConfig) -> Result<String> {
+    generated_model_source_for_precision(config, InferencePrecision::F32)
+}
+
+pub fn generated_model_source_for_precision(
+    config: &ModelConfig,
+    precision: InferencePrecision,
+) -> Result<String> {
     config.validate()?;
+    ensure!(
+        precision == InferencePrecision::F32
+            || config.architecture == ModelArchitecture::Qwen3Dense,
+        "BF16 inference currently supports only dense Qwen3 models"
+    );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
     }
-    let mut source = render_model_template(config)?;
+    let mut source = render_model_template(config, precision)?;
     source.push('\n');
-    source.push_str(&generated_entrypoint(config)?);
+    source.push_str(&generated_entrypoint(config, precision)?);
     Ok(retain_reachable_model_programs(&source))
 }
 
@@ -653,6 +692,47 @@ mod tests {
     }
 
     #[test]
+    fn dense_qwen3_bf16_uses_alternate_graph() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.cached-dense-decoder-layer")
+                .count(),
+            config.num_layers
+        );
+        assert!(entrypoint.contains("mem.cast.bf16 [logit-count logit-buffer.]"));
+        assert!(entrypoint.contains("materializec.borrow-argmax-bf16"));
+        assert!(model.contains("qwen3.free-bf16-before"));
+        assert!(!model.contains("qwen3.expert-linear-pair"));
+        assert!(!model.contains("qwen3.moe-down-residual"));
+        let unexpected_f32_casts = model
+            .lines()
+            .filter(|line| line.contains("mem.cast.f32"))
+            .filter(|line| {
+                !["norm-weight", "inverse", "rope"]
+                    .iter()
+                    .any(|allowed| line.contains(allowed))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            unexpected_f32_casts.is_empty(),
+            "persistent BF16 graph buffers cast as F32: {unexpected_f32_casts:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bf16_graph_rejects_moe_and_hybrid_architectures() {
+        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen35_0_8b()] {
+            let error = generated_model_source_for_precision(&config, InferencePrecision::Bf16)
+                .unwrap_err();
+            assert!(error.to_string().contains("only dense Qwen3"));
+        }
+    }
+
+    #[test]
     fn dense_qwen35_uses_metadata_selected_hybrid_layers() -> Result<()> {
         let config = ModelConfig::qwen35_0_8b();
         let model = generated_model_source_for(&config)?;
@@ -745,7 +825,10 @@ mod tests {
             return Ok(());
         }
         let model = generated_model_source();
-        let runtime = Runtime::from_sources(runtime_sources(&model), GpuDialect::Hip)?;
+        let runtime = Runtime::from_sources(
+            runtime_sources(&model, InferencePrecision::F32),
+            GpuDialect::Hip,
+        )?;
         let config = ModelConfig::qwen3_30b();
         let sequence = config.max_position_embeddings;
         let [output] =
@@ -788,7 +871,10 @@ mod tests {
             .enumerate()
         {
             let model = generated_model_source_for(&config)?;
-            let runtime = Runtime::from_sources(runtime_sources(&model), GpuDialect::Hip)?;
+            let runtime = Runtime::from_sources(
+                runtime_sources(&model, InferencePrecision::F32),
+                GpuDialect::Hip,
+            )?;
             if index == 0 {
                 let [Value::F32(positive)] = runtime.exec("qwen3.exp", [100.0_f32.into()])? else {
                     anyhow::bail!("qwen3.exp returned an unexpected value")
@@ -801,6 +887,22 @@ mod tests {
                 assert_eq!(negative, 0.0);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn dense_bf16_gpu_program_compiles_when_requested() -> Result<()> {
+        if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
+            return Ok(());
+        }
+        let model = generated_model_source_for_precision(
+            &ModelConfig::qwen3_0_6b(),
+            InferencePrecision::Bf16,
+        )?;
+        Runtime::from_sources(
+            runtime_sources(&model, InferencePrecision::Bf16),
+            GpuDialect::Hip,
+        )?;
         Ok(())
     }
 }

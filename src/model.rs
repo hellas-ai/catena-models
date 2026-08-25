@@ -7,7 +7,7 @@ use catena_lang::{
 };
 
 use crate::{
-    catena::{generated_model_source_for, runtime_sources},
+    catena::{InferencePrecision, generated_model_source_for_precision, runtime_sources},
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
@@ -20,6 +20,7 @@ pub struct Model {
     config: ModelConfig,
     parameter_count: usize,
     weight_byte_len: usize,
+    precision: InferencePrecision,
 }
 
 impl Model {
@@ -28,6 +29,13 @@ impl Model {
     }
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
+        Self::load_gguf_with_precision(gguf_path, InferencePrecision::F32)
+    }
+
+    pub fn load_gguf_with_precision(
+        gguf_path: impl AsRef<Path>,
+        precision: InferencePrecision,
+    ) -> Result<Self> {
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
         let specs = weight_specs(&config)?;
@@ -40,9 +48,10 @@ impl Model {
                 total.checked_add(spec.element_count())
             })
             .context("model parameter count overflowed")?;
-        let model_source = generated_model_source_for(&config)?;
-        let runtime = Runtime::from_sources(runtime_sources(&model_source), GpuDialect::Hip)
-            .context("failed to compile the Qwen3 Catena GPU program")?;
+        let model_source = generated_model_source_for_precision(&config, precision)?;
+        let runtime =
+            Runtime::from_sources(runtime_sources(&model_source, precision), GpuDialect::Hip)
+                .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open(gguf_path, &config)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
@@ -78,6 +87,7 @@ impl Model {
             config,
             parameter_count,
             weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
+            precision,
         })
     }
 
@@ -129,9 +139,11 @@ impl Model {
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
         let elements = self.config.cache_elements(capacity)?;
-        self.runtime
-            .mem_f32_zeroed(elements)
-            .context("failed to allocate the model cache")
+        match self.precision {
+            InferencePrecision::F32 => self.runtime.mem_f32_zeroed(elements),
+            InferencePrecision::Bf16 => self.runtime.mem_bf16_zeroed(elements),
+        }
+        .context("failed to allocate the model cache")
     }
 
     fn cached_outputs(
@@ -243,13 +255,21 @@ impl Session<'_> {
     pub fn prefill_logits(&mut self, tokens: &[u64]) -> Result<Vec<f32>> {
         ensure!(self.position == 0, "a session can only be prefilled once");
         let (logits, _next_token) = self.forward(tokens)?;
-        read_logits(logits, self.model.config.vocabulary_size)
+        read_logits(
+            logits,
+            self.model.config.vocabulary_size,
+            self.model.precision,
+        )
     }
 
     pub fn decode_logits(&mut self, token: u64) -> Result<Vec<f32>> {
         ensure!(self.position > 0, "decode requires a completed prefill");
         let (logits, _next_token) = self.forward(std::slice::from_ref(&token))?;
-        read_logits(logits, self.model.config.vocabulary_size)
+        read_logits(
+            logits,
+            self.model.config.vocabulary_size,
+            self.model.precision,
+        )
     }
 
     pub fn prefill_next_token(&mut self, tokens: &[u64]) -> Result<u64> {
@@ -278,8 +298,19 @@ impl Session<'_> {
     }
 }
 
-fn read_logits(logits_output: MemOwn, vocabulary_size: usize) -> Result<Vec<f32>> {
-    let logits = logits_output.try_to_f32_vec()?;
+fn read_logits(
+    logits_output: MemOwn,
+    vocabulary_size: usize,
+    precision: InferencePrecision,
+) -> Result<Vec<f32>> {
+    let logits = match precision {
+        InferencePrecision::F32 => logits_output.try_to_f32_vec()?,
+        InferencePrecision::Bf16 => logits_output
+            .try_to_u16_vec()?
+            .into_iter()
+            .map(|bits| f32::from_bits(u32::from(bits) << 16))
+            .collect(),
+    };
     ensure!(
         logits.len() == vocabulary_size,
         "qwen3 returned {} logits, expected {vocabulary_size}",

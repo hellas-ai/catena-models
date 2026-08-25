@@ -7,8 +7,11 @@ use std::{
 
 use anyhow::{Result, ensure};
 use catena_qwen3::{
-    catena::generated_model_source_for, checkpoint::read_gguf_model_config, hfhub::download_gguf,
-    model::Model, tokenizer::QwenTokenizer,
+    catena::{InferencePrecision, generated_model_source_for_precision},
+    checkpoint::read_gguf_model_config,
+    hfhub::download_gguf,
+    model::Model,
+    tokenizer::QwenTokenizer,
 };
 use clap::Parser;
 
@@ -62,10 +65,19 @@ struct Args {
     /// Continue through EOS to produce a fixed-length benchmark.
     #[arg(long)]
     ignore_eos: bool,
+
+    /// Use the experimental mixed-BF16 graph (dense Qwen3 only).
+    #[arg(long)]
+    bf16: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let precision = if args.bf16 {
+        InferencePrecision::Bf16
+    } else {
+        InferencePrecision::F32
+    };
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
@@ -84,7 +96,10 @@ fn main() -> Result<()> {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("generated-qwen3.hex");
-        std::fs::write(&path, generated_model_source_for(&config)?)?;
+        std::fs::write(
+            &path,
+            generated_model_source_for_precision(&config, precision)?,
+        )?;
         println!("generated {}", path.display());
         return Ok(());
     }
@@ -94,7 +109,7 @@ fn main() -> Result<()> {
             "at least one of --pp or --tg must be non-zero"
         );
         let load_started = Instant::now();
-        let model = Model::load_gguf(&selected_gguf)?;
+        let model = Model::load_gguf_with_precision(&selected_gguf, precision)?;
         eprintln!(
             "loaded Catena runtime and weights in {:.2?}",
             load_started.elapsed()
@@ -122,7 +137,7 @@ fn main() -> Result<()> {
     );
 
     let load_started = Instant::now();
-    let model = Model::load_gguf(&gguf_path)?;
+    let model = Model::load_gguf_with_precision(&gguf_path, precision)?;
     let eos_token_id = model.config().eos_token_id;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
@@ -381,6 +396,20 @@ mod tests {
         assert_eq!(args.tg, 128);
         assert_eq!(args.bench_runs, 1);
         assert!(args.prompt.is_none());
+        assert!(!args.bf16);
+    }
+
+    #[test]
+    fn bf16_graph_is_explicitly_selected() {
+        let args = Args::try_parse_from([
+            "catena-qwen3",
+            "--bf16",
+            "--model",
+            "unsloth/Qwen3-0.6B-GGUF:BF16",
+            "hello",
+        ])
+        .unwrap();
+        assert!(args.bf16);
     }
 
     #[test]
