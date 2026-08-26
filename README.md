@@ -133,7 +133,10 @@ dot instructions with F32 register accumulation on gfx11. Router selection and
 probability normalization, RMSNorm, softmax, RoPE, and the internal Gated
 DeltaNet recurrence retain F32 calculations; DeltaNet inputs and recurrent
 state are stored as BF16 between calls. The original F32-activation graph
-remains the default so the two paths can be compared directly:
+remains the default so the two paths can be compared directly. Both graphs
+update the persistent KV cache in place and use a tiled, coalesced cached-value
+kernel for the exact attention context sum; global attention still scans the
+existing history for each decoded token:
 
 ```bash
 nix develop --command cargo run --release -- \
