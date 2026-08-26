@@ -1207,38 +1207,29 @@
     (u64 val)
   }
   ->
-  {(cap.own mem) (cap.own mem)}
+  {(cap.own mem) (cap.own mem) (cap.own mem)}
 = ([cache probabilities sequence token-capacity start layer.]
   ([.cache] mem.cast.bf16 [cache-count cache-buffer.])
+  ([.probabilities] mem.cast.bf16 [probability-count probability-buffer.])
   ([.start sequence] u64.add [history.])
-  ([.history] u64.name [history-count.])
-  (const.u64.0x{{QUERY_SIZE}} [hidden-size.])
-  ([.sequence hidden-size] u64.mul [output-count-value.])
+  (const.u64.0x{{QUERY_SIZE}} [query-size.])
+  (const.u64.0x{{QUERY_HEADS}} [query-heads.])
+  (const.u64.0x{{KEY_VALUE_HEADS}} [key-value-heads.])
+  (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  ([.sequence query-size] u64.mul [output-count-value.])
   ([.output-count-value] u64.name [output-count.])
-  ({[.cache-count] [.probabilities]} *.intro [buffer-inputs.])
-  ({[.history] [.token-capacity]} *.intro [history-and-capacity.])
-  ({[.start] [.layer]} *.intro [start-and-layer.])
-  ({[.history-and-capacity] [.start-and-layer]} *.intro [scalar-inputs.])
-  ({[.buffer-inputs] [.scalar-inputs]} *.intro [inputs.])
   {
-    [.cache-buffer]
-    [.cache-count]
+    [.cache-buffer] [.cache-count]
+    [.probability-buffer] [.probability-count]
     [.output-count]
-    [.history-count]
-    [.inputs]
-    ({
-      ([.cache-count] :.param)
-      ([.output-count] :.param)
-      ([.history-count] :.param)
-    } name.qwen3.cached-staged-context-reduce-term-at)
-    ({
-      ([.cache-count] :.param)
-      ([.output-count] :.param)
-    } name.qwen3.cached-staged-context-reduce-epilogue)
-  } materializec.borrow-reduce-f32 [cache-after context.]
+    [.sequence] [.history] [.token-capacity] [.layer]
+    [.query-heads] [.key-value-heads] [.head-dim]
+  } materializec.borrow-cached-context-bf16
+    [cache-after probabilities-after context-buffer.]
   {
     ({[.cache-count] [.cache-after]} buf.to-mem)
-    ({[.output-count] [.context]} buf.to-mem)
+    ({[.probability-count] [.probabilities-after]} buf.to-mem)
+    ({[.output-count] [.context-buffer]} buf.to-mem)
   }
 ))
 
@@ -1261,8 +1252,8 @@
   ({[.scores] [.history]}
     qwen3.cached-staged-softmax [probabilities.])
   ({[.cache-after-scores] [.probabilities] [.sequence] [.token-capacity] [.start] [.layer]}
-    qwen3.cached-staged-context [cache-after-context context.])
-  ({[.probabilities] [.context]}
+    qwen3.cached-staged-context [cache-after-context probabilities-after-context context.])
+  ({[.probabilities-after-context] [.context]}
     qwen3.free-bf16-before [context-after-probabilities.])
   {
     [.cache-after-context]

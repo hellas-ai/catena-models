@@ -694,6 +694,8 @@ mod tests {
             1 + weight_specs(&config)?.len()
         );
         assert!(model.contains("(def program qwen3.dense-activate :"));
+        assert!(model.contains("materializec.borrow-cached-context-f32"));
+        assert!(!model.contains("(def program qwen3.cached-staged-context-reduce-term-at :"));
         assert!(!model.contains("(def program qwen3.cached-decoder-layer :"));
         assert!(!model.contains("(def program qwen3.router-select-experts :"));
         assert!(!model.contains("(def program qwen3.moe-activate :"));
@@ -714,6 +716,8 @@ mod tests {
         assert!(entrypoint.contains("mem.cast.bf16 [logit-count logit-buffer.]"));
         assert!(entrypoint.contains("materializec.borrow-argmax-bf16"));
         assert!(model.contains("qwen3.free-bf16-before"));
+        assert!(model.contains("materializec.borrow-cached-context-bf16"));
+        assert!(!model.contains("(def program qwen3.cached-staged-context-reduce-term-at :"));
         assert_eq!(model.matches("materializec.bf16-gemv").count(), 3);
         assert!(!model.contains("} materializec.reduce-f32 [logits-buffer.]"));
         assert!(!model.contains("qwen3.expert-linear-pair"));
