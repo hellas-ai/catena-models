@@ -112,7 +112,7 @@
     [.up-buffer] [.up-count]
     [.selected-buffer] [.selected-count]
     [.output-count] [.hidden-size] [.one] [.shared-size]
-  } materializec.borrow-routed-bf16-gemv-pair
+  } materializec.borrow-routed-native-bf16-gemv-pair
     [input-after selected-after gate up.]
   {
     ({[.input-count] [.input-after]} buf.to-mem)
@@ -133,8 +133,8 @@
   ([.index shared-size] u64.div [row.])
   ([.activated] mem.cast.bf16 [active-count active-buffer.])
   ({[.active-count] [.active-buffer] [.index]} qwen3.bf16-buffer-at bf16.to-f32 [value.])
-  ([.router] mem.cast.bf16 [router-count router-buffer.])
-  ({[.router-count] [.router-buffer] [.row]} qwen3.bf16-buffer-at bf16.to-f32 qwen3.sigmoid [scale.])
+  ([.router] mem.cast.f32 [router-count router-buffer.])
+  ({[.router-count] [.router-buffer] [.row]} qwen3.f32-buffer-at qwen3.sigmoid [scale.])
   ([.value scale] f32.mul [result.])
   ([.result] f32.to-bf16)
 ))
@@ -146,9 +146,263 @@
   ({[.activated] [.router]} *.intro [env.])
   { [.count] ({[.count] [.env] (([.count] :.param) name.qwen3.qwen35-shared-scale-at)} materializec) }
   buf.to-mem [scaled.]
-  ({[.activated] [.scaled]} qwen3.free-f32-before [scaled-after-activated.])
-  ({[.router] [.scaled-after-activated]} qwen3.free-f32-before [result.])
-  ([.result] f32.to-bf16)
+  ({[.activated] [.scaled]} qwen3.free-bf16-before [scaled-after-activated.])
+  ({[.router] [.scaled-after-activated]} qwen3.free-f32-before)
+))
+
+# One term of a router projection with BF16 activations and native-F32 weights.
+# Qwen3.5/3.6 stores both the routed and shared router matrices as F32.
+(def program qwen3.qwen35-router-linear-term-at :
+  ([n k.] {
+    ({
+      ({
+        ({(cap.own mem) (cap.ref mem)} *)
+        (u64 val)
+      } *)
+      ({([.n] ix val) ([.k] ix val)} *)
+    } *)
+  })
+  ->
+  ([n k.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [env indices.])
+  ([.env] *.elim [input-and-weight output-features.])
+  ([.input-and-weight] *.elim [input linear-weight.])
+  ([.indices] *.elim [output-index input-index.])
+  ([.output-index] ix.to-u64 [index.])
+  ([.input-index] ix.to-u64 [input-channel.])
+  (const.u64.0x{{HIDDEN_SIZE}} [input-features.])
+  ([.index output-features] u64.div [row.])
+  ([.index output-features] u64.rem [output-channel.])
+  ([.row input-features] u64.mul [input-row-base.])
+  ([.input-row-base input-channel] u64.add [flat-input-index.])
+  ([.output-channel input-features] u64.mul [weight-row-base.])
+  ([.weight-row-base input-channel] u64.add [weight-index.])
+  ([.input] mem.cast.bf16 [input-count input-buffer.])
+  ({[.input-count] [.input-buffer] [.flat-input-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [input-value.])
+  ([.linear-weight] mem.cast.f32 [weight-count weight-buffer.])
+  ({[.weight-count] [.weight-buffer] [.weight-index]}
+    qwen3.f32-buffer-at [weight-value.])
+  ([.input-value weight-value] f32.mul)
+))
+
+(def program qwen3.qwen35-router-linear-epilogue :
+  ([n.] {
+    ({
+      ({
+        ({(cap.own mem) (cap.ref mem)} *)
+        (u64 val)
+      } *)
+      ({([.n] ix val) (f32 val)} *)
+    } *)
+  })
+  ->
+  ([n.] (f32 val))
+= ([arguments.]
+  ([.arguments] *.elim [_env index-and-sum.])
+  ([.index-and-sum] *.elim [_index sum.])
+  [.sum]
+))
+
+# Router projection preserving F32 logits for top-k and sigmoid scaling.
+(def program qwen3.qwen35-router-linear :
+  {(cap.own mem) (cap.ref mem) (u64 val)} -> (cap.own mem)
+= ([input linear-weight output-features.]
+  ([.input] mem.cast.bf16 [input-count _input-buffer.])
+  ([.input-count] :.forget [input-count-value.])
+  (const.u64.0x{{HIDDEN_SIZE}} [input-features.])
+  ([.input-count-value input-features] u64.div [row-count.])
+  ([.row-count output-features] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ([.input-features] u64.name [input-feature-count.])
+  ({[.input] [.linear-weight]} *.intro [input-and-weight.])
+  ({[.input-and-weight] [.output-features]} *.intro [env.])
+  {
+    [.output-count]
+    [.input-feature-count]
+    [.env]
+    ({
+      ([.output-count] :.param)
+      ([.input-feature-count] :.param)
+    } name.qwen3.qwen35-router-linear-term-at)
+    (([.output-count] :.param) name.qwen3.qwen35-router-linear-epilogue)
+  } materializec.reduce-f32 [output.]
+  ({[.output-count] [.output]} buf.to-mem)
+))
+
+(def program qwen3.qwen35-expert-linear-pair :
+  {(cap.own mem) (cap.ref mem) (cap.ref mem) (cap.own mem)}
+  ->
+  {(cap.own mem) (cap.own mem) (cap.own mem) (cap.own mem)}
+= ([input gate-weight up-weight selected-experts.]
+  ([.input] mem.cast.bf16 [input-count input-buffer.])
+  ([.gate-weight] mem.cast.bf16 [gate-count gate-buffer.])
+  ([.up-weight] mem.cast.bf16 [up-count up-buffer.])
+  ([.selected-experts] mem.cast.u64 [selected-count selected-buffer.])
+  ([.input-count] :.forget [input-count-value.])
+  (const.u64.0x{{HIDDEN_SIZE}} [hidden-size-value.])
+  (const.u64.0x{{ACTIVE_INTERMEDIATE_SIZE}} [active-intermediate-row.])
+  (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-size.])
+  (const.u64.0x{{EXPERTS_PER_TOKEN}} [experts-per-token.])
+  ([.input-count-value hidden-size-value] u64.div [row-count.])
+  ([.row-count active-intermediate-row] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ([.hidden-size-value] u64.name [hidden-size.])
+  {
+    [.input-buffer] [.input-count]
+    [.gate-buffer] [.gate-count]
+    [.up-buffer] [.up-count]
+    [.selected-buffer] [.selected-count]
+    [.output-count] [.hidden-size] [.experts-per-token] [.intermediate-size]
+  } materializec.borrow-routed-native-bf16-gemv-pair
+    [input-after selected-after gate up.]
+  {
+    ({[.input-count] [.input-after]} buf.to-mem)
+    ({[.selected-count] [.selected-after]} buf.to-mem)
+    ({[.output-count] [.gate]} buf.to-mem)
+    ({[.output-count] [.up]} buf.to-mem)
+  }
+))
+
+(def program qwen3.qwen35-moe-activate-at :
+  ([n.] {({({(cap.own mem) (cap.own mem)} *) (cap.own mem)} *) ([.n] ix val)})
+  ->
+  ([n.] (bf16 val))
+= ([env output-index.]
+  ([.env] *.elim [gate-and-up routing-weights.])
+  ([.gate-and-up] *.elim [gate up.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  (const.u64.0x{{ACTIVE_INTERMEDIATE_SIZE}} [active-intermediate-row.])
+  (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-size.])
+  (const.u64.0x{{EXPERTS_PER_TOKEN}} [experts-per-token.])
+  ([.flat-output-index active-intermediate-row] u64.div [row.])
+  ([.flat-output-index active-intermediate-row] u64.rem [row-element.])
+  ([.row-element intermediate-size] u64.div [slot.])
+  ([.row experts-per-token] u64.mul [routing-row-base.])
+  ([.routing-row-base slot] u64.add [routing-index.])
+  ([.gate] mem.cast.bf16 [gate-count gate-buffer.])
+  ({[.gate-count] [.gate-buffer] [.flat-output-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [gate-value.])
+  ([.up] mem.cast.bf16 [up-count up-buffer.])
+  ({[.up-count] [.up-buffer] [.flat-output-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [up-value.])
+  ([.routing-weights] mem.cast.f32 [routing-count routing-buffer.])
+  ({[.routing-count] [.routing-buffer] [.routing-index]}
+    qwen3.f32-buffer-at [routing-weight.])
+  ([.gate-value] qwen3.silu [activated-gate.])
+  ([.activated-gate up-value] f32.mul [expert-hidden.])
+  ([.expert-hidden routing-weight] f32.mul f32.to-bf16)
+))
+
+(def program qwen3.qwen35-moe-activate :
+  {(cap.own mem) (cap.own mem) (cap.own mem)} -> (cap.own mem)
+= ([gate up routing-weights.]
+  ([.gate] mem.cast.bf16 [output-count _gate-buffer.])
+  ({[.gate] [.up]} *.intro [gate-and-up.])
+  ({[.gate-and-up] [.routing-weights]} *.intro [env.])
+  {
+    [.output-count]
+    ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.qwen35-moe-activate-at)} materializec)
+  } buf.to-mem
+))
+
+(def program qwen3.qwen35-moe-down-term-at :
+  ([active-count output-count k.] {
+    ({cap.ref [.active-count] bf16} buf val)
+    ({
+      ({({[.active-count] u64} :) ({(cap.ref mem) (cap.own mem)} *)} *)
+      (cap.own mem)
+    } *)
+    ({([.output-count] ix val) ([.k] ix val)} *)
+  })
+  ->
+  ([active-count output-count k.] (f32 val))
+= ([active-buffer env indices.]
+  ([.env] *.elim [active-count-and-weights _residual.])
+  ([.active-count-and-weights] *.elim [active-count-value down-and-experts.])
+  ([.down-and-experts] *.elim [down-weight selected-experts.])
+  ([.indices] *.elim [output-index reduction-index.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  ([.reduction-index] ix.to-u64 [flat-reduction-index.])
+  (const.u64.0x{{HIDDEN_SIZE}} [hidden-size.])
+  (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-size.])
+  (const.u64.0x{{EXPERTS_PER_TOKEN}} [experts-per-token.])
+  (const.u64.0x{{ACTIVE_INTERMEDIATE_SIZE}} [active-intermediate-row.])
+  (const.u64.0x{{EXPERT_STRIDE}} [down-expert-stride.])
+  ([.flat-output-index hidden-size] u64.div [row.])
+  ([.flat-output-index hidden-size] u64.rem [output-channel.])
+  ([.flat-reduction-index intermediate-size] u64.div [slot.])
+  ([.flat-reduction-index intermediate-size] u64.rem [intermediate-channel.])
+  ([.row active-intermediate-row] u64.mul [active-row-base.])
+  ([.active-row-base flat-reduction-index] u64.add [active-index.])
+  ({[.active-count-value] [.active-buffer] [.active-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [active-value.])
+  ([.row experts-per-token] u64.mul [selected-row-base.])
+  ([.selected-row-base slot] u64.add [selected-index.])
+  ([.selected-experts] mem.cast.u64 [selected-count selected-buffer.])
+  ({[.selected-count] [.selected-buffer] [.selected-index]}
+    qwen3.u64-buffer-at [expert.])
+  ([.expert down-expert-stride] u64.mul [expert-base.])
+  ([.output-channel intermediate-size] u64.mul [down-row-base.])
+  ([.expert-base down-row-base] u64.add [expert-row-base.])
+  ([.expert-row-base intermediate-channel] u64.add [down-index.])
+  ([.down-weight] mem.cast.bf16 [down-count down-buffer.])
+  ({[.down-count] [.down-buffer] [.down-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [down-value.])
+  ([.active-value down-value] f32.mul)
+))
+
+(def program qwen3.qwen35-moe-down-epilogue :
+  ([active-count output-count.] {
+    ({cap.ref [.active-count] bf16} buf val)
+    ({
+      ({({[.active-count] u64} :) ({(cap.ref mem) (cap.own mem)} *)} *)
+      (cap.own mem)
+    } *)
+    ({([.output-count] ix val) (f32 val)} *)
+  })
+  ->
+  ([active-count output-count.] (bf16 val))
+= ([_active-buffer env index-and-sum.]
+  ([.env] *.elim [_active-count-and-weights residual.])
+  ([.index-and-sum] *.elim [output-index projected.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  ([.residual] mem.cast.bf16 [residual-count residual-buffer.])
+  ({[.residual-count] [.residual-buffer] [.flat-output-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [residual-value.])
+  ([.projected residual-value] f32.add f32.to-bf16)
+))
+
+(def program qwen3.qwen35-moe-down-residual :
+  {(cap.own mem) (cap.ref mem) (cap.own mem) (cap.own mem)}
+  ->
+  {(cap.own mem) (cap.own mem) (cap.own mem) (cap.own mem)}
+= ([activated down-weight selected-experts residual.]
+  ([.activated] mem.cast.bf16 [active-count active-buffer.])
+  ([.down-weight] mem.cast.bf16 [down-count down-buffer.])
+  ([.selected-experts] mem.cast.u64 [selected-count selected-buffer.])
+  ([.residual] mem.cast.bf16 [output-count residual-buffer.])
+  (const.u64.0x{{ACTIVE_INTERMEDIATE_SIZE}} [active-intermediate-value.])
+  ([.active-intermediate-value] u64.name [active-intermediate.])
+  (const.u64.0x{{EXPERTS_PER_TOKEN}} [experts-per-token.])
+  (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-size.])
+  (const.u64.0x{{HIDDEN_SIZE}} [hidden-size.])
+  {
+    [.active-buffer] [.active-count]
+    [.down-buffer] [.down-count]
+    [.selected-buffer] [.selected-count]
+    [.residual-buffer] [.output-count]
+    [.output-count] [.active-intermediate]
+    [.experts-per-token] [.intermediate-size] [.hidden-size]
+  } materializec.borrow-routed-native-bf16-gemv-residual
+    [activated-after selected-after residual-after output-buffer.]
+  {
+    ({[.active-count] [.activated-after]} buf.to-mem)
+    ({[.selected-count] [.selected-after]} buf.to-mem)
+    ({[.output-count] [.residual-after]} buf.to-mem)
+    ({[.output-count] [.output-buffer]} buf.to-mem)
+  }
 ))
 
 # Qwen3.5/3.6 MoE FFN: normalized top-k routed experts plus a sigmoid-gated
@@ -165,19 +419,20 @@
     router-weight expert-gate-weight expert-up-weight expert-down-weight
     shared-router-weight shared-gate-weight shared-up-weight shared-down-weight.]
   (const.u64.0x{{EXPERT_COUNT}} [router-features.])
-  ({[.normalized] [.router-weight] [.router-features]} qwen3.linear [router-logits.])
+  ({[.normalized] [.router-weight] [.router-features]} qwen3.qwen35-router-linear [router-logits.])
   ([.router-logits] qwen3.router-select-experts [router-after selected-experts.])
   ({[.router-after] [.selected-experts]} qwen3.routing-weights [routing-weights.])
   ({[.normalized] [.expert-gate-weight] [.expert-up-weight] [.selected-experts]}
-    qwen3.expert-linear-pair
+    qwen3.qwen35-expert-linear-pair
     [normalized-after-expert selected-after-expert expert-gate expert-up.])
   ({[.expert-gate] [.expert-up] [.routing-weights]}
-    qwen3.moe-activate [expert-activated.])
+    qwen3.qwen35-moe-activate [expert-activated.])
   ({[.expert-activated] [.expert-down-weight] [.selected-after-expert] [.residual]}
-    qwen3.moe-down-residual [expert-activated-after routed-output.])
+    qwen3.qwen35-moe-down-residual
+    [expert-activated-after selected-after-down residual-after-down routed-output.])
   (const.u64.0x0000000000000001 [one.])
   ({[.normalized-after-expert] [.shared-router-weight] [.one]}
-    qwen3.linear [shared-router.])
+    qwen3.qwen35-router-linear [shared-router.])
   ([.sequence] qwen3.dense-selected-experts [shared-selected.])
   ({[.normalized-after-expert] [.shared-gate-weight] [.shared-up-weight] [.shared-selected]}
     qwen3.qwen35-shared-linear-pair
@@ -187,20 +442,19 @@
   (const.u64.0x{{SHARED_INTERMEDIATE_SIZE}} [shared-features.])
   ({[.shared-scaled] [.shared-down-weight] [.routed-output] [.shared-features]}
     qwen3.linear-residual [output.])
-  ({[.normalized-after-shared] [.output]} qwen3.free-f32-before [output-01.])
+  ({[.normalized-after-shared] [.output]} qwen3.free-bf16-before [output-01.])
   ({[.router-after] [.output-01]} qwen3.free-f32-before [output-02.])
-  ({[.expert-gate] [.output-02]} qwen3.free-f32-before [output-03.])
-  ({[.expert-up] [.output-03]} qwen3.free-f32-before [output-04.])
-  ({[.expert-activated-after] [.output-04]} qwen3.free-f32-before [output-05.])
+  ({[.expert-gate] [.output-02]} qwen3.free-bf16-before [output-03.])
+  ({[.expert-up] [.output-03]} qwen3.free-bf16-before [output-04.])
+  ({[.expert-activated-after] [.output-04]} qwen3.free-bf16-before [output-05.])
   ({[.routing-weights] [.output-05]} qwen3.free-f32-before [output-06.])
-  ({[.selected-after-expert] [.output-06]} qwen3.free-u64-before [output-07.])
-  ({[.routed-output] [.output-07]} qwen3.free-f32-before [output-08.])
-  ({[.shared-gate] [.output-08]} qwen3.free-f32-before [output-09.])
-  ({[.shared-up] [.output-09]} qwen3.free-f32-before [output-10.])
+  ({[.selected-after-down] [.output-06]} qwen3.free-u64-before [output-07.])
+  ({[.routed-output] [.output-07]} qwen3.free-bf16-before [output-08.])
+  ({[.shared-gate] [.output-08]} qwen3.free-bf16-before [output-09.])
+  ({[.shared-up] [.output-09]} qwen3.free-bf16-before [output-10.])
   ({[.shared-selected-after] [.output-10]} qwen3.free-u64-before [output-11.])
-  ({[.shared-scaled] [.output-11]} qwen3.free-f32-before [output-12.])
-  ({[.residual] [.output-12]} qwen3.free-f32-before [result.])
-  ([.result] f32.to-bf16)
+  ({[.shared-scaled] [.output-11]} qwen3.free-bf16-before [output-12.])
+  ({[.residual-after-down] [.output-12]} qwen3.free-bf16-before)
 ))
 
 (def program qwen3.qwen35-full-decoder-layer :
@@ -286,33 +540,37 @@
     router-weight expert-gate-weight expert-up-weight expert-down-weight
     shared-router-weight shared-gate-weight shared-up-weight shared-down-weight.]
   ([.hidden] qwen3.rms-inv [attention-inverse.])
+  ({[.hidden] [.input-norm] [.attention-inverse]}
+    qwen3.apply-rmsnorm [normalized-attention-input.])
   (const.u64.0x{{QWEN35_QUERY_PROJECTION_SIZE}} [qg-features.])
   (const.u64.0x{{KEY_VALUE_SIZE}} [key-value-features.])
-  ({[.hidden] [.input-norm] [.q-weight] [.attention-inverse] [.qg-features]}
-    qwen3.linear-norm [query-and-gate.])
+  ({[.normalized-attention-input] [.q-weight] [.qg-features]}
+    qwen3.linear [query-and-gate.])
   ([.query-and-gate] qwen3.qwen35-extract-query [query-raw.])
-  ({[.hidden] [.input-norm] [.k-weight] [.attention-inverse] [.key-value-features]}
-    qwen3.linear-norm [key-raw.])
-  ({[.hidden] [.input-norm] [.v-weight] [.attention-inverse] [.key-value-features]}
-    qwen3.linear-norm [value.])
+  ({[.normalized-attention-input] [.k-weight] [.key-value-features]}
+    qwen3.linear [key-raw.])
+  ({[.normalized-attention-input] [.v-weight] [.key-value-features]}
+    qwen3.linear [value.])
+  ({[.normalized-attention-input] [.value]}
+    qwen3.free-bf16-before [value-after-normalized.])
   ({[.query-raw] [.q-norm]} qwen3.head-rmsnorm [query.])
   ({[.key-raw] [.k-norm]} qwen3.head-rmsnorm [key.])
   ({[.cache] [.key] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
     qwen3.cache-append-key [cache-with-key.])
-  ({[.key] [.cache-with-key]} qwen3.free-f32-before [cache-after-key.])
-  ({[.cache-after-key] [.value] [.sequence] [.token-capacity] [.start] [.layer]}
+  ({[.key] [.cache-with-key]} qwen3.free-bf16-before [cache-after-key.])
+  ({[.cache-after-key] [.value-after-normalized] [.sequence] [.token-capacity] [.start] [.layer]}
     qwen3.cache-append-value [cache-with-value.])
-  ({[.value] [.cache-with-value]} qwen3.free-f32-before [cache-after-value.])
+  ({[.value-after-normalized] [.cache-with-value]} qwen3.free-bf16-before [cache-after-value.])
   ({[.cache-after-value] [.query] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
     qwen3.cached-attention [cache-after-attention context.])
   ({[.query-and-gate] [.context]} qwen3.qwen35-gate-context [gated-context.])
   ({[.attention-inverse] [.gated-context]} qwen3.free-f32-before [context-after-inverse.])
-  ({[.query] [.context-after-inverse]} qwen3.free-f32-before [context-after-query.])
+  ({[.query] [.context-after-inverse]} qwen3.free-bf16-before [context-after-query.])
   (const.u64.0x{{QUERY_SIZE}} [attention-input-features.])
   ({[.context-after-query] [.o-weight] [.hidden] [.attention-input-features]}
     qwen3.linear-residual [attention-hidden.])
-  ({[.context-after-query] [.attention-hidden]} qwen3.free-f32-before [attention-after-context.])
-  ({[.hidden] [.attention-after-context]} qwen3.free-f32-before [attention-after-residual.])
+  ({[.context-after-query] [.attention-hidden]} qwen3.free-bf16-before [attention-after-context.])
+  ({[.hidden] [.attention-after-context]} qwen3.free-bf16-before [attention-after-residual.])
   ([.attention-after-residual] qwen3.rms-inv [mlp-inverse.])
   ({[.attention-after-residual] [.post-norm] [.mlp-inverse]}
     qwen3.apply-rmsnorm [normalized.])
@@ -1164,17 +1422,21 @@
     router-weight expert-gate-weight expert-up-weight expert-down-weight
     shared-router-weight shared-gate-weight shared-up-weight shared-down-weight.]
   ([.hidden] qwen3.rms-inv [attention-inverse.])
+  ({[.hidden] [.input-norm] [.attention-inverse]}
+    qwen3.apply-rmsnorm [normalized-attention-input.])
   (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-features.])
   (const.u64.0x{{LINEAR_VALUE_SIZE}} [value-features.])
   (const.u64.0x{{LINEAR_VALUE_HEADS}} [value-heads.])
-  ({[.hidden] [.input-norm] [.qkv-weight] [.attention-inverse] [.qkv-features]}
-    qwen3.linear-norm [qkv.])
-  ({[.hidden] [.input-norm] [.z-weight] [.attention-inverse] [.value-features]}
-    qwen3.linear-norm [z.])
-  ({[.hidden] [.input-norm] [.alpha-weight] [.attention-inverse] [.value-heads]}
-    qwen3.linear-norm [alpha.])
-  ({[.hidden] [.input-norm] [.beta-weight] [.attention-inverse] [.value-heads]}
-    qwen3.linear-norm [beta-raw.])
+  ({[.normalized-attention-input] [.qkv-weight] [.qkv-features]}
+    qwen3.linear [qkv.])
+  ({[.normalized-attention-input] [.z-weight] [.value-features]}
+    qwen3.linear [z.])
+  ({[.normalized-attention-input] [.alpha-weight] [.value-heads]}
+    qwen3.linear [alpha.])
+  ({[.normalized-attention-input] [.beta-weight] [.value-heads]}
+    qwen3.linear [beta-raw.])
+  ({[.normalized-attention-input] [.beta-raw]}
+    qwen3.free-bf16-before [beta-raw-after-normalized.])
   (const.u64.0x{{KV_CACHE_ELEMENTS_PER_TOKEN}} [kv-elements-per-token.])
   ([.token-capacity kv-elements-per-token] u64.mul [recurrent-base.])
   (const.u64.0x{{LINEAR_CONV_STATE_SIZE}} [conv-state-size.])
@@ -1193,7 +1455,7 @@
   ({[.conv] [.query-base] [.sequence]} qwen3.qwen35-l2 [query.])
   ({[.conv] [.key-base] [.sequence]} qwen3.qwen35-l2 [key.])
   ({[.conv] [.sequence]} qwen3.qwen35-values [value.])
-  ([.beta-raw] qwen3.qwen35-beta [beta.])
+  ([.beta-raw-after-normalized] qwen3.qwen35-beta [beta.])
   ({[.alpha] [.dt-bias] [.a-log] [.sequence]} qwen3.qwen35-decay-gate [decay-gate.])
   ([.conv-base conv-state-size] u64.add [matrix-base.])
   ({[.cache-after-conv] [.query] [.key] [.value] [.decay-gate] [.beta] [.matrix-base] [.sequence]}
@@ -1213,7 +1475,7 @@
   ({[.attention-inverse] [.output-after-mlp-inverse]}
     qwen3.free-f32-before [output-after-attention-inverse.])
   ({[.hidden] [.output-after-attention-inverse]}
-    qwen3.free-f32-before [output-after-hidden.])
+    qwen3.free-bf16-before [output-after-hidden.])
   {[.output-after-hidden] [.cache-after-state]}
 ))
 

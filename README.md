@@ -126,13 +126,14 @@ nix develop --command cargo run --release -- \
   --model unsloth/Qwen3.5-0.8B-GGUF:BF16 "The capital of France is"
 ```
 
-Dense Qwen3 and Qwen3.5 models also have an opt-in native-BF16 execution graph.
-It keeps activations, attention probabilities, logits, and persistent caches in
-BF16. Dense projections use packed BF16 dot instructions with F32 register
-accumulation on gfx11. RMSNorm, softmax, RoPE, and the internal Gated DeltaNet
-recurrence retain F32 calculations; DeltaNet inputs and recurrent state are
-stored as BF16 between calls. The original F32-activation graph remains the
-default so the two paths can be compared directly:
+Qwen3 dense and Qwen3.5/3.6 dense or MoE models have an opt-in native-BF16
+execution graph. It keeps activations, attention probabilities, logits, and
+persistent caches in BF16. Dense and routed expert projections use packed BF16
+dot instructions with F32 register accumulation on gfx11. Router selection and
+probability normalization, RMSNorm, softmax, RoPE, and the internal Gated
+DeltaNet recurrence retain F32 calculations; DeltaNet inputs and recurrent
+state are stored as BF16 between calls. The original F32-activation graph
+remains the default so the two paths can be compared directly:
 
 ```bash
 nix develop --command cargo run --release -- \
@@ -146,10 +147,14 @@ nix develop --command cargo run --release -- \
 nix develop --command cargo run --release -- \
   --bf16 --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --bench --pp 512 --tg 128 --bench-runs 5
+
+nix develop --command cargo run --release -- \
+  --bf16 --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  --bench --pp 512 --tg 128 --bench-runs 5
 ```
 
-The BF16 graph currently rejects Qwen3 MoE, Qwen3.5 MoE, and Qwen3.6;
-those continue to use the existing F32-activation graph.
+The BF16 graph currently rejects the older Qwen3 MoE architecture, which
+continues to use the existing F32-activation graph.
 
 The optional suffix after `:` selects a quantization or variant by directory
 or filename. It is required when a repository contains more than one GGUF

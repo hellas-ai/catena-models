@@ -66,7 +66,7 @@ struct Args {
     #[arg(long)]
     ignore_eos: bool,
 
-    /// Use the native mixed-BF16 graph (dense Qwen3 and Qwen3.5).
+    /// Use the native mixed-BF16 graph (Qwen3 dense and Qwen3.5/3.6 dense or MoE).
     #[arg(long)]
     bf16: bool,
 }

@@ -569,9 +569,11 @@ pub fn generated_model_source_for_precision(
         precision == InferencePrecision::F32
             || matches!(
                 config.architecture,
-                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+                ModelArchitecture::Qwen3Dense
+                    | ModelArchitecture::Qwen35Dense
+                    | ModelArchitecture::Qwen35Moe
             ),
-        "BF16 inference currently supports only dense Qwen3 and Qwen3.5 models"
+        "BF16 inference currently supports Qwen3 dense and Qwen3.5/3.6 dense or MoE models"
     );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
@@ -733,12 +735,13 @@ mod tests {
     }
 
     #[test]
-    fn bf16_graph_rejects_moe_architectures() {
-        for config in [ModelConfig::qwen3_30b(), ModelConfig::qwen36_35b_a3b()] {
-            let error = generated_model_source_for_precision(&config, InferencePrecision::Bf16)
-                .unwrap_err();
-            assert!(error.to_string().contains("only dense Qwen3 and Qwen3.5"));
-        }
+    fn bf16_graph_rejects_qwen3_moe() {
+        let error = generated_model_source_for_precision(
+            &ModelConfig::qwen3_30b(),
+            InferencePrecision::Bf16,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Qwen3.5/3.6 dense or MoE"));
     }
 
     #[test]
@@ -768,6 +771,36 @@ mod tests {
         assert!(model.contains("mem.cast.f32 [dt-count dt-buffer.]"));
         assert!(model.contains("mem.cast.f32 [a-count a-buffer.]"));
         assert!(model.contains("mem.cast.f32 [norm-count norm-buffer.]"));
+        Ok(())
+    }
+
+    #[test]
+    fn qwen35_moe_bf16_uses_native_hybrid_and_expert_graphs() -> Result<()> {
+        let config = ModelConfig::qwen36_35b_a3b();
+        let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
+        let entrypoint = model.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-full-moe-decoder-layer")
+                .count(),
+            10
+        );
+        assert_eq!(
+            entrypoint
+                .matches("qwen3.qwen35-linear-moe-decoder-layer")
+                .count(),
+            30
+        );
+        assert!(model.contains("materializec.borrow-gated-delta-net-bf16"));
+        assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-pair"));
+        assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-residual"));
+        assert!(model.contains("qwen3.qwen35-moe-down-residual"));
+        assert!(model.contains("qwen3.qwen35-router-linear"));
+        assert!(model.contains("[.linear-weight] mem.cast.f32"));
+        assert!(!model.contains("qwen3.qwen35-router-f32"));
+        assert!(!model.contains("(def program qwen3.linear-norm :"));
+        assert!(!model.contains("(def program qwen3.qwen35-moe-down-term-at :"));
+        assert!(!model.contains("materializec.borrow-routed-bf16-gemv-pair"));
         Ok(())
     }
 
@@ -930,11 +963,15 @@ mod tests {
     }
 
     #[test]
-    fn dense_bf16_gpu_program_compiles_when_requested() -> Result<()> {
+    fn bf16_gpu_programs_compile_when_requested() -> Result<()> {
         if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
             return Ok(());
         }
-        for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen35_0_8b()] {
+        for config in [
+            ModelConfig::qwen3_0_6b(),
+            ModelConfig::qwen35_0_8b(),
+            ModelConfig::qwen36_35b_a3b(),
+        ] {
             let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
             Runtime::from_sources(
                 runtime_sources(&model, InferencePrecision::Bf16),
