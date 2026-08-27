@@ -6,6 +6,20 @@ implementation. The Catena path executes all 48 layers, uses a persistent KV
 cache, and performs greedy generation directly from a HIP-registered BF16
 GGUF mapping.
 
+The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
+including the tied-embedding 0.6B and 1.7B layouts, dense hybrid Qwen3.5 GGUFs
+such as `unsloth/Qwen3.5-0.8B-GGUF:BF16`, and hybrid MoE checkpoints such as
+`unsloth/Qwen3.6-35B-A3B-GGUF:BF16`. Qwen3.5/3.6 selects full-attention or
+Gated DeltaNet per layer from GGUF metadata and uses partial RoPE, gated
+attention, depthwise causal convolution, and recurrent DeltaNet state. MoE
+layers combine normalized top-k routed experts with their sigmoid-gated shared
+expert. The conversion and measured performance notes below remain specific
+to Qwen3-30B-A3B.
+
+Reduction and softmax launch limits are owned by the selected Catena compiler
+and target GPU. The runner does not duplicate those limits or reject model
+shapes before compilation.
+
 The scripts assume the Nix development environment; invoke them with
 `nix develop --command` as shown below.
 
@@ -99,7 +113,70 @@ conversion, upload, or per-tensor allocation. Measured warm loads reached
 weight readiness in 2.72--2.84 seconds.
 
 Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
-`--model-dir` still selects the directory containing `tokenizer.json`.
+For split checkpoints, `--gguf` can also name a shard directory or any one
+standard `-00001-of-00002.gguf` shard. By default the tokenizer is reconstructed
+from the GGUF's `tokenizer.ggml.*` metadata. Use
+`--tokenizer /path/to/tokenizer.json` as an explicit override; when the GGUF has
+no embedded tokenizer, `<model-dir>/tokenizer.json` remains the fallback.
+
+Alternatively, let the runner list and cache a checkpoint from Hugging Face:
+
+```bash
+nix develop --command cargo run --release -- \
+  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 "The capital of France is"
+```
+
+Qwen3 dense and Qwen3.5/3.6 dense or MoE models have an opt-in native-BF16
+execution graph. It keeps activations, attention probabilities, logits, and
+persistent caches in BF16. Dense and routed expert projections use packed BF16
+dot instructions with F32 register accumulation on gfx11. Router selection and
+probability normalization, RMSNorm, softmax, RoPE, and the internal Gated
+DeltaNet recurrence retain F32 calculations; DeltaNet inputs and recurrent
+state are stored as BF16 between calls. The original F32-activation graph
+remains the default so the two paths can be compared directly. Both graphs
+update the persistent KV cache in place and use a tiled, coalesced cached-value
+kernel for the exact attention context sum; global attention still scans the
+existing history for each decoded token:
+
+```bash
+nix develop --command cargo run --release -- \
+  --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
+  "The capital of France is"
+
+nix develop --command cargo run --release -- \
+  --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
+  --bench --pp 512 --tg 128 --bench-runs 5
+
+nix develop --command cargo run --release -- \
+  --bf16 --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
+  --bench --pp 512 --tg 128 --bench-runs 5
+
+nix develop --command cargo run --release -- \
+  --bf16 --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  --bench --pp 512 --tg 128 --bench-runs 5
+```
+
+The BF16 graph currently rejects the older Qwen3 MoE architecture, which
+continues to use the existing F32-activation graph.
+
+The optional suffix after `:` selects a quantization or variant by directory
+or filename. It is required when a repository contains more than one GGUF
+checkpoint and selection would otherwise be ambiguous. Every member of a
+standard sharded checkpoint is downloaded; `--model` and `--gguf` are mutually
+exclusive. Normal Hugging Face environment variables such as `HF_TOKEN`,
+`HF_HOME`, and `HF_HUB_CACHE` are honored.
+
+Run llama.cpp-style prompt-processing and token-generation measurements with:
+
+```bash
+nix develop --command cargo run --release -- \
+  --gguf /path/to/model.gguf --bench --pp 512 --tg 128
+```
+
+`--pp` and `--tg` default to 512 and 128; set either one to zero to skip that
+row. `--bench-runs N` reports the mean throughput across `N` measured runs
+(default 1). Benchmark mode ignores any positional prompt and uses deterministic
+token IDs directly, so it does not load or require a tokenizer.
 
 RoPE is also part of the Catena program rather than a model-specific Rust
 input. Each invocation materializes only its current absolute-position range,
@@ -108,10 +185,18 @@ sine/cosine polynomials, then reuses that owned table across all 48 layers.
 The generated table differs from the previous host `sinf`/`cosf` values by at
 most `4.92e-7` across the complete 32,768-position context.
 
-Normal inference compiles the complete checked-in `src/catena/qwen3.hex` and
-does not generate its 48-layer entrypoint in Rust. If the layer/weight ABI is
-changed, explicitly regenerate that entrypoint once and review the resulting
-source diff:
+Normal inference compiles the dimension-free helpers in
+`src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
+`src/catena/qwen3_model.hex` and, for Qwen3.5, the hybrid layer definitions in
+`src/catena/qwen35_model.hex`. Rust fills its embedding, normalization,
+projection, RoPE, cache, attention, DeltaNet, and dense/MoE feed-forward
+dimensions from GGUF metadata and appends a linear-use entrypoint with the
+metadata-derived layer types and tensor counts. Qwen3.5 prompt processing is
+currently deliberately sequential, one token per graph invocation, so the
+first implementation favors a directly testable recurrent transition over a
+parallel scan. To inspect the exact generated model source for the selected
+GGUF, write it under
+`target/catena/generated-qwen3.hex` with:
 
 ```bash
 nix develop --command cargo run --release -- --generate-entrypoint

@@ -1,0 +1,319 @@
+# Dimension-free Qwen3-family Catena helpers.
+#
+# Model dimensions and architecture-specific tensor operations live in the
+# generated model source.
+
+# Higher-accuracy exponential for model numerics. The stdlib approximation is
+# intentionally small, but its degree-3 polynomial accumulates visible error
+# through deep transformer stacks. This uses the same ln(2) range reduction with a
+# degree-6 Taylor polynomial on [-ln(2)/2, ln(2)/2].
+(def program qwen3.exp-nonneg : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x3FB8AA3B u32.bitcast-f32 [inv-ln2.])
+    (const.u32.0x3F317200 u32.bitcast-f32 [ln2-hi.])
+    (const.u32.0x35BFBE8E u32.bitcast-f32 [ln2-lo.])
+    (const.u32.0x3F800000 u32.bitcast-f32 [c0.])
+    (const.u32.0x3F800000 u32.bitcast-f32 [c1.])
+    (const.u32.0x3F000000 u32.bitcast-f32 [c2.])
+    (const.u32.0x3E2AAAAB u32.bitcast-f32 [c3.])
+    (const.u32.0x3D2AAAAB u32.bitcast-f32 [c4.])
+    (const.u32.0x3C088889 u32.bitcast-f32 [c5.])
+    (const.u32.0x3AB60B61 u32.bitcast-f32 [c6.])
+    ([.x inv-ln2] f32.mul [scaled.])
+    ([.scaled] f32.round-to-u32 [k-u32.])
+    ([.k-u32] u32.to-f32 [k-f32.])
+    ([.k-f32 ln2-hi] f32.mul [k-ln2-hi.])
+    ([.k-f32 ln2-lo] f32.mul [k-ln2-lo.])
+    ([.x k-ln2-hi] f32.sub [r-hi.])
+    ([.r-hi k-ln2-lo] f32.sub [r.])
+    ([.r c6] f32.mul [r-c6.])
+    ([.c5 r-c6] f32.add [p5.])
+    ([.r p5] f32.mul [r-p5.])
+    ([.c4 r-p5] f32.add [p4.])
+    ([.r p4] f32.mul [r-p4.])
+    ([.c3 r-p4] f32.add [p3.])
+    ([.r p3] f32.mul [r-p3.])
+    ([.c2 r-p3] f32.add [p2.])
+    ([.r p2] f32.mul [r-p2.])
+    ([.c1 r-p2] f32.add [p1.])
+    ([.r p1] f32.mul [r-p1.])
+    ([.c0 r-p1] f32.add [polynomial.])
+    (const.u32.0x0000007F [bias-u32.])
+    (const.u32.0x00800000 [exponent-step-u32.])
+    ([.k-u32 bias-u32] u32.add [biased-exponent.])
+    ([.biased-exponent exponent-step-u32] u32.mul [power-bits.])
+    ([.power-bits] u32.bitcast-f32 [power-of-two.])
+    ([.polynomial power-of-two] f32.mul [result.])
+    [.result]
+  )
+)
+
+(def program qwen3.exp : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x00000000 u32.to-f32 [zero.])
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    # exp-nonneg constructs 2^k through exponent bits. Saturate before k can
+    # cross the finite F32 exponent range and wrap those bits back to zero.
+    (const.u32.0x42B17218 u32.bitcast-f32 [maximum-log.])
+    (const.u32.0x7F800000 u32.bitcast-f32 [positive-infinity.])
+    ([.x] f32.neg [negated.])
+    ([.x zero] f32.lt [is-negative.])
+    ([.is-negative negated x] f32.select [magnitude.])
+    ([.magnitude] qwen3.exp-nonneg [finite-result.])
+    ([.magnitude maximum-log] f32.gt [overflows.])
+    ([.overflows positive-infinity finite-result] f32.select [positive-result.])
+    ([.one positive-result] f32.div [reciprocal.])
+    ([.is-negative reciprocal positive-result] f32.select [result.])
+    [.result]
+  )
+)
+
+(def program qwen3.silu : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    ([.x] f32.neg [negative-x.])
+    ([.negative-x] qwen3.exp [exp-negative-x.])
+    ([.one exp-negative-x] f32.add [denominator.])
+    ([.x denominator] f32.div [result.])
+    [.result]
+  )
+)
+
+(def program qwen3.sigmoid : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    ([.x] f32.neg [negative-x.])
+    ([.negative-x] qwen3.exp [exp-negative-x.])
+    ([.one exp-negative-x] f32.add [denominator.])
+    ([.one denominator] f32.div [result.])
+    [.result]
+  )
+)
+
+# Stable softplus: max(x, 0) + log(1 + exp(-abs(x))). DeltaNet only uses
+# this in F32 for the decay time-step projection.
+(def program qwen3.softplus : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x00000000 u32.bitcast-f32 [zero.])
+    (const.u32.0x3F800000 u32.bitcast-f32 [one.])
+    ([.x zero] f32.gt [positive.])
+    ([.positive x zero] f32.select [maximum.])
+    ([.x] f32.neg [negative.])
+    ([.positive negative x] f32.select [negative-absolute.])
+    ([.negative-absolute] qwen3.exp [exponential.])
+    ([.one exponential] f32.add [one-plus.])
+    ([.one-plus] math.log-approx [logarithm.])
+    ([.maximum logarithm] f32.add [result.])
+    [.result]
+  )
+)
+
+# Square root with an exponent-derived initial estimate followed by four
+# Newton-Raphson refinements. RMS inputs span several orders of magnitude in
+# this checkpoint; starting the iteration at x does not converge in a fixed
+# six steps once the residual stream becomes large.
+(def program qwen3.sqrt : (f32 val) -> (f32 val) =
+  ([x.]
+    (const.u32.0x00000000 u32.to-f32 [zero.])
+    (const.u32.0x00000001 [one-bit.])
+    (const.u32.0x1FC00000 [sqrt-bias.])
+    (const.u32.0x3F000000 u32.bitcast-f32 [half.])
+    ([.x] f32.bitcast-u32 [x-bits.])
+    ([.x-bits one-bit] u32.shr [half-exponent-bits.])
+    ([.half-exponent-bits sqrt-bias] u32.add [guess-bits.])
+    ([.guess-bits] u32.bitcast-f32 [guess0.])
+    ([.x guess0] f32.div [ratio0.])
+    ([.guess0 ratio0] f32.add [sum0.])
+    ([.sum0 half] f32.mul [guess1.])
+    ([.x guess1] f32.div [ratio1.])
+    ([.guess1 ratio1] f32.add [sum1.])
+    ([.sum1 half] f32.mul [guess2.])
+    ([.x guess2] f32.div [ratio2.])
+    ([.guess2 ratio2] f32.add [sum2.])
+    ([.sum2 half] f32.mul [guess3.])
+    ([.x guess3] f32.div [ratio3.])
+    ([.guess3 ratio3] f32.add [sum3.])
+    ([.sum3 half] f32.mul [guess4.])
+    ([.x zero] f32.lte [is-nonpositive.])
+    ([.is-nonpositive zero guess4] f32.select [result.])
+    [.result]
+  )
+)
+
+# Checked raw-index load from a borrowed u64 buffer.
+(def program qwen3.u64-buffer-at :
+  ([m n.] {
+    ({[.n] u64} :)
+    ({[.m n] u64} buf val)
+    (u64 val)
+  })
+  ->
+  ([m n.] (u64 val))
+= ([len input raw-index.]
+  ([.raw-index] u64.name [named-index.])
+  ([.len named-index] u64.gt [in-bounds if-in-bounds _if-out-of-bounds.])
+  ([.in-bounds if-in-bounds] assert-then [index-proof.])
+  ([.named-index len index-proof] u64.to-ix [index.])
+  ({[.index input]} ix [result.])
+  [.result]
+))
+
+# Checked raw-index load from a borrowed f32 buffer.
+(def program qwen3.f32-buffer-at :
+  ([m n.] {
+    ({[.n] u64} :)
+    ({[.m n] f32} buf val)
+    (u64 val)
+  })
+  ->
+  ([m n.] (f32 val))
+= ([len input raw-index.]
+  ([.raw-index] u64.name [named-index.])
+  ([.len named-index] u64.gt [in-bounds if-in-bounds _if-out-of-bounds.])
+  ([.in-bounds if-in-bounds] assert-then [index-proof.])
+  ([.named-index len index-proof] u64.to-ix [index.])
+  ({[.index input]} ix [result.])
+  [.result]
+))
+
+# Checked raw-index load from a borrowed BF16 buffer. Checkpoint weights stay
+# in their original representation in device memory and are widened only in
+# registers for F32 accumulation.
+(def program qwen3.bf16-buffer-at :
+  ([m n.] {
+    ({[.n] u64} :)
+    ({[.m n] bf16} buf val)
+    (u64 val)
+  })
+  ->
+  ([m n.] (bf16 val))
+= ([len input raw-index.]
+  ([.raw-index] u64.name [named-index.])
+  ([.len named-index] u64.gt [in-bounds if-in-bounds _if-out-of-bounds.])
+  ([.in-bounds if-in-bounds] assert-then [index-proof.])
+  ([.named-index len index-proof] u64.to-ix [index.])
+  ({[.index input]} ix [result.])
+  [.result]
+))
+
+# Deterministic sine/cosine for non-negative RoPE angles. A three-part pi/2
+# split keeps range-reduction products exact
+# enough in F32; fdlibm-derived degree-13/14 kernel polynomials operate on the
+# resulting interval of approximately [-pi/4, pi/4]. Every arithmetic step is
+# explicit so GPU dialects retain the same specified operation graph.
+(def program qwen3.rope-sincos : (f32 val) -> {(f32 val) (f32 val)} =
+  ([angle.]
+    (const.u32.0x3F22F983 u32.bitcast-f32 [inverse-pi-over-two.])
+    (const.u32.0x3FC90000 u32.bitcast-f32 [pi-over-two-1.])
+    (const.u32.0x39FDA000 u32.bitcast-f32 [pi-over-two-2.])
+    (const.u32.0x33A22169 u32.bitcast-f32 [pi-over-two-3.])
+    ([.angle inverse-pi-over-two] f32.mul [scaled-quadrant.])
+    ([.scaled-quadrant] f32.round-to-u32 [quadrant-count.])
+    ([.quadrant-count] u32.to-f32 [quadrant-count-f32.])
+    ([.quadrant-count-f32 pi-over-two-1] f32.mul [range-term-1.])
+    ([.angle range-term-1] f32.sub [reduced-1.])
+    ([.quadrant-count-f32 pi-over-two-2] f32.mul [range-term-2.])
+    ([.reduced-1 range-term-2] f32.sub [reduced-2.])
+    ([.quadrant-count-f32 pi-over-two-3] f32.mul [range-term-3.])
+    ([.reduced-2 range-term-3] f32.sub [reduced.])
+    ([.reduced reduced] f32.mul [squared.])
+
+    (const.u32.0xBE2AAAAB u32.bitcast-f32 [sin-c1.])
+    (const.u32.0x3C088889 u32.bitcast-f32 [sin-c2.])
+    (const.u32.0xB9500D01 u32.bitcast-f32 [sin-c3.])
+    (const.u32.0x3638EF1B u32.bitcast-f32 [sin-c4.])
+    (const.u32.0xB2D72F34 u32.bitcast-f32 [sin-c5.])
+    (const.u32.0x2F2EC9D3 u32.bitcast-f32 [sin-c6.])
+    ([.squared sin-c6] f32.mul [sin-p5-term.])
+    ([.sin-c5 sin-p5-term] f32.add [sin-p5.])
+    ([.squared sin-p5] f32.mul [sin-p4-term.])
+    ([.sin-c4 sin-p4-term] f32.add [sin-p4.])
+    ([.squared sin-p4] f32.mul [sin-p3-term.])
+    ([.sin-c3 sin-p3-term] f32.add [sin-p3.])
+    ([.squared sin-p3] f32.mul [sin-p2-term.])
+    ([.sin-c2 sin-p2-term] f32.add [sin-p2.])
+    ([.squared sin-p2] f32.mul [sin-p1-term.])
+    ([.sin-c1 sin-p1-term] f32.add [sin-p1.])
+    ([.reduced squared] f32.mul [reduced-cubed.])
+    ([.reduced-cubed sin-p1] f32.mul [sin-tail.])
+    ([.reduced sin-tail] f32.add [sine-reduced.])
+
+    (const.u32.0x3D2AAAAB u32.bitcast-f32 [cos-c1.])
+    (const.u32.0xBAB60B61 u32.bitcast-f32 [cos-c2.])
+    (const.u32.0x37D00D01 u32.bitcast-f32 [cos-c3.])
+    (const.u32.0xB493F27C u32.bitcast-f32 [cos-c4.])
+    (const.u32.0x310F74F6 u32.bitcast-f32 [cos-c5.])
+    (const.u32.0xAD47D74E u32.bitcast-f32 [cos-c6.])
+    ([.squared cos-c6] f32.mul [cos-p5-term.])
+    ([.cos-c5 cos-p5-term] f32.add [cos-p5.])
+    ([.squared cos-p5] f32.mul [cos-p4-term.])
+    ([.cos-c4 cos-p4-term] f32.add [cos-p4.])
+    ([.squared cos-p4] f32.mul [cos-p3-term.])
+    ([.cos-c3 cos-p3-term] f32.add [cos-p3.])
+    ([.squared cos-p3] f32.mul [cos-p2-term.])
+    ([.cos-c2 cos-p2-term] f32.add [cos-p2.])
+    ([.squared cos-p2] f32.mul [cos-p1-term.])
+    ([.cos-c1 cos-p1-term] f32.add [cos-p1.])
+    ([.squared squared] f32.mul [fourth-power.])
+    ([.fourth-power cos-p1] f32.mul [cos-tail.])
+    (const.u32.0x3F000000 u32.bitcast-f32 [half.])
+    ([.squared half] f32.mul [half-squared.])
+    (f32.one [one.])
+    ([.one half-squared] f32.sub [cos-head.])
+    ([.cos-head cos-tail] f32.add [cosine-reduced.])
+
+    ([.sine-reduced] f32.neg [negative-sine.])
+    ([.cosine-reduced] f32.neg [negative-cosine.])
+    (const.u32.0x00000003 [quadrant-mask.])
+    (const.u32.0x00000000 [quadrant-0.])
+    (const.u32.0x00000001 [quadrant-1.])
+    (const.u32.0x00000002 [quadrant-2.])
+    ([.quadrant-count quadrant-mask] u32.and [quadrant.])
+    ([.quadrant quadrant-0] u32.eq [is-quadrant-0.])
+    ([.quadrant quadrant-1] u32.eq [is-quadrant-1.])
+    ([.quadrant quadrant-2] u32.eq [is-quadrant-2.])
+    ([.is-quadrant-2 negative-sine negative-cosine] f32.select [sine-q23.])
+    ([.is-quadrant-1 cosine-reduced sine-q23] f32.select [sine-q123.])
+    ([.is-quadrant-0 sine-reduced sine-q123] f32.select [sine.])
+    ([.is-quadrant-2 negative-cosine sine-reduced] f32.select [cosine-q23.])
+    ([.is-quadrant-1 negative-sine cosine-q23] f32.select [cosine-q123.])
+    ([.is-quadrant-0 cosine-reduced cosine-q123] f32.select [cosine.])
+    {[.sine] [.cosine]}
+  )
+)
+
+# Free the first owned buffer only after the second owned buffer exists, then
+# pass the second buffer through. Chaining this helper makes deallocation order
+# explicit in the dataflow graph instead of relying on source statement order.
+# The memory is cast to an owned typed buffer because only `buf.free` exists;
+# borrowed buffers and untyped memory have no deallocation operation.
+(def program qwen3.free-f32-before :
+  {(cap.own mem) (cap.own mem)}
+  ->
+  (cap.own mem)
+= ([memory continuation.]
+  ([.memory] mem.cast.f32 [_element-count owned-buffer.])
+  ([.owned-buffer] buf.free)
+  [.continuation]
+))
+
+# Free an owned BF16 buffer, returning an unrelated owned memory value.
+(def program qwen3.free-bf16-before :
+  {(cap.own mem) (cap.own mem)}
+  ->
+  (cap.own mem)
+= ([memory result.]
+  ([.memory] mem.cast.bf16 [_element-count owned-buffer.])
+  ([.owned-buffer] buf.free)
+  [.result]
+))
+
+(def program qwen3.free-u64-before :
+  {(cap.own mem) (cap.own mem)}
+  ->
+  (cap.own mem)
+= ([memory continuation.]
+  ([.memory] mem.cast.u64 [_element-count owned-buffer.])
+  ([.owned-buffer] buf.free)
+  [.continuation]
+))

@@ -5,8 +5,9 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-catena-lang = { git = "ssh://git@github.com/hellas-ai/exploratory-catena.git", rev = "c1c1f27416ed1861d9776f0cfe23954e016cccca", version = "0.1.0" }
+catena-lang = { git = "ssh://git@github.com/hellas-ai/exploratory-catena.git", rev = "7eaa5e46be9e337a21e89f6669ad3ed58e1ff736", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive"] }
+hf-hub = { version = "1.0.0", default-features = false, features = ["blocking", "rustls-tls"] }
 libc = "0.2"
 libloading = "0.9"
 memmap2 = "0.9"

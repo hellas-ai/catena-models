@@ -1,5 +1,126 @@
 # Language features added to achieve performance
 
+## Experimental Catena dependency delta
+
+This repository uses the local `../exploratory-catena/catena-lang` path
+dependency rather than the compiler at `origin/master`. Its current `master`
+is exactly five commits ahead of `origin/master`:
+
+| Commit | Compiler addition | Use in this repository |
+| --- | --- | --- |
+| `187d12e` | Raises the exact-reduction and softmax limits | Accommodates Qwen3.5/Qwen3.6 dimensions and longer attention rows without changing the specified reduction tree |
+| `135a19e` | Adds `materializec.borrow-gated-delta-net-f32` | Implements the recurrent gated DeltaNet layers in the F32 Qwen3.5 dense and Qwen3.6 MoE graphs |
+| `1a1229e` | Adds native-BF16 GEMV/argmax support and parameterizes reductions and softmax over F32/BF16 storage | Keeps dense Qwen activations, projections, attention probabilities, and logits in BF16 while accumulating sensitive arithmetic in F32 |
+| `90e3372` | Adds `materializec.borrow-gated-delta-net-bf16` | Runs the Qwen3.5/Qwen3.6 recurrent scan with BF16 persistent state and inputs but F32 register arithmetic |
+| `e9e0659` | Adds tiled cached-context kernels and native-BF16 routed-expert kernels | Speeds exact cached attention and removes F32 activation detours from Qwen3.6 sparse MoE gate/up/down projections |
+
+The additions are compiler operations, not opaque model-side foreign kernels:
+their Catena types preserve ownership of persistent buffers, validation checks
+the tensor capacities and layout parameters, and the GPU backend emits HIP or
+CUDA source for the selected storage type.
+
+## `materializec.bf16-gemv`
+
+Computes row-major BF16 matrix products with F32 accumulation and one final
+BF16 rounding. On AMD gfx11 it loads packed BF16 pairs and emits
+`v_dot2_f32_bf16`, accumulates per thread in registers, and reduces only 256
+partial F32 sums per output instead of materializing every product in shared
+memory. A scalar BF16/F32 fallback keeps other GPU targets compilable.
+
+Dense Qwen3 uses this primitive for Q/K/V, gate/up, attention-output, MLP-down,
+and vocabulary projections. On the local gfx1151 system, matched checkpoints
+measured:
+
+| Model | Test | F32 graph | Native BF16 | Change |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3-0.6B | pp512 | 94.70 tok/s | 154.40 tok/s | +63.0% |
+| Qwen3-0.6B | tg128 | 51.89 tok/s | 81.81 tok/s | +57.7% |
+| Qwen3-4B | pp512 | 11.81 tok/s | 24.01 tok/s | +103.3% |
+| Qwen3-4B | tg128 | 9.91 tok/s | 20.30 tok/s | +104.8% |
+
+## BF16-capable reductions and softmax
+
+`materializec.reduce-f32` and `materializec.borrow-reduce-f32` now retain their
+specified F32 term and adjacent-pair accumulation trees while allowing the
+epilogue and output buffer to be either F32 or BF16. The BF16 path therefore
+rounds only the final value rather than every partial sum. Likewise,
+`materializec.softmax-f32` accepts F32 or BF16 storage, widens BF16 values for
+the maximum, exponential, and denominator calculations, and writes the
+normalized row back in its original storage type.
+
+The same compiler delta raises the supported reduction length to 16,384 for
+`reduce-f32` and `borrow-reduce-f32`, the paired reduction limit to 8192, and
+the softmax row width to 16,384. These are capacity changes only: the logical
+tree and deterministic result are unchanged.
+
+## `Runtime::mem_bf16_zeroed`
+
+The runtime now allocates and zero-initializes an application-owned device
+buffer using two bytes per element. `Model::session` selects it for BF16
+inference when allocating the combined persistent attention and recurrent
+cache, rather than allocating an F32 cache or staging a host-side BF16 zero
+buffer.
+
+## `materializec.borrow-argmax-bf16`
+
+This is the native-storage counterpart of `borrow-argmax-f32`. It compares
+BF16 values directly using their total-order keys, returns the logits owner,
+and materializes only the selected U64 index. The BF16 entrypoint uses it so a
+151,936-element vocabulary projection neither widens to F32 nor transfers to
+the host merely to select the next token.
+
+## Fused gated DeltaNet scans
+
+`materializec.borrow-gated-delta-net-f32` runs the complete token scan for one
+layer in a single GPU kernel. It consumes and returns the persistent recurrent
+state together with Q, K, V, gate, and beta owners; the output is laid out like
+V. Each workgroup keeps a state row in registers across the token loop, uses
+warp/wave shuffles for prediction and output dot products, updates the state
+in place at a validated layer offset, and avoids materializing every recurrent
+step as a separate Catena operation.
+
+`materializec.borrow-gated-delta-net-bf16` shares that implementation through
+a storage-type parameter. BF16 inputs and recurrent state are widened on
+load, the state recurrence, exponentials, dot products, and scaling remain
+F32 in registers for the full scan, and only output and final-state stores are
+rounded to BF16. Qwen3.5 dense and Qwen3.6 MoE select the F32 or BF16 primitive
+according to the inference graph.
+
+## Tiled cached-attention context primitives
+
+`materializec.borrow-cached-context-f32` and
+`materializec.borrow-cached-context-bf16` implement the probability-times-V
+half of grouped-query cached attention. They understand the persistent cache
+layout `[layer, K-or-V, token, KV-head, channel]`, the probability layout
+`[query-position, query-head, key-position]`, and return both input owners with
+the new context buffer.
+
+The generated kernel uses a `32 x 8` block: 32 lanes read contiguous value
+channels while eight lanes partition the history dimension. Partial F32 sums
+use a fixed `8 x 32` shared-memory tile (1 KiB per block). This replaces the
+generic one-block-per-output-channel reduction, its strided V reads, and
+history-sized dynamic shared memory. The BF16 variant widens loads, accumulates
+in F32, and rounds once per output channel.
+
+This remains exact global attention and therefore still reads every prior V
+entry for every decoded token; the primitive removes avoidable layout and
+reduction overhead but does not change the linear per-token dependence on
+context length.
+
+## Native-BF16 routed expert primitives
+
+`materializec.borrow-routed-native-bf16-gemv-pair` computes sparse-expert gate
+and up projections together from BF16 activations and weights. Selected-expert
+lookup, row addressing, and packed BF16 pair loads are shared; each projection
+has an independent F32 accumulator and is rounded once to BF16.
+
+`materializec.borrow-routed-native-bf16-gemv-residual` performs the routed down
+projection from materialized BF16 expert activations, accumulates across all
+selected expert slots in F32, adds the BF16 residual in F32, and rounds the
+result once. Both operations return their owned activation, selected-expert,
+and residual buffers so the Qwen3.6 graph retains linear ownership without
+F32 conversion buffers.
+
 ## `materializec.into`
 
 Consumes an owned typed buffer, materializes into a bounds-checked contiguous
@@ -16,15 +137,16 @@ cloning it or allowing an alias to escape.
 
 Assigns one output to each GPU block and cooperatively reduces terms in shared
 memory. Its adjacent-pair F32 tree is exactly specified for bitwise
-determinism; a supplied epilogue consumes the sum. Qwen uses it for RMSNorm,
-dense projections, residual projections, and final vocabulary logits.
+determinism; a supplied F32- or BF16-valued epilogue consumes the sum. Qwen
+uses it for RMSNorm, fused projections, residual projections, and final
+vocabulary logits.
 
 ## `materializec.borrow-reduce-f32`
 
 Runs the same canonical cooperative reduction while scoping a read-only borrow
 of an owned source buffer. It returns the owner with the result and supports
-reductions through length 8192, covering Qwen's 6144-term MoE down projection
-and cache-length attention context.
+reductions through length 16,384, covering Qwen's wide projections without
+changing the canonical reduction order.
 
 ## `materializec.reduce-f32-pair`
 
@@ -54,10 +176,11 @@ faster per layer.
 
 ## `materializec.softmax-f32`
 
-Normalizes contiguous F32 rows in place. Each block performs specified maximum
-and denominator trees; masked negative infinities become zero without
-evaluating the supplied exponential. Attention probabilities therefore reuse
-the score allocation.
+Normalizes contiguous F32 or BF16 rows in place with F32 arithmetic. Each block
+performs specified maximum and denominator trees; masked negative infinities
+become zero without evaluating the supplied exponential. Attention
+probabilities therefore reuse the score allocation and retain the graph's
+storage precision.
 
 ## `materializec.borrow-argmax-f32`
 
@@ -72,10 +195,10 @@ tree. Borrowed reductions longer than 4096 terms use 512 threads; Qwen's
 2048-term paired expert projection remains at its measured optimum of 256.
 
 For tree levels with `stride >= 256`, the maximum supported reduction length
-leaves at most 16 active lanes. Those levels use explicit warp/wave barriers
+leaves at most 32 active lanes. Those levels use explicit warp/wave barriers
 instead of whole-block barriers, without changing any term, addition operand,
 logical index, or parenthesization. GPU tests compare every output bit with the
-canonical CPU tree at lengths 257, 2048, and 6144.
+canonical CPU tree at lengths 257, 2048, 6144, 8192, and 16,384.
 
 ## Stream-ordered GPU execution
 
@@ -132,8 +255,15 @@ standalone normalized or residual buffers where reuse is unnecessary.
 ## Staged cached attention
 
 Each QK score is materialized once, normalized in place, and reused across all
-value channels. Context accumulation cooperatively reduces the cache-length
-dimension rather than traversing history serially for every output channel.
+value channels. The dedicated cached-context primitive maps contiguous value
+channels across neighboring threads and partitions history across eight key
+lanes, then reduces the eight partial F32 sums in a fixed 1 KiB shared tile.
+
+In a controlled Qwen3-1.7B BF16 comparison on the same local GPU/runtime, this
+changed TG512 from 17.59 to 18.70 tok/s (+6.3%) and TG2048 from 13.99 to 15.37
+tok/s (+9.9%). Exact global attention still scales linearly with existing
+context for each decoded token, so the gain grows with context but does not
+remove the underlying slope.
 
 ## Materialized sparse-MoE activation
 
