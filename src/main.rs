@@ -7,7 +7,9 @@ use std::{
 
 use anyhow::{Result, ensure};
 use catena_qwen3::{
-    catena::{InferencePrecision, generated_model_source_for_precision},
+    catena::{
+        InferenceOptions, InferencePrecision, MatrixCoreMode, generated_model_source_for_options,
+    },
     checkpoint::read_gguf_model_config,
     hfhub::download_gguf,
     model::Model,
@@ -69,6 +71,10 @@ struct Args {
     /// Use the native mixed-BF16 graph (Qwen3 dense and Qwen3.5/3.6 dense or MoE).
     #[arg(long)]
     bf16: bool,
+
+    /// Use HIP BF16 WMMA matrix cores for Qwen3 dense prefill (experimental).
+    #[arg(long, requires = "bf16")]
+    matrix_cores: bool,
 }
 
 fn main() -> Result<()> {
@@ -78,6 +84,11 @@ fn main() -> Result<()> {
     } else {
         InferencePrecision::F32
     };
+    let options = InferenceOptions::new(precision).with_matrix_cores(if args.matrix_cores {
+        MatrixCoreMode::Wmma
+    } else {
+        MatrixCoreMode::Disabled
+    });
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
@@ -96,10 +107,7 @@ fn main() -> Result<()> {
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("generated-qwen3.hex");
-        std::fs::write(
-            &path,
-            generated_model_source_for_precision(&config, precision)?,
-        )?;
+        std::fs::write(&path, generated_model_source_for_options(&config, options)?)?;
         println!("generated {}", path.display());
         return Ok(());
     }
@@ -109,7 +117,7 @@ fn main() -> Result<()> {
             "at least one of --pp or --tg must be non-zero"
         );
         let load_started = Instant::now();
-        let model = Model::load_gguf_with_precision(&selected_gguf, precision)?;
+        let model = Model::load_gguf_with_options(&selected_gguf, options)?;
         eprintln!(
             "loaded Catena runtime and weights in {:.2?}",
             load_started.elapsed()
@@ -137,7 +145,7 @@ fn main() -> Result<()> {
     );
 
     let load_started = Instant::now();
-    let model = Model::load_gguf_with_precision(&gguf_path, precision)?;
+    let model = Model::load_gguf_with_options(&gguf_path, options)?;
     let eos_token_id = model.config().eos_token_id;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
@@ -410,6 +418,14 @@ mod tests {
         ])
         .unwrap();
         assert!(args.bf16);
+    }
+
+    #[test]
+    fn matrix_cores_require_bf16() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--matrix-cores", "hello"]).is_err());
+        let args =
+            Args::try_parse_from(["catena-qwen3", "--bf16", "--matrix-cores", "hello"]).unwrap();
+        assert!(args.matrix_cores);
     }
 
     #[test]

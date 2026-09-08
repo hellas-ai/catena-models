@@ -24,6 +24,33 @@ pub enum InferencePrecision {
     Bf16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatrixCoreMode {
+    #[default]
+    Disabled,
+    Wmma,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceOptions {
+    pub precision: InferencePrecision,
+    pub matrix_cores: MatrixCoreMode,
+}
+
+impl InferenceOptions {
+    pub const fn new(precision: InferencePrecision) -> Self {
+        Self {
+            precision,
+            matrix_cores: MatrixCoreMode::Disabled,
+        }
+    }
+
+    pub const fn with_matrix_cores(mut self, matrix_cores: MatrixCoreMode) -> Self {
+        self.matrix_cores = matrix_cores;
+        self
+    }
+}
+
 /// Catena stdlib, fixed helpers, and one generated model in compilation order.
 pub fn runtime_sources<'a>(
     model_source: &'a str,
@@ -564,6 +591,14 @@ pub fn generated_model_source_for_precision(
     config: &ModelConfig,
     precision: InferencePrecision,
 ) -> Result<String> {
+    generated_model_source_for_options(config, InferenceOptions::new(precision))
+}
+
+pub fn generated_model_source_for_options(
+    config: &ModelConfig,
+    options: InferenceOptions,
+) -> Result<String> {
+    let precision = options.precision;
     config.validate()?;
     ensure!(
         precision == InferencePrecision::F32
@@ -575,10 +610,19 @@ pub fn generated_model_source_for_precision(
             ),
         "BF16 inference currently supports Qwen3 dense and Qwen3.5/3.6 dense or MoE models"
     );
+    ensure!(
+        options.matrix_cores == MatrixCoreMode::Disabled
+            || (precision == InferencePrecision::Bf16
+                && config.architecture == ModelArchitecture::Qwen3Dense),
+        "WMMA inference currently supports only dense Qwen3 BF16 models"
+    );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
     }
     let mut source = render_model_template(config, precision)?;
+    if options.matrix_cores == MatrixCoreMode::Wmma {
+        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-wmma");
+    }
     source.push('\n');
     source.push_str(&generated_entrypoint(config, precision)?);
     Ok(retain_reachable_model_programs(&source))
@@ -736,6 +780,26 @@ mod tests {
             "persistent BF16 graph buffers cast as F32: {unexpected_f32_casts:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn dense_qwen3_bf16_wmma_replaces_only_dense_projection_primitives() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let model = generated_model_source_for_options(&config, options)?;
+        assert_eq!(model.matches("materializec.bf16-gemm-wmma").count(), 3);
+        assert!(!model.contains("materializec.bf16-gemv"));
+        Ok(())
+    }
+
+    #[test]
+    fn wmma_rejects_non_qwen3_dense_architectures() {
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let error =
+            generated_model_source_for_options(&ModelConfig::qwen35_0_8b(), options).unwrap_err();
+        assert!(error.to_string().contains("only dense Qwen3 BF16"));
     }
 
     #[test]
@@ -982,6 +1046,14 @@ mod tests {
                 GpuDialect::Hip,
             )?;
         }
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let model = generated_model_source_for_options(&ModelConfig::qwen3_0_6b(), options)?;
+        Runtime::from_sources(
+            runtime_sources(&model, InferencePrecision::Bf16),
+            GpuDialect::Hip,
+        )?;
+
         Ok(())
     }
 }

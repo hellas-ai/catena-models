@@ -38,6 +38,35 @@ measured:
 | Qwen3-4B | pp512 | 11.81 tok/s | 24.01 tok/s | +103.3% |
 | Qwen3-4B | tg128 | 9.91 tok/s | 20.30 tok/s | +104.8% |
 
+## Experimental Qwen3 BF16 matrix-core prefill
+
+`--bf16 --matrix-cores` makes dense Qwen3 generation select
+`materializec.bf16-gemm-wmma` for its dense projection programs. The typed API
+equivalent is `InferenceOptions::new(InferencePrecision::Bf16)` with
+`MatrixCoreMode::Wmma`. F32, Qwen3 MoE, and Qwen3.5/Qwen3.6 configurations are
+rejected; CUDA is intentionally not implemented in this iteration.
+
+On HIP gfx11, projections with at least 64 input rows use 16×16×16 rocWMMA
+BF16 matrix operations with F32 accumulators. Smaller inputs use the existing
+packed-dot SIMT kernel, so cached single-token decode is unchanged. The mode
+is opt-in because the matrix instruction has a different F32 accumulation
+order from the deterministic SIMT reduction.
+
+Matched three-run measurements on the local gfx1151 system and the cached
+Qwen3-0.6B BF16 checkpoint were:
+
+| Test | Default native BF16 | BF16 matrix cores | Change |
+| --- | ---: | ---: | ---: |
+| pp64 | 311.35 tok/s | 425.57 tok/s | +36.7% |
+| pp512 | 223.57 tok/s | 381.94 tok/s | +70.8% |
+| tg16 | 76.73 tok/s | 77.16 tok/s | +0.6% |
+
+A 112-token prompt produced the same next token in both modes while prompt
+processing improved from 312.03 to 524.81 tok/s. Compiler integration tests
+also execute a 64×16 identity product through the new primitive, and a
+standalone gfx1151 code-object check confirms emission of
+`v_wmma_f32_16x16x16_bf16`.
+
 ## BF16-capable reductions and softmax
 
 `materializec.reduce-f32` and `materializec.borrow-reduce-f32` now retain their
