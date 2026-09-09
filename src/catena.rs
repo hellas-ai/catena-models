@@ -29,6 +29,7 @@ pub enum MatrixCoreMode {
     #[default]
     Disabled,
     Wmma,
+    Hipblas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -614,7 +615,7 @@ pub fn generated_model_source_for_options(
         options.matrix_cores == MatrixCoreMode::Disabled
             || (precision == InferencePrecision::Bf16
                 && config.architecture == ModelArchitecture::Qwen3Dense),
-        "WMMA inference currently supports only dense Qwen3 BF16 models"
+        "accelerated BF16 GEMM currently supports only dense Qwen3 BF16 models"
     );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
@@ -622,6 +623,8 @@ pub fn generated_model_source_for_options(
     let mut source = render_model_template(config, precision)?;
     if options.matrix_cores == MatrixCoreMode::Wmma {
         source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-wmma");
+    } else if options.matrix_cores == MatrixCoreMode::Hipblas {
+        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-hipblas");
     }
     source.push('\n');
     source.push_str(&generated_entrypoint(config, precision)?);
@@ -794,9 +797,30 @@ mod tests {
     }
 
     #[test]
+    fn dense_qwen3_bf16_hipblas_replaces_only_dense_projection_primitives() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let options = InferenceOptions::new(InferencePrecision::Bf16)
+            .with_matrix_cores(MatrixCoreMode::Hipblas);
+        let model = generated_model_source_for_options(&config, options)?;
+        assert_eq!(model.matches("materializec.bf16-gemm-hipblas").count(), 3);
+        assert!(!model.contains("materializec.bf16-gemv"));
+        assert!(!model.contains("materializec.bf16-gemm-wmma"));
+        Ok(())
+    }
+
+    #[test]
     fn wmma_rejects_non_qwen3_dense_architectures() {
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let error =
+            generated_model_source_for_options(&ModelConfig::qwen35_0_8b(), options).unwrap_err();
+        assert!(error.to_string().contains("only dense Qwen3 BF16"));
+    }
+
+    #[test]
+    fn hipblas_rejects_non_qwen3_dense_architectures() {
+        let options = InferenceOptions::new(InferencePrecision::Bf16)
+            .with_matrix_cores(MatrixCoreMode::Hipblas);
         let error =
             generated_model_source_for_options(&ModelConfig::qwen35_0_8b(), options).unwrap_err();
         assert!(error.to_string().contains("only dense Qwen3 BF16"));

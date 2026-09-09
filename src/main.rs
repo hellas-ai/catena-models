@@ -75,6 +75,10 @@ struct Args {
     /// Use HIP BF16 WMMA matrix cores for Qwen3 dense prefill (experimental).
     #[arg(long, requires = "bf16")]
     matrix_cores: bool,
+
+    /// Use hipBLAS BF16 GEMM for Qwen3 dense prefill (experimental).
+    #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
+    hipblas: bool,
 }
 
 fn main() -> Result<()> {
@@ -84,11 +88,14 @@ fn main() -> Result<()> {
     } else {
         InferencePrecision::F32
     };
-    let options = InferenceOptions::new(precision).with_matrix_cores(if args.matrix_cores {
+    let matrix_cores = if args.matrix_cores {
         MatrixCoreMode::Wmma
+    } else if args.hipblas {
+        MatrixCoreMode::Hipblas
     } else {
         MatrixCoreMode::Disabled
-    });
+    };
+    let options = InferenceOptions::new(precision).with_matrix_cores(matrix_cores);
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
@@ -426,6 +433,23 @@ mod tests {
         let args =
             Args::try_parse_from(["catena-qwen3", "--bf16", "--matrix-cores", "hello"]).unwrap();
         assert!(args.matrix_cores);
+    }
+
+    #[test]
+    fn hipblas_requires_bf16_and_conflicts_with_matrix_cores() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--hipblas", "hello"]).is_err());
+        let args = Args::try_parse_from(["catena-qwen3", "--bf16", "--hipblas", "hello"]).unwrap();
+        assert!(args.hipblas);
+        assert!(
+            Args::try_parse_from([
+                "catena-qwen3",
+                "--bf16",
+                "--matrix-cores",
+                "--hipblas",
+                "hello"
+            ])
+            .is_err()
+        );
     }
 
     #[test]
