@@ -72,11 +72,11 @@ struct Args {
     #[arg(long)]
     bf16: bool,
 
-    /// Use HIP BF16 WMMA matrix cores for Qwen3 dense prefill (experimental).
+    /// Use HIP BF16 WMMA matrix cores for supported Qwen prefill (experimental).
     #[arg(long, requires = "bf16")]
     matrix_cores: bool,
 
-    /// Use hipBLAS BF16 GEMM for Qwen3 dense prefill (experimental).
+    /// Use hipBLAS BF16 GEMM for supported Qwen prefill (experimental).
     #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
     hipblas: bool,
 }

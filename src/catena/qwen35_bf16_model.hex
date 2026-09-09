@@ -87,21 +87,20 @@
   ({[.context] [.gated-after-qg]} qwen3.free-bf16-before)
 ))
 
-# Paired shared-expert projection. Unlike the routed variant, these GGUF
-# matrices have no leading expert dimension and always select slot zero.
+# Paired dense shared-expert projection. These GGUF matrices have no leading
+# expert dimension; the primitive returns the normalized input owner.
 (def program qwen3.qwen35-shared-linear-pair :
-  {(cap.own mem) (cap.ref mem) (cap.ref mem) (cap.own mem)}
+  {(cap.own mem) (cap.ref mem) (cap.ref mem)}
   ->
-  {(cap.own mem) (cap.own mem) (cap.own mem) (cap.own mem)}
-= ([input gate-weight up-weight selected-experts.]
+  {(cap.own mem) (cap.own mem) (cap.own mem)}
+= ([input gate-weight up-weight.]
   ([.input] mem.cast.bf16 [input-count input-buffer.])
   ([.gate-weight] mem.cast.bf16 [gate-count gate-buffer.])
   ([.up-weight] mem.cast.bf16 [up-count up-buffer.])
-  ([.selected-experts] mem.cast.u64 [selected-count selected-buffer.])
   ([.input-count] :.forget [input-count-value.])
   (const.u64.0x{{HIDDEN_SIZE}} [hidden-size-value.])
   (const.u64.0x{{SHARED_INTERMEDIATE_SIZE}} [shared-size.])
-  (const.u64.0x0000000000000001 [one.])
+  (const.u64.0x0000000000000000 [zero.])
   ([.input-count-value hidden-size-value] u64.div [row-count.])
   ([.row-count shared-size] u64.mul [output-count-value.])
   ([.output-count-value] u64.name [output-count.])
@@ -110,13 +109,11 @@
     [.input-buffer] [.input-count]
     [.gate-buffer] [.gate-count]
     [.up-buffer] [.up-count]
-    [.selected-buffer] [.selected-count]
-    [.output-count] [.hidden-size] [.one] [.shared-size]
-  } materializec.borrow-routed-native-bf16-gemv-pair
-    [input-after selected-after gate up.]
+    [.output-count] [.hidden-size] [.zero] [.shared-size]
+  } materializec.borrow-native-bf16-gemv-pair
+    [input-after gate up.]
   {
     ({[.input-count] [.input-after]} buf.to-mem)
-    ({[.selected-count] [.selected-after]} buf.to-mem)
     ({[.output-count] [.gate]} buf.to-mem)
     ({[.output-count] [.up]} buf.to-mem)
   }
@@ -433,10 +430,9 @@
   (const.u64.0x0000000000000001 [one.])
   ({[.normalized-after-expert] [.shared-router-weight] [.one]}
     qwen3.qwen35-router-linear [shared-router.])
-  ([.sequence] qwen3.dense-selected-experts [shared-selected.])
-  ({[.normalized-after-expert] [.shared-gate-weight] [.shared-up-weight] [.shared-selected]}
+  ({[.normalized-after-expert] [.shared-gate-weight] [.shared-up-weight]}
     qwen3.qwen35-shared-linear-pair
-    [normalized-after-shared shared-selected-after shared-gate shared-up.])
+    [normalized-after-shared shared-gate shared-up.])
   ({[.shared-gate] [.shared-up]} qwen3.dense-activate [shared-activated.])
   ({[.shared-activated] [.shared-router]} qwen3.qwen35-shared-scale [shared-scaled.])
   (const.u64.0x{{SHARED_INTERMEDIATE_SIZE}} [shared-features.])
@@ -452,9 +448,8 @@
   ({[.routed-output] [.output-07]} qwen3.free-bf16-before [output-08.])
   ({[.shared-gate] [.output-08]} qwen3.free-bf16-before [output-09.])
   ({[.shared-up] [.output-09]} qwen3.free-bf16-before [output-10.])
-  ({[.shared-selected-after] [.output-10]} qwen3.free-u64-before [output-11.])
-  ({[.shared-scaled] [.output-11]} qwen3.free-bf16-before [output-12.])
-  ({[.residual-after-down] [.output-12]} qwen3.free-bf16-before)
+  ({[.shared-scaled] [.output-10]} qwen3.free-bf16-before [output-11.])
+  ({[.residual-after-down] [.output-11]} qwen3.free-bf16-before)
 ))
 
 (def program qwen3.qwen35-full-decoder-layer :
