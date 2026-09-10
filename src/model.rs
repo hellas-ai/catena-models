@@ -7,7 +7,9 @@ use catena_lang::{
 };
 
 use crate::{
-    catena::{InferencePrecision, generated_model_source_for_precision, runtime_sources},
+    catena::{
+        InferenceOptions, InferencePrecision, generated_model_source_for_options, runtime_sources,
+    },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
@@ -36,6 +38,14 @@ impl Model {
         gguf_path: impl AsRef<Path>,
         precision: InferencePrecision,
     ) -> Result<Self> {
+        Self::load_gguf_with_options(gguf_path, InferenceOptions::new(precision))
+    }
+
+    pub fn load_gguf_with_options(
+        gguf_path: impl AsRef<Path>,
+        options: InferenceOptions,
+    ) -> Result<Self> {
+        let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
         let specs = weight_specs(&config)?;
@@ -48,7 +58,7 @@ impl Model {
                 total.checked_add(spec.element_count())
             })
             .context("model parameter count overflowed")?;
-        let model_source = generated_model_source_for_precision(&config, precision)?;
+        let model_source = generated_model_source_for_options(&config, options)?;
         let runtime =
             Runtime::from_sources(runtime_sources(&model_source, precision), GpuDialect::Hip)
                 .context("failed to compile the Qwen3 Catena GPU program")?;

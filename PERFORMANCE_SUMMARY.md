@@ -38,6 +38,44 @@ measured:
 | Qwen3-4B | pp512 | 11.81 tok/s | 24.01 tok/s | +103.3% |
 | Qwen3-4B | tg128 | 9.91 tok/s | 20.30 tok/s | +104.8% |
 
+## Experimental BF16 accelerated prefill
+
+`--bf16 --matrix-cores` selects `materializec.bf16-gemm-wmma` for ordinary
+dense projections in Qwen3 dense, Qwen3.5 dense, and Qwen3.5/3.6 MoE graphs.
+`--bf16 --hipblas` selects the matching `materializec.bf16-gemm-hipblas`
+backend. The typed API uses
+`InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(...)` with
+`MatrixCoreMode::Wmma` or `MatrixCoreMode::Hipblas`. F32 and the older Qwen3
+MoE graph are rejected; CUDA is intentionally not implemented in this
+iteration.
+
+On HIP gfx11, WMMA projections with at least 64 input rows use 16×16×16
+rocWMMA BF16 matrix operations with F32 accumulators. The hipBLAS mode instead
+uses `hipblasGemmEx` with BF16 input/output and F32 accumulation. Smaller
+inputs use the packed-dot SIMT kernel in either mode, so cached single-token
+decode is unchanged. Both modes are opt-in because accelerated GEMM does not
+retain the deterministic SIMT reduction order.
+
+For Qwen3.5/3.6 MoE, the large dense shared-expert gate/up pair uses matching
+paired WMMA or hipBLAS projections. Dynamically routed expert gate/up/down
+operations remain on their native-BF16 SIMT kernels, and the narrow F32 router
+and shared-router projections remain unchanged.
+
+Matched three-run measurements on the local gfx1151 system and the cached
+Qwen3-0.6B BF16 checkpoint were:
+
+| Test | Default native BF16 | BF16 matrix cores | Change |
+| --- | ---: | ---: | ---: |
+| pp64 | 311.35 tok/s | 425.57 tok/s | +36.7% |
+| pp512 | 223.57 tok/s | 381.94 tok/s | +70.8% |
+| tg16 | 76.73 tok/s | 77.16 tok/s | +0.6% |
+
+A 112-token prompt produced the same next token in both modes while prompt
+processing improved from 312.03 to 524.81 tok/s. Compiler integration tests
+execute single and paired 64×16 products through the SIMT, WMMA, and hipBLAS
+primitives. A standalone gfx1151 code-object check also confirms emission of
+`v_wmma_f32_16x16x16_bf16`.
+
 ## BF16-capable reductions and softmax
 
 `materializec.reduce-f32` and `materializec.borrow-reduce-f32` now retain their

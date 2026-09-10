@@ -24,6 +24,34 @@ pub enum InferencePrecision {
     Bf16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatrixCoreMode {
+    #[default]
+    Disabled,
+    Wmma,
+    Hipblas,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InferenceOptions {
+    pub precision: InferencePrecision,
+    pub matrix_cores: MatrixCoreMode,
+}
+
+impl InferenceOptions {
+    pub const fn new(precision: InferencePrecision) -> Self {
+        Self {
+            precision,
+            matrix_cores: MatrixCoreMode::Disabled,
+        }
+    }
+
+    pub const fn with_matrix_cores(mut self, matrix_cores: MatrixCoreMode) -> Self {
+        self.matrix_cores = matrix_cores;
+        self
+    }
+}
+
 /// Catena stdlib, fixed helpers, and one generated model in compilation order.
 pub fn runtime_sources<'a>(
     model_source: &'a str,
@@ -564,6 +592,14 @@ pub fn generated_model_source_for_precision(
     config: &ModelConfig,
     precision: InferencePrecision,
 ) -> Result<String> {
+    generated_model_source_for_options(config, InferenceOptions::new(precision))
+}
+
+pub fn generated_model_source_for_options(
+    config: &ModelConfig,
+    options: InferenceOptions,
+) -> Result<String> {
+    let precision = options.precision;
     config.validate()?;
     ensure!(
         precision == InferencePrecision::F32
@@ -575,10 +611,34 @@ pub fn generated_model_source_for_precision(
             ),
         "BF16 inference currently supports Qwen3 dense and Qwen3.5/3.6 dense or MoE models"
     );
+    ensure!(
+        options.matrix_cores == MatrixCoreMode::Disabled
+            || (precision == InferencePrecision::Bf16
+                && matches!(
+                    config.architecture,
+                    ModelArchitecture::Qwen3Dense
+                        | ModelArchitecture::Qwen35Dense
+                        | ModelArchitecture::Qwen35Moe
+                )),
+        "accelerated BF16 GEMM requires a BF16-supported Qwen3, Qwen3.5, or Qwen3.6 model"
+    );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
     }
     let mut source = render_model_template(config, precision)?;
+    if options.matrix_cores == MatrixCoreMode::Wmma {
+        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-wmma");
+        source = source.replace(
+            "materializec.borrow-native-bf16-gemv-pair",
+            "materializec.borrow-native-bf16-gemm-wmma-pair",
+        );
+    } else if options.matrix_cores == MatrixCoreMode::Hipblas {
+        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-hipblas");
+        source = source.replace(
+            "materializec.borrow-native-bf16-gemv-pair",
+            "materializec.borrow-native-bf16-gemm-hipblas-pair",
+        );
+    }
     source.push('\n');
     source.push_str(&generated_entrypoint(config, precision)?);
     Ok(retain_reachable_model_programs(&source))
@@ -735,6 +795,74 @@ mod tests {
             unexpected_f32_casts.is_empty(),
             "persistent BF16 graph buffers cast as F32: {unexpected_f32_casts:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dense_qwen3_bf16_wmma_replaces_only_dense_projection_primitives() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let model = generated_model_source_for_options(&config, options)?;
+        assert_eq!(model.matches("materializec.bf16-gemm-wmma").count(), 3);
+        assert!(!model.contains("materializec.bf16-gemv"));
+        Ok(())
+    }
+
+    #[test]
+    fn dense_qwen3_bf16_hipblas_replaces_only_dense_projection_primitives() -> Result<()> {
+        let config = ModelConfig::qwen3_0_6b();
+        let options = InferenceOptions::new(InferencePrecision::Bf16)
+            .with_matrix_cores(MatrixCoreMode::Hipblas);
+        let model = generated_model_source_for_options(&config, options)?;
+        assert_eq!(model.matches("materializec.bf16-gemm-hipblas").count(), 3);
+        assert!(!model.contains("materializec.bf16-gemv"));
+        assert!(!model.contains("materializec.bf16-gemm-wmma"));
+        Ok(())
+    }
+
+    #[test]
+    fn dense_qwen35_bf16_supports_accelerated_backends() -> Result<()> {
+        let config = ModelConfig::qwen35_0_8b();
+        for (mode, primitive) in [
+            (MatrixCoreMode::Wmma, "materializec.bf16-gemm-wmma"),
+            (MatrixCoreMode::Hipblas, "materializec.bf16-gemm-hipblas"),
+        ] {
+            let options = InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(mode);
+            let model = generated_model_source_for_options(&config, options)?;
+            assert_eq!(model.matches(primitive).count(), 3);
+            assert!(!model.contains("materializec.bf16-gemv"));
+            assert!(model.contains("materializec.borrow-gated-delta-net-bf16"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn qwen36_moe_bf16_accelerates_dense_and_shared_expert_only() -> Result<()> {
+        let config = ModelConfig::qwen36_35b_a3b();
+        for (mode, primitive, pair_primitive) in [
+            (
+                MatrixCoreMode::Wmma,
+                "materializec.bf16-gemm-wmma",
+                "materializec.borrow-native-bf16-gemm-wmma-pair",
+            ),
+            (
+                MatrixCoreMode::Hipblas,
+                "materializec.bf16-gemm-hipblas",
+                "materializec.borrow-native-bf16-gemm-hipblas-pair",
+            ),
+        ] {
+            let options = InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(mode);
+            let model = generated_model_source_for_options(&config, options)?;
+            assert_eq!(model.matches(primitive).count(), 3);
+            assert_eq!(model.matches(pair_primitive).count(), 1);
+            assert!(!model.contains("materializec.bf16-gemv"));
+            assert!(!model.contains("materializec.borrow-native-bf16-gemv-pair"));
+            assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-pair"));
+            assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-residual"));
+            assert!(model.contains("qwen3.qwen35-router-linear"));
+            assert!(model.contains("[.linear-weight] mem.cast.f32"));
+        }
         Ok(())
     }
 
@@ -982,6 +1110,14 @@ mod tests {
                 GpuDialect::Hip,
             )?;
         }
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let model = generated_model_source_for_options(&ModelConfig::qwen3_0_6b(), options)?;
+        Runtime::from_sources(
+            runtime_sources(&model, InferencePrecision::Bf16),
+            GpuDialect::Hip,
+        )?;
+
         Ok(())
     }
 }
