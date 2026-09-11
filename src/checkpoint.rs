@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{codegen::GpuDialect, runtime::MemRef};
 use libloading::{Library, Symbol};
-use memmap2::{Mmap, MmapOptions};
+use memmap2::{MmapMut, MmapOptions};
 
 use crate::spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype, weight_specs};
 
@@ -21,13 +21,16 @@ const HOST_REGISTER_MAPPED: c_uint = 0x2;
 // AMD-specific: immutable weights need only kernel-boundary coherence and can
 // use the cache-friendly coarse-grained mapping.
 const HIP_EXT_HOST_REGISTER_COARSE_GRAINED: c_uint = 0x8;
-// CUDA should expose the read-only GGUF mapping to the device as read-only.
-const CUDA_HOST_REGISTER_READ_ONLY: c_uint = 0x8;
 
 type HostRegister = unsafe extern "C" fn(*mut c_void, usize, c_uint) -> c_int;
 type HostGetDevicePointer = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, c_uint) -> c_int;
 type HostUnregister = unsafe extern "C" fn(*mut c_void) -> c_int;
+type DeviceMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
+type DeviceMemcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
+type DeviceFree = unsafe extern "C" fn(*mut c_void) -> c_int;
 type GetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+
+const CUDA_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GgufDtype {
@@ -75,7 +78,7 @@ pub(crate) struct GgufTokenizerMetadata {
 
 struct GgufFile {
     path: PathBuf,
-    bytes: Mmap,
+    bytes: MmapMut,
     data_start: usize,
     tensors: HashMap<String, TensorInfo>,
 }
@@ -88,16 +91,37 @@ pub struct TensorView {
     pub(crate) byte_len: usize,
 }
 
-/// Read-only GGUF mappings registered directly in the GPU address space.
+/// Immutable GGUF data available in the GPU address space.
 pub struct Checkpoint {
-    files: Vec<RegisteredGgufFile>,
+    files: Vec<GpuGgufFile>,
     tensor_files: HashMap<String, usize>,
 }
 
-/// A registration must be dropped before its backing mapping.
-struct RegisteredGgufFile {
-    registration: GpuRegistration,
+/// GPU storage must be dropped before its backing mapping.
+struct GpuGgufFile {
+    storage: GpuStorage,
     file: GgufFile,
+}
+
+enum GpuStorage {
+    HostMapped(GpuRegistration),
+    CudaDevice(CudaDeviceCopy),
+}
+
+impl GpuStorage {
+    fn device_base(&self) -> NonNull<c_void> {
+        match self {
+            Self::HostMapped(registration) => registration.device_base,
+            Self::CudaDevice(copy) => copy.device_base,
+        }
+    }
+
+    fn dialect(&self) -> GpuDialect {
+        match self {
+            Self::HostMapped(registration) => registration.dialect,
+            Self::CudaDevice(_) => GpuDialect::Cuda,
+        }
+    }
 }
 
 impl Checkpoint {
@@ -119,21 +143,32 @@ impl Checkpoint {
             .map(GgufFile::open)
             .collect::<Result<Vec<_>>>()?;
         let tensor_files = validate_files(&files, &specs, config)?;
-        let registered_files = files
+        let gpu_files = files
             .into_iter()
             .map(|file| {
-                let registration =
-                    GpuRegistration::new(&file.bytes, dialect).with_context(|| {
-                        format!(
-                            "failed to register GGUF {} with {dialect:?}",
-                            file.path.display()
-                        )
-                    })?;
-                Ok(RegisteredGgufFile { registration, file })
+                let storage = match dialect {
+                    GpuDialect::Hip => GpuRegistration::new(&file.bytes, dialect)
+                        .map(GpuStorage::HostMapped)
+                        .with_context(|| {
+                            format!(
+                                "failed to register GGUF {} with {dialect:?}",
+                                file.path.display()
+                            )
+                        })?,
+                    GpuDialect::Cuda => CudaDeviceCopy::new(&file.bytes)
+                        .map(GpuStorage::CudaDevice)
+                        .with_context(|| {
+                            format!(
+                                "failed to copy GGUF {} to CUDA device memory",
+                                file.path.display()
+                            )
+                        })?,
+                };
+                Ok(GpuGgufFile { storage, file })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            files: registered_files,
+            files: gpu_files,
             tensor_files,
         })
     }
@@ -146,44 +181,43 @@ impl Checkpoint {
         self.files[file_index].file.tensor_view(spec, file_index)
     }
 
-    /// Borrow one registered GGUF payload range as GPU-visible memory.
-    pub fn mapped_ref<'a>(&'a self, view: &TensorView) -> Result<MemRef<'a>> {
+    /// Borrow one GGUF payload range as GPU-visible memory.
+    pub fn gpu_ref<'a>(&'a self, view: &TensorView) -> Result<MemRef<'a>> {
         let end = view
             .file_offset
             .checked_add(view.byte_len)
             .context("GGUF device view range overflowed")?;
-        let registered = self
+        let gpu_file = self
             .files
             .get(view.file_index)
             .context("GGUF device view refers to an unknown shard")?;
         ensure!(
-            end <= registered.file.bytes.len(),
+            end <= gpu_file.file.bytes.len(),
             "GGUF device view is out of bounds"
         );
-        // SAFETY: `registration` covers the entire live `Mmap`; the validated
-        // range lies inside it, and the returned borrow is tied to `self`.
+        // SAFETY: storage covers the entire GGUF file; the validated range lies
+        // inside it, and the returned borrow is tied to `self`.
         let data = unsafe {
-            registered
-                .registration
-                .device_base
+            gpu_file
+                .storage
+                .device_base()
                 .as_ptr()
                 .cast::<u8>()
                 .add(view.file_offset)
                 .cast::<c_void>()
         };
-        // SAFETY: the GPU registration makes this range device-visible and is
-        // held until `self` can no longer be borrowed.
+        // SAFETY: GPU storage remains live until `self` can no longer be borrowed.
         Ok(unsafe {
             MemRef::from_raw_parts(
                 data,
                 view.byte_len as u64,
-                registered.registration.dialect,
-                &registered.registration,
+                gpu_file.storage.dialect(),
+                &gpu_file.storage,
             )
         })
     }
 
-    pub fn registered_byte_len(&self) -> usize {
+    pub fn storage_byte_len(&self) -> usize {
         self.files.iter().map(|file| file.file.bytes.len()).sum()
     }
 
@@ -565,9 +599,10 @@ impl GgufFile {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)
             .with_context(|| format!("failed to open GGUF checkpoint {}", path.display()))?;
-        // SAFETY: this is a read-only mapping and the model file must remain
-        // immutable for the lifetime of the loaded model.
-        let bytes = unsafe { MmapOptions::new().map(&file) }
+        // SAFETY: this private mapping cannot write changes back to the GGUF.
+        // Its writable virtual-memory permission lets CUDA register it on
+        // devices which do not support cudaHostRegisterReadOnly.
+        let bytes = unsafe { MmapOptions::new().map_copy(&file) }
             .with_context(|| format!("failed to map GGUF checkpoint {}", path.display()))?;
         let (data_start, tensors) = parse_gguf(&bytes)
             .with_context(|| format!("failed to parse GGUF checkpoint {}", path.display()))?;
@@ -634,6 +669,71 @@ impl GgufFile {
     }
 }
 
+struct CudaDeviceCopy {
+    device_base: NonNull<c_void>,
+    free: DeviceFree,
+    error_string: GetErrorString,
+    _library: Library,
+}
+
+impl CudaDeviceCopy {
+    fn new(bytes: &[u8]) -> Result<Self> {
+        ensure!(!bytes.is_empty(), "cannot copy an empty GGUF mapping");
+        let library = load_gpu_library(GpuDialect::Cuda)?;
+        let malloc: DeviceMalloc = load_symbol(&library, b"cudaMalloc\0")?;
+        let memcpy: DeviceMemcpy = load_symbol(&library, b"cudaMemcpy\0")?;
+        let free: DeviceFree = load_symbol(&library, b"cudaFree\0")?;
+        let error_string: GetErrorString = load_symbol(&library, b"cudaGetErrorString\0")?;
+
+        let mut device_base = std::ptr::null_mut();
+        // SAFETY: `device_base` is a valid output pointer and `bytes.len()` is
+        // the allocation size subsequently used for the copy.
+        let status = unsafe { malloc(&mut device_base, bytes.len()) };
+        if status != 0 {
+            bail!("cudaMalloc failed: {}", gpu_error(error_string, status));
+        }
+        let device_base =
+            NonNull::new(device_base).context("cudaMalloc returned a null pointer")?;
+
+        // SAFETY: the destination is the allocation above, and the source is a
+        // live host slice of exactly the copied length.
+        let status = unsafe {
+            memcpy(
+                device_base.as_ptr(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                CUDA_MEMCPY_HOST_TO_DEVICE,
+            )
+        };
+        if status != 0 {
+            // SAFETY: this allocation was returned by cudaMalloc above.
+            unsafe { free(device_base.as_ptr()) };
+            bail!("cudaMemcpy failed: {}", gpu_error(error_string, status));
+        }
+
+        Ok(Self {
+            device_base,
+            free,
+            error_string,
+            _library: library,
+        })
+    }
+}
+
+impl Drop for CudaDeviceCopy {
+    fn drop(&mut self) {
+        // Runtime calls synchronize before returning, so the allocation is no
+        // longer in use when the model is dropped.
+        let status = unsafe { (self.free)(self.device_base.as_ptr()) };
+        if status != 0 {
+            eprintln!(
+                "warning: cudaFree failed while dropping GGUF device memory: {}",
+                gpu_error(self.error_string, status)
+            );
+        }
+    }
+}
+
 struct GpuRegistration {
     dialect: GpuDialect,
     host_base: NonNull<c_void>,
@@ -644,7 +744,7 @@ struct GpuRegistration {
 }
 
 impl GpuRegistration {
-    fn new(bytes: &Mmap, dialect: GpuDialect) -> Result<Self> {
+    fn new(bytes: &[u8], dialect: GpuDialect) -> Result<Self> {
         ensure!(!bytes.is_empty(), "cannot register an empty GGUF mapping");
         let library = load_gpu_library(dialect)?;
         let (register_symbol, get_pointer_symbol, unregister_symbol, error_symbol) = match dialect {
@@ -670,9 +770,9 @@ impl GpuRegistration {
         let flags = HOST_REGISTER_MAPPED
             | match dialect {
                 GpuDialect::Hip => HIP_EXT_HOST_REGISTER_COARSE_GRAINED,
-                GpuDialect::Cuda => CUDA_HOST_REGISTER_READ_ONLY,
+                GpuDialect::Cuda => 0,
             };
-        // SAFETY: the read-only mapping remains live in `Checkpoint` until it
+        // SAFETY: the private mapping remains live in `Checkpoint` until it
         // is unregistered, and the GPU runtime permits registering host memory.
         let status = unsafe { register(host_base.as_ptr(), bytes.len(), flags) };
         if status != 0 {
