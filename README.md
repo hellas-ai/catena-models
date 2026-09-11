@@ -1,9 +1,9 @@
 # Qwen3-30B-A3B-Base reference runners
 
 Local BF16 inference for the base (non-instruct) `Qwen3-30B-A3B-Base`
-checkpoint through Transformers, llama.cpp, and an exploratory Catena/HIP
+checkpoint through Transformers, llama.cpp, and an exploratory Catena GPU
 implementation. The Catena path executes all 48 layers, uses a persistent KV
-cache, and performs greedy generation directly from a HIP-registered BF16
+cache, and performs greedy generation directly from a GPU-registered BF16
 GGUF mapping.
 
 The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
@@ -104,9 +104,18 @@ nix develop --command cargo run --release -- \
   "The capital of France is" --max-new-tokens 20
 ```
 
+HIP is the default backend. Select CUDA for compilation, runtime allocation,
+and GGUF registration with `CATENA_GPU_DIALECT=cuda`, for example:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run --release -- \
+  --bf16 --blas --bench --pp 512 --tg 128
+```
+
 Catena validates and read-only-maps `model-bf16.gguf`, registers that single
-mapping with HIP, and passes every tensor subrange directly to the generated
-kernels in its native GGUF representation. The 338 large tensors remain BF16;
+mapping with the selected GPU runtime, and passes every tensor subrange
+directly to the generated kernels in its native GGUF representation. The 338
+large tensors remain BF16;
 the 241 norms/router tensors emitted by llama.cpp's converter remain F32. The
 loader validates this dtype contract and performs no weight repacking,
 conversion, upload, or per-tensor allocation. Measured warm loads reached

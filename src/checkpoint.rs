@@ -17,15 +17,17 @@ use crate::spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype, weigh
 const GGUF_MAGIC: u32 = 0x4655_4747;
 const GGUF_VERSION: u32 = 3;
 const DEFAULT_ALIGNMENT: usize = 32;
-const HIP_HOST_REGISTER_MAPPED: c_uint = 0x2;
+const HOST_REGISTER_MAPPED: c_uint = 0x2;
 // AMD-specific: immutable weights need only kernel-boundary coherence and can
 // use the cache-friendly coarse-grained mapping.
 const HIP_EXT_HOST_REGISTER_COARSE_GRAINED: c_uint = 0x8;
+// CUDA should expose the read-only GGUF mapping to the device as read-only.
+const CUDA_HOST_REGISTER_READ_ONLY: c_uint = 0x8;
 
-type HipHostRegister = unsafe extern "C" fn(*mut c_void, usize, c_uint) -> c_int;
-type HipHostGetDevicePointer = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, c_uint) -> c_int;
-type HipHostUnregister = unsafe extern "C" fn(*mut c_void) -> c_int;
-type HipGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+type HostRegister = unsafe extern "C" fn(*mut c_void, usize, c_uint) -> c_int;
+type HostGetDevicePointer = unsafe extern "C" fn(*mut *mut c_void, *mut c_void, c_uint) -> c_int;
+type HostUnregister = unsafe extern "C" fn(*mut c_void) -> c_int;
+type GetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GgufDtype {
@@ -86,7 +88,7 @@ pub struct TensorView {
     pub(crate) byte_len: usize,
 }
 
-/// Read-only GGUF mappings registered directly in the HIP address space.
+/// Read-only GGUF mappings registered directly in the GPU address space.
 pub struct Checkpoint {
     files: Vec<RegisteredGgufFile>,
     tensor_files: HashMap<String, usize>,
@@ -94,7 +96,7 @@ pub struct Checkpoint {
 
 /// A registration must be dropped before its backing mapping.
 struct RegisteredGgufFile {
-    registration: HipRegistration,
+    registration: GpuRegistration,
     file: GgufFile,
 }
 
@@ -102,6 +104,14 @@ impl Checkpoint {
     /// Open either one GGUF, any member of a standard GGUF shard set, or a
     /// directory containing GGUF shards.
     pub fn open(path: impl AsRef<Path>, config: &ModelConfig) -> Result<Self> {
+        Self::open_with_dialect(path, config, GpuDialect::Hip)
+    }
+
+    pub fn open_with_dialect(
+        path: impl AsRef<Path>,
+        config: &ModelConfig,
+        dialect: GpuDialect,
+    ) -> Result<Self> {
         let specs = weight_specs(config)?;
         let paths = resolve_gguf_paths(path.as_ref())?;
         let files = paths
@@ -112,9 +122,13 @@ impl Checkpoint {
         let registered_files = files
             .into_iter()
             .map(|file| {
-                let registration = HipRegistration::new(&file.bytes).with_context(|| {
-                    format!("failed to register GGUF {} with HIP", file.path.display())
-                })?;
+                let registration =
+                    GpuRegistration::new(&file.bytes, dialect).with_context(|| {
+                        format!(
+                            "failed to register GGUF {} with {dialect:?}",
+                            file.path.display()
+                        )
+                    })?;
                 Ok(RegisteredGgufFile { registration, file })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -132,7 +146,7 @@ impl Checkpoint {
         self.files[file_index].file.tensor_view(spec, file_index)
     }
 
-    /// Borrow one registered GGUF payload range as HIP-visible memory.
+    /// Borrow one registered GGUF payload range as GPU-visible memory.
     pub fn mapped_ref<'a>(&'a self, view: &TensorView) -> Result<MemRef<'a>> {
         let end = view
             .file_offset
@@ -157,13 +171,13 @@ impl Checkpoint {
                 .add(view.file_offset)
                 .cast::<c_void>()
         };
-        // SAFETY: the HIP registration makes this range device-visible and is
+        // SAFETY: the GPU registration makes this range device-visible and is
         // held until `self` can no longer be borrowed.
         Ok(unsafe {
             MemRef::from_raw_parts(
                 data,
                 view.byte_len as u64,
-                GpuDialect::Hip,
+                registered.registration.dialect,
                 &registered.registration,
             )
         })
@@ -620,33 +634,52 @@ impl GgufFile {
     }
 }
 
-struct HipRegistration {
+struct GpuRegistration {
+    dialect: GpuDialect,
     host_base: NonNull<c_void>,
     device_base: NonNull<c_void>,
-    unregister: HipHostUnregister,
-    error_string: HipGetErrorString,
+    unregister: HostUnregister,
+    error_string: GetErrorString,
     _library: Library,
 }
 
-impl HipRegistration {
-    fn new(bytes: &Mmap) -> Result<Self> {
+impl GpuRegistration {
+    fn new(bytes: &Mmap, dialect: GpuDialect) -> Result<Self> {
         ensure!(!bytes.is_empty(), "cannot register an empty GGUF mapping");
-        let library = load_hip_library()?;
-        let register: HipHostRegister = load_symbol(&library, b"hipHostRegister\0")?;
-        let get_device_pointer: HipHostGetDevicePointer =
-            load_symbol(&library, b"hipHostGetDevicePointer\0")?;
-        let unregister: HipHostUnregister = load_symbol(&library, b"hipHostUnregister\0")?;
-        let error_string: HipGetErrorString = load_symbol(&library, b"hipGetErrorString\0")?;
+        let library = load_gpu_library(dialect)?;
+        let (register_symbol, get_pointer_symbol, unregister_symbol, error_symbol) = match dialect {
+            GpuDialect::Hip => (
+                b"hipHostRegister\0".as_slice(),
+                b"hipHostGetDevicePointer\0".as_slice(),
+                b"hipHostUnregister\0".as_slice(),
+                b"hipGetErrorString\0".as_slice(),
+            ),
+            GpuDialect::Cuda => (
+                b"cudaHostRegister\0".as_slice(),
+                b"cudaHostGetDevicePointer\0".as_slice(),
+                b"cudaHostUnregister\0".as_slice(),
+                b"cudaGetErrorString\0".as_slice(),
+            ),
+        };
+        let register: HostRegister = load_symbol(&library, register_symbol)?;
+        let get_device_pointer: HostGetDevicePointer = load_symbol(&library, get_pointer_symbol)?;
+        let unregister: HostUnregister = load_symbol(&library, unregister_symbol)?;
+        let error_string: GetErrorString = load_symbol(&library, error_symbol)?;
         let host_base = NonNull::new(bytes.as_ptr().cast_mut().cast::<c_void>())
             .context("GGUF mmap returned a null pointer")?;
-        let flags = HIP_HOST_REGISTER_MAPPED | HIP_EXT_HOST_REGISTER_COARSE_GRAINED;
+        let flags = HOST_REGISTER_MAPPED
+            | match dialect {
+                GpuDialect::Hip => HIP_EXT_HOST_REGISTER_COARSE_GRAINED,
+                GpuDialect::Cuda => CUDA_HOST_REGISTER_READ_ONLY,
+            };
         // SAFETY: the read-only mapping remains live in `Checkpoint` until it
-        // is unregistered, and HIP permits registering existing host memory.
+        // is unregistered, and the GPU runtime permits registering host memory.
         let status = unsafe { register(host_base.as_ptr(), bytes.len(), flags) };
         if status != 0 {
             bail!(
-                "hipHostRegister failed: {}",
-                hip_error(error_string, status)
+                "{}HostRegister failed: {}",
+                gpu_runtime_prefix(dialect),
+                gpu_error(error_string, status)
             );
         }
 
@@ -657,17 +690,22 @@ impl HipRegistration {
             // SAFETY: registration succeeded and must be undone on this error path.
             unsafe { unregister(host_base.as_ptr()) };
             bail!(
-                "hipHostGetDevicePointer failed: {}",
-                hip_error(error_string, status)
+                "{}HostGetDevicePointer failed: {}",
+                gpu_runtime_prefix(dialect),
+                gpu_error(error_string, status)
             );
         }
         let Some(device_base) = NonNull::new(device_base) else {
             // SAFETY: registration succeeded and must be undone on this error path.
             unsafe { unregister(host_base.as_ptr()) };
-            bail!("hipHostGetDevicePointer returned a null pointer");
+            bail!(
+                "{}HostGetDevicePointer returned a null pointer",
+                gpu_runtime_prefix(dialect)
+            );
         };
 
         Ok(Self {
+            dialect,
             host_base,
             device_base,
             unregister,
@@ -677,61 +715,82 @@ impl HipRegistration {
     }
 }
 
-impl Drop for HipRegistration {
+impl Drop for GpuRegistration {
     fn drop(&mut self) {
         // All current Runtime calls synchronize before returning, so no kernel
         // may still be reading the mapping when the model is dropped.
         let status = unsafe { (self.unregister)(self.host_base.as_ptr()) };
         if status != 0 {
             eprintln!(
-                "warning: hipHostUnregister failed while dropping GGUF mapping: {}",
-                hip_error(self.error_string, status)
+                "warning: {}HostUnregister failed while dropping GGUF mapping: {}",
+                gpu_runtime_prefix(self.dialect),
+                gpu_error(self.error_string, status)
             );
         }
     }
 }
 
-fn load_hip_library() -> Result<Library> {
-    let mut paths = vec![PathBuf::from("libamdhip64.so")];
-    for variable in ["ROCM_PATH", "HIP_PATH"] {
+fn load_gpu_library(dialect: GpuDialect) -> Result<Library> {
+    let (library_name, variables, library_dirs): (&str, &[&str], &[&str]) = match dialect {
+        GpuDialect::Hip => ("libamdhip64.so", &["ROCM_PATH", "HIP_PATH"], &["lib"]),
+        GpuDialect::Cuda => (
+            "libcudart.so",
+            &["CUDA_PATH", "CUDA_HOME"],
+            &["lib64", "lib"],
+        ),
+    };
+    let mut paths = vec![PathBuf::from(library_name)];
+    for variable in variables {
         if let Some(root) = env::var_os(variable) {
-            let path = PathBuf::from(root).join("lib/libamdhip64.so");
-            if !paths.contains(&path) {
-                paths.push(path);
+            for directory in library_dirs {
+                let path = PathBuf::from(&root).join(directory).join(library_name);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
             }
         }
     }
 
     let mut errors = Vec::new();
     for path in &paths {
-        // SAFETY: this is the official HIP runtime library, and every resolved
+        // SAFETY: this is the official GPU runtime library, and every resolved
         // symbol is invoked with its documented ABI below.
         match unsafe { Library::new(path) } {
             Ok(library) => return Ok(library),
             Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
     }
-    bail!("failed to load HIP runtime library ({})", errors.join(", "))
+    bail!(
+        "failed to load {dialect:?} runtime library ({})",
+        errors.join(", ")
+    )
+}
+
+fn gpu_runtime_prefix(dialect: GpuDialect) -> &'static str {
+    match dialect {
+        GpuDialect::Hip => "hip",
+        GpuDialect::Cuda => "cuda",
+    }
 }
 
 fn load_symbol<T: Copy>(library: &Library, symbol: &'static [u8]) -> Result<T> {
-    // SAFETY: callers request the exact documented HIP function signature.
+    // SAFETY: callers request the exact documented GPU function signature.
     let loaded: Symbol<'_, T> = unsafe { library.get(symbol) }.with_context(|| {
         format!(
-            "failed to resolve HIP symbol {}",
+            "failed to resolve GPU runtime symbol {}",
             String::from_utf8_lossy(symbol).trim_end_matches('\0')
         )
     })?;
     Ok(*loaded)
 }
 
-fn hip_error(error_string: HipGetErrorString, status: c_int) -> String {
-    // SAFETY: HIP returns a static NUL-terminated string for an error code.
+fn gpu_error(error_string: GetErrorString, status: c_int) -> String {
+    // SAFETY: GPU runtimes return a static NUL-terminated string for an error code.
     let pointer = unsafe { error_string(status) };
     if pointer.is_null() {
         format!("status {status}")
     } else {
-        // SAFETY: checked non-null and guaranteed NUL-terminated by HIP.
+        // SAFETY: checked non-null and guaranteed NUL-terminated by the runtime.
         format!(
             "{} (status {status})",
             unsafe { CStr::from_ptr(pointer) }.to_string_lossy()

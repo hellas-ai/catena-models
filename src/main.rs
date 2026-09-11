@@ -18,7 +18,7 @@ use catena_qwen3::{
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(about = "Greedy BF16 text generation with dense or MoE Qwen3 on Catena/HIP")]
+#[command(about = "Greedy BF16 text generation with dense or MoE Qwen3 on Catena GPU")]
 struct Args {
     /// Text prefix to continue.
     #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
