@@ -10,7 +10,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{codegen::GpuDialect, runtime::MemRef};
 use libloading::{Library, Symbol};
-use memmap2::{MmapMut, MmapOptions};
+use memmap2::{Mmap, MmapOptions};
 
 use crate::spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype, weight_specs};
 
@@ -78,7 +78,7 @@ pub(crate) struct GgufTokenizerMetadata {
 
 struct GgufFile {
     path: PathBuf,
-    bytes: MmapMut,
+    bytes: Mmap,
     data_start: usize,
     tensors: HashMap<String, TensorInfo>,
 }
@@ -599,10 +599,9 @@ impl GgufFile {
         let path = path.as_ref().to_path_buf();
         let file = File::open(&path)
             .with_context(|| format!("failed to open GGUF checkpoint {}", path.display()))?;
-        // SAFETY: this private mapping cannot write changes back to the GGUF.
-        // Its writable virtual-memory permission lets CUDA register it on
-        // devices which do not support cudaHostRegisterReadOnly.
-        let bytes = unsafe { MmapOptions::new().map_copy(&file) }
+        // SAFETY: this is a read-only mapping and the model file must remain
+        // immutable for the lifetime of the loaded model.
+        let bytes = unsafe { MmapOptions::new().map(&file) }
             .with_context(|| format!("failed to map GGUF checkpoint {}", path.display()))?;
         let (data_start, tensors) = parse_gguf(&bytes)
             .with_context(|| format!("failed to parse GGUF checkpoint {}", path.display()))?;
