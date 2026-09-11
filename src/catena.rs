@@ -29,7 +29,7 @@ pub enum MatrixCoreMode {
     #[default]
     Disabled,
     Wmma,
-    Hipblas,
+    Blas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -632,11 +632,11 @@ pub fn generated_model_source_for_options(
             "materializec.borrow-native-bf16-gemv-pair",
             "materializec.borrow-native-bf16-gemm-wmma-pair",
         );
-    } else if options.matrix_cores == MatrixCoreMode::Hipblas {
-        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-hipblas");
+    } else if options.matrix_cores == MatrixCoreMode::Blas {
+        source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-blas");
         source = source.replace(
             "materializec.borrow-native-bf16-gemv-pair",
-            "materializec.borrow-native-bf16-gemm-hipblas-pair",
+            "materializec.borrow-native-bf16-gemm-blas-pair",
         );
     }
     source.push('\n');
@@ -810,12 +810,12 @@ mod tests {
     }
 
     #[test]
-    fn dense_qwen3_bf16_hipblas_replaces_only_dense_projection_primitives() -> Result<()> {
+    fn dense_qwen3_bf16_blas_replaces_only_dense_projection_primitives() -> Result<()> {
         let config = ModelConfig::qwen3_0_6b();
-        let options = InferenceOptions::new(InferencePrecision::Bf16)
-            .with_matrix_cores(MatrixCoreMode::Hipblas);
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Blas);
         let model = generated_model_source_for_options(&config, options)?;
-        assert_eq!(model.matches("materializec.bf16-gemm-hipblas").count(), 3);
+        assert_eq!(model.matches("materializec.bf16-gemm-blas").count(), 3);
         assert!(!model.contains("materializec.bf16-gemv"));
         assert!(!model.contains("materializec.bf16-gemm-wmma"));
         Ok(())
@@ -826,7 +826,7 @@ mod tests {
         let config = ModelConfig::qwen35_0_8b();
         for (mode, primitive) in [
             (MatrixCoreMode::Wmma, "materializec.bf16-gemm-wmma"),
-            (MatrixCoreMode::Hipblas, "materializec.bf16-gemm-hipblas"),
+            (MatrixCoreMode::Blas, "materializec.bf16-gemm-blas"),
         ] {
             let options = InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(mode);
             let model = generated_model_source_for_options(&config, options)?;
@@ -847,9 +847,9 @@ mod tests {
                 "materializec.borrow-native-bf16-gemm-wmma-pair",
             ),
             (
-                MatrixCoreMode::Hipblas,
-                "materializec.bf16-gemm-hipblas",
-                "materializec.borrow-native-bf16-gemm-hipblas-pair",
+                MatrixCoreMode::Blas,
+                "materializec.bf16-gemm-blas",
+                "materializec.borrow-native-bf16-gemm-blas-pair",
             ),
         ] {
             let options = InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(mode);
