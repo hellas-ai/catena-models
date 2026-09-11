@@ -1,4 +1,4 @@
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, env, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
@@ -45,6 +45,14 @@ impl Model {
         gguf_path: impl AsRef<Path>,
         options: InferenceOptions,
     ) -> Result<Self> {
+        Self::load_gguf_with_options_and_dialect(gguf_path, options, configured_gpu_dialect()?)
+    }
+
+    pub fn load_gguf_with_options_and_dialect(
+        gguf_path: impl AsRef<Path>,
+        options: InferenceOptions,
+        dialect: GpuDialect,
+    ) -> Result<Self> {
         let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
@@ -59,10 +67,9 @@ impl Model {
             })
             .context("model parameter count overflowed")?;
         let model_source = generated_model_source_for_options(&config, options)?;
-        let runtime =
-            Runtime::from_sources(runtime_sources(&model_source, precision), GpuDialect::Hip)
-                .context("failed to compile the Qwen3 Catena GPU program")?;
-        let checkpoint = Checkpoint::open(gguf_path, &config)?;
+        let runtime = Runtime::from_sources(runtime_sources(&model_source, precision), dialect)
+            .context("failed to compile the Qwen3 Catena GPU program")?;
+        let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
         let mut mapped_f32_bytes = 0_usize;
@@ -242,6 +249,20 @@ impl Model {
             self.weights.len()
         );
         Ok(())
+    }
+}
+
+fn configured_gpu_dialect() -> Result<GpuDialect> {
+    const ENVIRONMENT_VARIABLE: &str = "CATENA_GPU_DIALECT";
+    match env::var(ENVIRONMENT_VARIABLE).as_deref() {
+        Ok("hip") | Err(env::VarError::NotPresent) => Ok(GpuDialect::Hip),
+        Ok("cuda") => Ok(GpuDialect::Cuda),
+        Ok(value) => anyhow::bail!(
+            "invalid GPU dialect `{value}` in {ENVIRONMENT_VARIABLE}; expected `hip` or `cuda`"
+        ),
+        Err(env::VarError::NotUnicode(value)) => anyhow::bail!(
+            "invalid GPU dialect in {ENVIRONMENT_VARIABLE}: non-Unicode value {value:?}"
+        ),
     }
 }
 
