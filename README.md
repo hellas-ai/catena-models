@@ -156,14 +156,14 @@ nix develop --command cargo run --release -- \
   --bench --pp 512 --tg 128 --bench-runs 5
 ```
 
-For prefill experiments, add `--matrix-cores` or `--hipblas` alongside
+For prefill experiments, add `--matrix-cores` or `--blas` alongside
 `--bf16`. Both modes accelerate ordinary dense projections for Qwen3 dense,
 Qwen3.5 dense, and Qwen3.5/3.6 MoE. In MoE models they also accelerate the
 large shared-expert gate/up pair; dynamically routed experts and the narrow
 F32 routers retain their native SIMT paths. Projections below 64 input rows
-fall back to packed-BF16 SIMT, leaving token-at-a-time decode unchanged. These
-backends are currently HIP-only, and `--matrix-cores` and `--hipblas` are
-mutually exclusive.
+fall back to packed-BF16 SIMT, leaving token-at-a-time decode unchanged. The
+BLAS mode uses hipBLAS on HIP and cuBLAS on CUDA. `--matrix-cores` and
+`--blas` are mutually exclusive.
 
 The BF16 graph currently rejects the older Qwen3 MoE architecture, which
 continues to use the existing F32-activation graph.

@@ -72,13 +72,13 @@ struct Args {
     #[arg(long)]
     bf16: bool,
 
-    /// Use HIP BF16 WMMA matrix cores for supported Qwen prefill (experimental).
+    /// Use BF16 WMMA matrix cores for supported Qwen prefill (experimental).
     #[arg(long, requires = "bf16")]
     matrix_cores: bool,
 
-    /// Use hipBLAS BF16 GEMM for supported Qwen prefill (experimental).
+    /// Use the platform BLAS library for BF16 GEMM during supported Qwen prefill.
     #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
-    hipblas: bool,
+    blas: bool,
 }
 
 fn main() -> Result<()> {
@@ -90,8 +90,8 @@ fn main() -> Result<()> {
     };
     let matrix_cores = if args.matrix_cores {
         MatrixCoreMode::Wmma
-    } else if args.hipblas {
-        MatrixCoreMode::Hipblas
+    } else if args.blas {
+        MatrixCoreMode::Blas
     } else {
         MatrixCoreMode::Disabled
     };
@@ -436,16 +436,16 @@ mod tests {
     }
 
     #[test]
-    fn hipblas_requires_bf16_and_conflicts_with_matrix_cores() {
-        assert!(Args::try_parse_from(["catena-qwen3", "--hipblas", "hello"]).is_err());
-        let args = Args::try_parse_from(["catena-qwen3", "--bf16", "--hipblas", "hello"]).unwrap();
-        assert!(args.hipblas);
+    fn blas_requires_bf16_and_conflicts_with_matrix_cores() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--blas", "hello"]).is_err());
+        let args = Args::try_parse_from(["catena-qwen3", "--bf16", "--blas", "hello"]).unwrap();
+        assert!(args.blas);
         assert!(
             Args::try_parse_from([
                 "catena-qwen3",
                 "--bf16",
                 "--matrix-cores",
-                "--hipblas",
+                "--blas",
                 "hello"
             ])
             .is_err()

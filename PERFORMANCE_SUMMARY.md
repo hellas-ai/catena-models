@@ -42,22 +42,22 @@ measured:
 
 `--bf16 --matrix-cores` selects `materializec.bf16-gemm-wmma` for ordinary
 dense projections in Qwen3 dense, Qwen3.5 dense, and Qwen3.5/3.6 MoE graphs.
-`--bf16 --hipblas` selects the matching `materializec.bf16-gemm-hipblas`
+`--bf16 --blas` selects the matching `materializec.bf16-gemm-blas`
 backend. The typed API uses
 `InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(...)` with
-`MatrixCoreMode::Wmma` or `MatrixCoreMode::Hipblas`. F32 and the older Qwen3
-MoE graph are rejected; CUDA is intentionally not implemented in this
-iteration.
+`MatrixCoreMode::Wmma` or `MatrixCoreMode::Blas`. F32 and the older Qwen3 MoE
+graph are rejected.
 
 On HIP gfx11, WMMA projections with at least 64 input rows use 16×16×16
-rocWMMA BF16 matrix operations with F32 accumulators. The hipBLAS mode instead
-uses `hipblasGemmEx` with BF16 input/output and F32 accumulation. Smaller
+rocWMMA BF16 matrix operations with F32 accumulators; CUDA uses
+`nvcuda::wmma`. The BLAS mode uses `hipblasGemmEx` on HIP and `cublasGemmEx`
+on CUDA, with BF16 input/output and F32 accumulation. Smaller
 inputs use the packed-dot SIMT kernel in either mode, so cached single-token
 decode is unchanged. Both modes are opt-in because accelerated GEMM does not
 retain the deterministic SIMT reduction order.
 
 For Qwen3.5/3.6 MoE, the large dense shared-expert gate/up pair uses matching
-paired WMMA or hipBLAS projections. Dynamically routed expert gate/up/down
+paired WMMA or BLAS projections. Dynamically routed expert gate/up/down
 operations remain on their native-BF16 SIMT kernels, and the narrow F32 router
 and shared-router projections remain unchanged.
 
@@ -72,7 +72,7 @@ Qwen3-0.6B BF16 checkpoint were:
 
 A 112-token prompt produced the same next token in both modes while prompt
 processing improved from 312.03 to 524.81 tok/s. Compiler integration tests
-execute single and paired 64×16 products through the SIMT, WMMA, and hipBLAS
+execute single and paired 64×16 products through the SIMT, WMMA, and BLAS
 primitives. A standalone gfx1151 code-object check also confirms emission of
 `v_wmma_f32_16x16x16_bf16`.
 
