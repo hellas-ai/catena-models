@@ -90,10 +90,14 @@ impl Model {
             weights.len() == weight_count,
             "internal model weight ABI mismatch"
         );
+        let weight_location = match dialect {
+            GpuDialect::Hip => "mapped zero-copy",
+            GpuDialect::Cuda => "copied to device memory",
+        };
         eprintln!(
-            "registered {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 mapped zero-copy in native storage",
+            "loaded {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 {weight_location} in native storage",
             checkpoint.file_count(),
-            checkpoint.registered_byte_len() as f64 / (1_u64 << 30) as f64,
+            checkpoint.storage_byte_len() as f64 / (1_u64 << 30) as f64,
             mapped_bf16_bytes as f64 / (1_u64 << 30) as f64,
             mapped_f32_bytes as f64 / (1_u64 << 20) as f64,
         );
@@ -197,7 +201,7 @@ impl Model {
             (start as u64).into(),
         ]);
         for weight in &self.weights {
-            inputs.push(self.checkpoint.mapped_ref(weight)?.into());
+            inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
         ensure!(
             inputs.len() == model_input_count,

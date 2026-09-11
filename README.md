@@ -112,7 +112,7 @@ CATENA_GPU_DIALECT=cuda cargo run --release -- \
   --bf16 --blas --bench --pp 512 --tg 128
 ```
 
-Catena validates and read-only-maps `model-bf16.gguf`, registers that single
+Catena validates and privately maps `model-bf16.gguf`, registers that single
 mapping with the selected GPU runtime, and passes every tensor subrange
 directly to the generated kernels in its native GGUF representation. The 338
 large tensors remain BF16;
