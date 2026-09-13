@@ -653,6 +653,24 @@ mod tests {
         runtime::{Runtime, Value},
     };
 
+    fn assert_qwen35_linear_bf16_temporaries_are_freed(model: &str) {
+        for temporary in [
+            "qkv",
+            "conv-history",
+            "conv-raw",
+            "conv",
+            "beta-raw-after-normalized",
+            "alpha",
+            "core-output",
+            "z",
+        ] {
+            assert!(model.contains(&format!("({{[.{temporary}] [.linear-context")));
+        }
+        assert!(model.contains(
+            "({[.linear-context-after-temporaries] [.attention-hidden]}\n    qwen3.free-bf16-before [attention-hidden-after-context.])"
+        ));
+    }
+
     #[test]
     fn entrypoint_uses_metadata_layer_and_input_counts() -> Result<()> {
         let mut config = ModelConfig::qwen3_30b();
@@ -903,6 +921,7 @@ mod tests {
         assert!(model.contains("mem.cast.f32 [dt-count dt-buffer.]"));
         assert!(model.contains("mem.cast.f32 [a-count a-buffer.]"));
         assert!(model.contains("mem.cast.f32 [norm-count norm-buffer.]"));
+        assert_qwen35_linear_bf16_temporaries_are_freed(&model);
         Ok(())
     }
 
@@ -928,6 +947,7 @@ mod tests {
         assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-residual"));
         assert!(model.contains("qwen3.qwen35-moe-down-residual"));
         assert!(model.contains("qwen3.qwen35-router-linear"));
+        assert_qwen35_linear_bf16_temporaries_are_freed(&model);
         assert!(model.contains("[.linear-weight] mem.cast.f32"));
         assert!(!model.contains("qwen3.qwen35-router-f32"));
         assert!(!model.contains("(def program qwen3.linear-norm :"));

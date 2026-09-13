@@ -362,10 +362,14 @@ the determinism bug are recorded here so it is not repeated casually.
 
 ## Profiling note
 
-`profile-qwen3.sh` uses launch-time rocprofv3 tracing and accepts the token count
-as its second argument. This avoids both fixed delays and dynamic-attach races.
-The runner retains opt-in FIFO/delay hooks for diagnosis, but the recorded
-profiles do not use them.
+`profile-qwen3.sh` uses launch-time rocprofv3 tracing on a local GGUF path and
+accepts the profiled token count as its second argument. It records three
+independent-process unprofiled `tg128` baselines, then separate kernel and
+HIP-runtime/allocation passes so API tracing does not distort the kernel trace.
+`summarize-profile.py` groups the resulting kernel statistics by decode
+subsystem, reports the most expensive HIP calls, and highlights any imbalance
+between `hipMallocAsync` and `hipFreeAsync`. This avoids both fixed delays and
+dynamic-attach races, and avoids network access while profiling.
 
 The exploratory compiler also has opt-in `CATENA_GPU_MODULE_SAVE` and
 `CATENA_GPU_MODULE_LOAD` hooks. They copy the generated shared object out of or
@@ -377,12 +381,41 @@ alter generated source or arithmetic, are disabled by default, and
 intentionally leave cache validity to the caller. A mainline version needs
 content-addressed validation rather than these diagnostic hooks.
 
+On 2026-09-12, a 32-token profile of the local BF16
+Qwen3.6-35B-A3B checkpoint recorded 42,112 kernel launches (1,316/token).
+Ordinary projection GEMVs consumed 38.0% of kernel time, routed gate/up and
+down GEMVs 29.7%, vocabulary logits/argmax 12.5%, and MoE routing 9.2%; full
+attention/KV work was only 1.6%. More significantly, the HIP trace contained
+42,752 `hipMallocAsync` calls but only 34,048 `hipFreeAsync` calls: an imbalance
+of 8,704, or 272/token. A fresh-process `tg128` run reached 11.53 tok/s, while
+three sessions in one process averaged 6.35 tok/s. The count imbalance is not
+by itself proof of a leak, but together with the repeat-session degradation it
+makes temporary-buffer lifetime and allocator-pool growth the first issue to
+investigate before changing weight placement or GEMV arithmetic.
+
+The lifetime audit found nine BF16 intermediates left live by each of the 30
+DeltaNet layers: QKV, convolution history/raw/output, beta raw, alpha, the
+DeltaNet core output, the Z projection, and linear context. Explicitly freeing
+them after their final consumers accounts for all 270 genuinely outstanding
+allocations/token; the other two async allocations cross the program ABI as
+logits and the next-token buffer and are freed synchronously by Rust. No new
+compiler operation was needed.
+
+The patched 32-token trace recorded 42,752 `hipMallocAsync` and 42,688
+`hipFreeAsync` calls, the expected two-call async difference per token. Including
+33 `hipMalloc` and 97 `hipFree` calls makes total device allocation and free
+counts exactly equal at 42,785. Three independent `tg128` runs measured 20.12,
+20.13, and 20.12 tok/s, while a three-run same-process benchmark measured 20.13
+tok/s. A longer `tg512` run measured 20.02 tok/s. Kernel times and dispatch
+counts remained effectively unchanged, confirming that the gain comes from
+reusing the HIP allocation pool rather than altered arithmetic.
+
 ## Next candidates
 
-The recorded 19.03 tok/s baseline is cleared, but the later 20.74 tok/s
-llama.cpp sample is not. Further work should remain measurement-led and retain
+The retained-buffer fix reaches 20.12 tok/s and nearly closes the later 20.74
+tok/s llama.cpp sample. Further work should remain measurement-led and retain
 bitwise tree tests. The largest current kernels are routed gate/up, MoE down,
 normalized dense projections, residual projections, and final vocabulary
-logits. Plausible next steps are a general typed BF16 GEMV API, vectorized
-weight loads that provably preserve product and tree bits, and a matched
-pre-EOS benchmark protocol shared by both runners.
+logits. Subsequent candidates are device-side weight placement, a general typed
+BF16 GEMV API, vectorized weight loads that provably preserve product and tree
+bits, and a matched pre-EOS benchmark protocol shared by both runners.
