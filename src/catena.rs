@@ -773,6 +773,7 @@ mod tests {
         );
         assert!(model.contains("(def program qwen3.dense-activate :"));
         assert!(model.contains("materializec.borrow-cached-context-f32"));
+        assert!(!model.contains("(def program qwen3.rotate-query :"));
         assert!(!model.contains("(def program qwen3.cached-staged-context-reduce-term-at :"));
         assert!(!model.contains("(def program qwen3.cached-decoder-layer :"));
         assert!(!model.contains("(def program qwen3.router-select-experts :"));
@@ -795,6 +796,14 @@ mod tests {
         assert!(entrypoint.contains("materializec.borrow-argmax-bf16"));
         assert!(model.contains("qwen3.free-bf16-before"));
         assert!(model.contains("materializec.borrow-cached-context-bf16"));
+        assert!(model.contains("(def program qwen3.rotate-query :"));
+        assert!(
+            model.contains("({[.query] [.rope] [.sequence]} qwen3.rotate-query [rotated-query.])")
+        );
+        assert!(model.contains("[.query] mem.cast.bf16 [query-count query-buffer.]"));
+        assert!(!model.contains(
+            "{[.query] [.rope] [.sequence] [.query-head-count] [.query-position] [.query-head] [.channel]}"
+        ));
         assert!(!model.contains("(def program qwen3.cached-staged-context-reduce-term-at :"));
         assert_eq!(model.matches("materializec.bf16-gemv").count(), 3);
         assert!(!model.contains("} materializec.reduce-f32 [logits-buffer.]"));

@@ -786,6 +786,52 @@
   [.result]
 ))
 
+# RoPE-rotate each query channel once before cached attention scans the key
+# history. The score kernel reuses this BF16 materialization for every cached
+# key position instead of repeating the same rotation inside every dot term.
+(def program qwen3.rotate-query-at :
+  ([n.] {
+    ({
+      ({(cap.own mem) (cap.own mem)} *)
+      (u64 val)
+    } *)
+    ([.n] ix val)
+  })
+  ->
+  ([n.] (bf16 val))
+= ([env output-index.]
+  ([.env] *.elim [query-and-rope sequence.])
+  ([.query-and-rope] *.elim [query rope.])
+  ([.output-index] ix.to-u64 [flat-output-index.])
+  (const.u64.0x{{QUERY_SIZE}} [query-features.])
+  (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  (const.u64.0x{{QUERY_HEADS}} [query-head-count.])
+  ([.flat-output-index query-features] u64.div [position.])
+  ([.flat-output-index query-features] u64.rem [query-channel.])
+  ([.query-channel head-dim] u64.div [query-head.])
+  ([.query-channel head-dim] u64.rem [head-channel.])
+  ({[.query] [.rope] [.sequence] [.query-head-count] [.position] [.query-head] [.head-channel]}
+    qwen3.rope-value [result.])
+  [.result]
+))
+
+(def program qwen3.rotate-query :
+  {(cap.own mem) (cap.own mem) (u64 val)}
+  ->
+  (cap.own mem)
+= ([query rope sequence.]
+  (const.u64.0x{{QUERY_SIZE}} [query-features.])
+  ([.sequence query-features] u64.mul [query-count-value.])
+  ([.query-count-value] u64.name [query-count.])
+  ({[.query] [.rope]} *.intro [query-and-rope.])
+  ({[.query-and-rope] [.sequence]} *.intro [env.])
+  {
+    [.query-count]
+    ({[.query-count] [.env] (([.query-count] :.param) name.qwen3.rotate-query-at)}
+      materializec)
+  } buf.to-mem
+))
+
 # Produce one RoPE-applied key cache element from a newly projected K row.
 (def program qwen3.cache-key-at :
   ([n.] {
@@ -920,7 +966,7 @@
 = ([env channel-index.]
   ([.env] *.elim [buffer-inputs coordinates.])
   ([.buffer-inputs] *.elim [cache query-and-rope.])
-  ([.query-and-rope] *.elim [query rope.])
+  ([.query-and-rope] *.elim [query _rope.])
   ([.coordinates] *.elim [sequence-and-capacity position-inputs.])
   ([.sequence-and-capacity] *.elim [sequence token-capacity.])
   ([.position-inputs] *.elim [start-and-layer query-key-and-head.])
@@ -930,11 +976,16 @@
   ([.channel-index] ix.to-u64 [channel.])
   (const.u64.0x{{QUERY_HEADS_PER_KV_HEAD}} [query-heads-per-key-head.])
   ([.query-head query-heads-per-key-head] u64.div [key-head.])
-  (const.u64.0x{{QUERY_HEADS}} [query-head-count.])
-  ({[.query] [.rope] [.sequence] [.query-head-count] [.query-position] [.query-head] [.channel]}
-    qwen3.rope-value bf16.to-f32 [query-value.])
-  (const.u64.0x{{KEY_VALUE_SIZE}} [key-features.])
+  (const.u64.0x{{QUERY_SIZE}} [query-features.])
   (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  ([.query-position query-features] u64.mul [query-row-offset.])
+  ([.query-head head-dim] u64.mul [query-head-offset.])
+  ([.query-row-offset query-head-offset] u64.add [query-head-base.])
+  ([.query-head-base channel] u64.add [query-index.])
+  ([.query] mem.cast.bf16 [query-count query-buffer.])
+  ({[.query-count] [.query-buffer] [.query-index]}
+    qwen3.bf16-buffer-at bf16.to-f32 [query-value.])
+  (const.u64.0x{{KEY_VALUE_SIZE}} [key-features.])
   (const.u64.0x0000000000000002 [key-value-planes.])
   ([.token-capacity key-features] u64.mul [plane-stride.])
   ([.plane-stride key-value-planes] u64.mul [layer-stride.])
@@ -1246,10 +1297,13 @@
   ->
   {(cap.own mem) (cap.own mem)}
 = ([cache query rope sequence token-capacity start layer.]
-  ({[.cache] [.query] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
+  ({[.query] [.rope] [.sequence]} qwen3.rotate-query [rotated-query.])
+  ({[.cache] [.rotated-query] [.rope] [.sequence] [.token-capacity] [.start] [.layer]}
     qwen3.cached-staged-scores [cache-after-scores scores.])
+  ({[.rotated-query] [.scores]}
+    qwen3.free-bf16-before [scores-after-query.])
   ([.start sequence] u64.add [history.])
-  ({[.scores] [.history]}
+  ({[.scores-after-query] [.history]}
     qwen3.cached-staged-softmax [probabilities.])
   ({[.cache-after-scores] [.probabilities] [.sequence] [.token-capacity] [.start] [.layer]}
     qwen3.cached-staged-context [cache-after-context probabilities-after-context context.])
