@@ -1368,10 +1368,23 @@
   ({[.cache-after-conv] [.query] [.key] [.value] [.decay-gate] [.beta] [.matrix-base] [.sequence]}
     qwen3.qwen35-gated-delta-scan [core-output cache-after-state.])
   ({[.core-output] [.z] [.linear-norm] [.sequence]} qwen3.qwen35-gated-norm [linear-context.])
-  ({[.linear-context] [.linear-out-weight] [.hidden] [.value-features]}
+  # linear-context joins all recurrent branches, so these fan-out inputs have
+  # completed their final asynchronous consumers before they are released.
+  ({[.qkv] [.linear-context]} qwen3.free-bf16-before [linear-context-01.])
+  ({[.conv-history] [.linear-context-01]} qwen3.free-bf16-before [linear-context-02.])
+  ({[.conv-raw] [.linear-context-02]} qwen3.free-bf16-before [linear-context-03.])
+  ({[.conv] [.linear-context-03]} qwen3.free-bf16-before [linear-context-04.])
+  ({[.beta-raw-after-normalized] [.linear-context-04]}
+    qwen3.free-bf16-before [linear-context-05.])
+  ({[.alpha] [.linear-context-05]} qwen3.free-bf16-before [linear-context-06.])
+  ({[.core-output] [.linear-context-06]} qwen3.free-bf16-before [linear-context-07.])
+  ({[.z] [.linear-context-07]} qwen3.free-bf16-before [linear-context-after-temporaries.])
+  ({[.linear-context-after-temporaries] [.linear-out-weight] [.hidden] [.value-features]}
     qwen3.linear-residual [attention-hidden.])
-  ([.attention-hidden] qwen3.rms-inv [mlp-inverse.])
-  ({[.attention-hidden] [.post-norm] [.mlp-inverse]}
+  ({[.linear-context-after-temporaries] [.attention-hidden]}
+    qwen3.free-bf16-before [attention-hidden-after-context.])
+  ([.attention-hidden-after-context] qwen3.rms-inv [mlp-inverse.])
+  ({[.attention-hidden-after-context] [.post-norm] [.mlp-inverse]}
     qwen3.apply-rmsnorm [normalized-mlp-input.])
   (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-features.])
   ({[.normalized-mlp-input] [.gate-weight] [.intermediate-features]}
@@ -1381,14 +1394,14 @@
   ({[.normalized-mlp-input] [.up]}
     qwen3.free-bf16-before [up-after-normalized.])
   ({[.gate] [.up-after-normalized]} qwen3.dense-activate [activated.])
-  ({[.activated] [.down-weight] [.attention-hidden] [.intermediate-features]}
+  ({[.activated] [.down-weight] [.attention-hidden-after-context] [.intermediate-features]}
     qwen3.linear-residual [output.])
   ({[.mlp-inverse] [.output]} qwen3.free-f32-before [output-after-mlp-inverse.])
   ({[.attention-inverse] [.output-after-mlp-inverse]}
     qwen3.free-f32-before [output-after-attention-inverse.])
   ({[.hidden] [.output-after-attention-inverse]}
     qwen3.free-bf16-before [output-after-hidden.])
-  ({[.attention-hidden] [.output-after-hidden]}
+  ({[.attention-hidden-after-context] [.output-after-hidden]}
     qwen3.free-bf16-before [output-after-residual.])
   ({[.gate] [.output-after-residual]}
     qwen3.free-bf16-before [output-after-gate.])
@@ -1456,13 +1469,26 @@
   ({[.cache-after-conv] [.query] [.key] [.value] [.decay-gate] [.beta] [.matrix-base] [.sequence]}
     qwen3.qwen35-gated-delta-scan [core-output cache-after-state.])
   ({[.core-output] [.z] [.linear-norm] [.sequence]} qwen3.qwen35-gated-norm [linear-context.])
-  ({[.linear-context] [.linear-out-weight] [.hidden] [.value-features]}
+  # linear-context joins all recurrent branches, so these fan-out inputs have
+  # completed their final asynchronous consumers before they are released.
+  ({[.qkv] [.linear-context]} qwen3.free-bf16-before [linear-context-01.])
+  ({[.conv-history] [.linear-context-01]} qwen3.free-bf16-before [linear-context-02.])
+  ({[.conv-raw] [.linear-context-02]} qwen3.free-bf16-before [linear-context-03.])
+  ({[.conv] [.linear-context-03]} qwen3.free-bf16-before [linear-context-04.])
+  ({[.beta-raw-after-normalized] [.linear-context-04]}
+    qwen3.free-bf16-before [linear-context-05.])
+  ({[.alpha] [.linear-context-05]} qwen3.free-bf16-before [linear-context-06.])
+  ({[.core-output] [.linear-context-06]} qwen3.free-bf16-before [linear-context-07.])
+  ({[.z] [.linear-context-07]} qwen3.free-bf16-before [linear-context-after-temporaries.])
+  ({[.linear-context-after-temporaries] [.linear-out-weight] [.hidden] [.value-features]}
     qwen3.linear-residual [attention-hidden.])
-  ([.attention-hidden] qwen3.rms-inv [mlp-inverse.])
-  ({[.attention-hidden] [.post-norm] [.mlp-inverse]}
+  ({[.linear-context-after-temporaries] [.attention-hidden]}
+    qwen3.free-bf16-before [attention-hidden-after-context.])
+  ([.attention-hidden-after-context] qwen3.rms-inv [mlp-inverse.])
+  ({[.attention-hidden-after-context] [.post-norm] [.mlp-inverse]}
     qwen3.apply-rmsnorm [normalized.])
   ({
-    [.normalized] [.attention-hidden] [.sequence]
+    [.normalized] [.attention-hidden-after-context] [.sequence]
     [.router-weight] [.expert-gate-weight] [.expert-up-weight] [.expert-down-weight]
     [.shared-router-weight] [.shared-gate-weight] [.shared-up-weight] [.shared-down-weight]
   } qwen3.qwen35-moe-ffn [output.])
