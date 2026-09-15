@@ -922,6 +922,8 @@ mod tests {
         );
         assert!(model.contains("materializec.borrow-gated-delta-net-bf16"));
         assert!(!model.contains("materializec.borrow-gated-delta-net-f32"));
+        assert!(model.contains("name.qwen3.qwen35-conv-at)\n  } materializec [output.]"));
+        assert!(!model.contains("qwen3.qwen35-conv-epilogue"));
         assert!(!model.contains("qwen3.expert-linear-pair"));
         assert!(!model.contains("qwen3.moe-down-residual"));
         assert!(!model.contains("(def program qwen3.linear-norm :"));

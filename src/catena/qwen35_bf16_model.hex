@@ -614,23 +614,18 @@
 ))
 
 # Depthwise causal convolution over a token block and its ring history.
-(def program qwen3.qwen35-conv-term-at :
-  ([n k.] {
-    ({
-      ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
-      ({([.n] ix val) ([.k] ix val)} *)
-    } *)
-  })
+(def program qwen3.qwen35-conv-term :
+  {
+    ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
+    (u64 val)
+    (u64 val)
+  }
   ->
-  ([n k.] (f32 val))
-= ([arguments.]
-  ([.arguments] *.elim [env indices.])
+  (f32 val)
+= ([env flat-output kernel.]
   ([.env] *.elim [buffers start.])
   ([.buffers] *.elim [history-and-qkv conv-weight.])
   ([.history-and-qkv] *.elim [history qkv.])
-  ([.indices] *.elim [output-index kernel-index.])
-  ([.output-index] ix.to-u64 [flat-output.])
-  ([.kernel-index] ix.to-u64 [kernel.])
   (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size.])
   ([.flat-output qkv-size] u64.div [token.])
   ([.flat-output qkv-size] u64.rem [channel.])
@@ -664,19 +659,26 @@
   [.result]
 ))
 
-(def program qwen3.qwen35-conv-epilogue :
+(def program qwen3.qwen35-conv-at :
   ([n.] {
-    ({
-      ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
-      ({([.n] ix val) (f32 val)} *)
-    } *)
+    ({({({(cap.own mem) (cap.own mem)} *) (cap.ref mem)} *) (u64 val)} *)
+    ([.n] ix val)
   })
   ->
   ([n.] (bf16 val))
-= ([arguments.]
-  ([.arguments] *.elim [_env index-and-sum.])
-  ([.index-and-sum] *.elim [_index sum.])
-  ([.sum] f32.to-bf16)
+= ([env output-index.]
+  ([.output-index] ix.to-u64 [flat-output.])
+  (const.u64.0x0000000000000000 [kernel-0.])
+  (const.u64.0x0000000000000001 [kernel-1.])
+  (const.u64.0x0000000000000002 [kernel-2.])
+  (const.u64.0x0000000000000003 [kernel-3.])
+  ({[.env] [.flat-output] [.kernel-0]} qwen3.qwen35-conv-term [tap-0.])
+  ({[.env] [.flat-output] [.kernel-1]} qwen3.qwen35-conv-term [tap-1.])
+  ({[.env] [.flat-output] [.kernel-2]} qwen3.qwen35-conv-term [tap-2.])
+  ({[.env] [.flat-output] [.kernel-3]} qwen3.qwen35-conv-term [tap-3.])
+  ([.tap-0 tap-2] f32.add [even.])
+  ([.tap-1 tap-3] f32.add [odd.])
+  ([.even odd] f32.add f32.to-bf16)
 ))
 
 (def program qwen3.qwen35-conv :
@@ -685,18 +687,15 @@
   (cap.own mem)
 = ([history qkv conv-weight start sequence.]
   (const.u64.0x{{LINEAR_QKV_SIZE}} [qkv-size-value.])
-  (const.u64.0x{{LINEAR_CONV_KERNEL}} [kernel-size-value.])
   ([.sequence qkv-size-value] u64.mul [output-count-value.])
   ([.output-count-value] u64.name [output-count.])
-  ([.kernel-size-value] u64.name [kernel-size.])
   ({[.history] [.qkv]} *.intro [history-and-qkv.])
   ({[.history-and-qkv] [.conv-weight]} *.intro [buffers.])
   ({[.buffers] [.start]} *.intro [env.])
   {
-    [.output-count] [.kernel-size] [.env]
-    ({([.output-count] :.param) ([.kernel-size] :.param)} name.qwen3.qwen35-conv-term-at)
-    (([.output-count] :.param) name.qwen3.qwen35-conv-epilogue)
-  } materializec.reduce-f32 [output.]
+    [.output-count] [.env]
+    (([.output-count] :.param) name.qwen3.qwen35-conv-at)
+  } materializec [output.]
   ({[.output-count] [.output]} buf.to-mem)
 ))
 
