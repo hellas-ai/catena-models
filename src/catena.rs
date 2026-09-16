@@ -632,6 +632,10 @@ pub fn generated_model_source_for_options(
             "materializec.borrow-native-bf16-gemv-pair",
             "materializec.borrow-native-bf16-gemm-wmma-pair",
         );
+        source = source.replace(
+            "materializec.borrow-routed-native-bf16-gemv-pair",
+            "materializec.borrow-routed-native-bf16-gemm-wmma-pair",
+        );
     } else if options.matrix_cores == MatrixCoreMode::Blas {
         source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-blas");
         source = source.replace(
@@ -865,18 +869,20 @@ mod tests {
     }
 
     #[test]
-    fn qwen36_moe_bf16_accelerates_dense_and_shared_expert_only() -> Result<()> {
+    fn qwen36_moe_bf16_selects_accelerated_projection_backends() -> Result<()> {
         let config = ModelConfig::qwen36_35b_a3b();
-        for (mode, primitive, pair_primitive) in [
+        for (mode, primitive, pair_primitive, routed_pair_primitive) in [
             (
                 MatrixCoreMode::Wmma,
                 "materializec.bf16-gemm-wmma",
                 "materializec.borrow-native-bf16-gemm-wmma-pair",
+                "materializec.borrow-routed-native-bf16-gemm-wmma-pair",
             ),
             (
                 MatrixCoreMode::Blas,
                 "materializec.bf16-gemm-blas",
                 "materializec.borrow-native-bf16-gemm-blas-pair",
+                "materializec.borrow-routed-native-bf16-gemv-pair",
             ),
         ] {
             let options = InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(mode);
@@ -885,7 +891,11 @@ mod tests {
             assert_eq!(model.matches(pair_primitive).count(), 1);
             assert!(!model.contains("materializec.bf16-gemv"));
             assert!(!model.contains("materializec.borrow-native-bf16-gemv-pair"));
-            assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-pair"));
+            assert!(model.contains(routed_pair_primitive));
+            assert_eq!(
+                model.contains("materializec.borrow-routed-native-bf16-gemm-wmma-pair"),
+                mode == MatrixCoreMode::Wmma
+            );
             assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-residual"));
             assert!(model.contains("qwen3.qwen35-router-linear"));
             assert!(model.contains("[.linear-weight] mem.cast.f32"));
@@ -1143,11 +1153,13 @@ mod tests {
         }
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
-        let model = generated_model_source_for_options(&ModelConfig::qwen3_0_6b(), options)?;
-        Runtime::from_sources(
-            runtime_sources(&model, InferencePrecision::Bf16),
-            GpuDialect::Hip,
-        )?;
+        for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen36_35b_a3b()] {
+            let model = generated_model_source_for_options(&config, options)?;
+            Runtime::from_sources(
+                runtime_sources(&model, InferencePrecision::Bf16),
+                GpuDialect::Hip,
+            )?;
+        }
 
         Ok(())
     }
