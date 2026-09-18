@@ -636,6 +636,10 @@ pub fn generated_model_source_for_options(
             "materializec.borrow-routed-native-bf16-gemv-pair",
             "materializec.borrow-routed-native-bf16-gemm-wmma-pair",
         );
+        source = source.replace(
+            "materializec.borrow-routed-native-bf16-gemv-residual",
+            "materializec.borrow-routed-native-bf16-gemm-wmma-residual",
+        );
     } else if options.matrix_cores == MatrixCoreMode::Blas {
         source = source.replace("materializec.bf16-gemv", "materializec.bf16-gemm-blas");
         source = source.replace(
@@ -896,7 +900,14 @@ mod tests {
                 model.contains("materializec.borrow-routed-native-bf16-gemm-wmma-pair"),
                 mode == MatrixCoreMode::Wmma
             );
-            assert!(model.contains("materializec.borrow-routed-native-bf16-gemv-residual"));
+            assert_eq!(
+                model.contains("materializec.borrow-routed-native-bf16-gemm-wmma-residual"),
+                mode == MatrixCoreMode::Wmma
+            );
+            assert_eq!(
+                model.contains("materializec.borrow-routed-native-bf16-gemv-residual"),
+                mode == MatrixCoreMode::Blas
+            );
             assert!(model.contains("qwen3.qwen35-router-linear"));
             assert!(model.contains("[.linear-weight] mem.cast.f32"));
         }

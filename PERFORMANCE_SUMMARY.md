@@ -2,9 +2,12 @@
 
 ## Experimental Catena dependency delta
 
-This repository uses the local `../exploratory-catena/catena-lang` path
-dependency rather than the compiler at `origin/master`. Its current `master`
-is exactly five commits ahead of `origin/master`:
+`Cargo.toml` is pinned to compiler commit `6812290`; the development
+`.cargo/config.toml` overrides it with the adjacent
+`../exploratory-catena/catena-lang` checkout. That checkout is currently at
+`6978e8d`, one compiler commit beyond the manifest pin. The table records the
+compiler additions introduced for this implementation, including additions
+that have since reached compiler `origin/master`:
 
 | Commit | Compiler addition | Use in this repository |
 | --- | --- | --- |
@@ -13,6 +16,10 @@ is exactly five commits ahead of `origin/master`:
 | `1a1229e` | Adds native-BF16 GEMV/argmax support and parameterizes reductions and softmax over F32/BF16 storage | Keeps dense Qwen activations, projections, attention probabilities, and logits in BF16 while accumulating sensitive arithmetic in F32 |
 | `90e3372` | Adds `materializec.borrow-gated-delta-net-bf16` | Runs the Qwen3.5/Qwen3.6 recurrent scan with BF16 persistent state and inputs but F32 register arithmetic |
 | `e9e0659` | Adds tiled cached-context kernels and native-BF16 routed-expert kernels | Speeds exact cached attention and removes F32 activation detours from Qwen3.6 sparse MoE gate/up/down projections |
+| `c2293c7` | Adds native BF16 WMMA and BLAS projection primitives | Accelerates dense and shared-expert prefill while retaining SIMT fallbacks for small row counts |
+| `bf65794` | Widens the parallel stable top-k router kernel to 256 threads | Improves routing for the 256-expert Qwen3.6 model without changing its tie-breaking order |
+| `34b87d8` | Splits oversized routed-GEMV launches across a two-dimensional grid | Prevents 32-bit launch-size wraparound on long MoE prompts |
+| `6978e8d` | Adds `materializec.borrow-routed-native-bf16-gemm-wmma-pair` | Groups routes by expert and runs Qwen3.5/Qwen3.6 MoE gate/up through fused rocWMMA tiles |
 
 The additions are compiler operations, not opaque model-side foreign kernels:
 their Catena types preserve ownership of persistent buffers, validation checks
@@ -57,9 +64,17 @@ decode is unchanged. Both modes are opt-in because accelerated GEMM does not
 retain the deterministic SIMT reduction order.
 
 For Qwen3.5/3.6 MoE, the large dense shared-expert gate/up pair uses matching
-paired WMMA or BLAS projections. Dynamically routed expert gate/up/down
-operations remain on their native-BF16 SIMT kernels, and the narrow F32 router
-and shared-router projections remain unchanged.
+paired WMMA or BLAS projections. WMMA mode also replaces routed gate/up with
+`materializec.borrow-routed-native-bf16-gemm-wmma-pair` on HIP. It groups
+routes stably by expert, computes gate and up together in 16-row by 16-column
+rocWMMA tiles with F32 accumulators, and scatters results back to the original
+`[row, slot, output-feature]` layout. The matching
+`materializec.borrow-routed-native-bf16-gemm-wmma-residual` groups routed down
+projections in the same way, writes F32 per-route contributions, then combines
+slots in their original order and adds the residual deterministically. Shapes
+with fewer than 16 routes per expert, unaligned dimensions, CUDA, and
+non-WMMA modes retain the native-BF16 SIMT paths. The narrow F32 router and
+shared-router projection remain unchanged.
 
 Matched three-run measurements on the local gfx1151 system and the cached
 Qwen3-0.6B BF16 checkpoint were:
@@ -75,6 +90,22 @@ processing improved from 312.03 to 524.81 tok/s. Compiler integration tests
 execute single and paired 64×16 products through the SIMT, WMMA, and BLAS
 primitives. A standalone gfx1151 code-object check also confirms emission of
 `v_wmma_f32_16x16x16_bf16`.
+
+On Qwen3.6-35B-A3B, the grouped routed gate/up kernel reduced pp4096 aggregate
+gate/up time from 25.28 to 8.48 seconds (2.98x), while deterministic grouping
+cost 0.113 seconds across all 40 layers. End-to-end prefill changed as follows:
+
+| Test | Previous corrected WMMA | Grouped routed WMMA | Change |
+| --- | ---: | ---: | ---: |
+| pp512 | 75.90 tok/s | 101.00 tok/s | +33.1% |
+| pp2048 | about 73.6 tok/s | 96.69 tok/s | about +31% |
+| pp4096 | 66.13 tok/s | 80.46 tok/s | +21.7% |
+
+A 3,471-token prompt remained coherent and processed at 95.24 tok/s. Route
+grouping uses no atomics: each expert scans routes in source order, offsets
+are constructed in expert order, and each output has one writer. Repeated runs
+of the same backend therefore remain deterministic, although WMMA and SIMT are
+not required to be bit-identical because their F32 accumulation trees differ.
 
 ## BF16-capable reductions and softmax
 
@@ -152,12 +183,24 @@ and up projections together from BF16 activations and weights. Selected-expert
 lookup, row addressing, and packed BF16 pair loads are shared; each projection
 has an independent F32 accumulator and is rounded once to BF16.
 
+`materializec.borrow-routed-native-bf16-gemm-wmma-pair` has the same typed
+ownership contract and output layout. For sufficiently large HIP prefill it
+constructs a stable expert-major route permutation, shares each input tile
+between gate and up, and uses rocWMMA BF16 matrix operations with independent
+F32 accumulators. Temporary offsets and permutation storage are allocated and
+freed on the same stream. Decode and unsupported shapes call the original
+routed native-BF16 GEMV kernel.
+
 `materializec.borrow-routed-native-bf16-gemv-residual` performs the routed down
 projection from materialized BF16 expert activations, accumulates across all
 selected expert slots in F32, adds the BF16 residual in F32, and rounds the
-result once. Both operations return their owned activation, selected-expert,
-and residual buffers so the Qwen3.6 graph retains linear ownership without
-F32 conversion buffers.
+result once. Its WMMA counterpart,
+`materializec.borrow-routed-native-bf16-gemm-wmma-residual`, groups routes
+stably by expert, computes 16-row by 16-column HIP rocWMMA tiles into F32
+per-route storage, then combines slots in ascending order and adds the residual
+without atomics. Both operations return their owned activation,
+selected-expert, and residual buffers so the Qwen3.6 graph retains linear
+ownership without F32 conversion buffers.
 
 ## `materializec.into`
 
@@ -207,10 +250,11 @@ and bitwise specified.
 
 Selects stable row-wise top-k indices entirely on the GPU while returning the
 source owner. Rows through 128 columns use a synchronized 128-thread bitonic
-sort; wider rows use a serial stable-insertion fallback. Sort keys define
-finite and NaN ordering, canonicalize signed zero for comparison, and break
-ties by lower source index. Qwen's 128-way top-8 router became about 9.6 times
-faster per layer.
+sort and rows through 256 columns use the matching 256-thread path; wider rows
+use a serial stable-insertion fallback. Sort keys define finite and NaN
+ordering, canonicalize signed zero for comparison, and break ties by lower
+source index. Qwen's 128-way top-8 router became about 9.6 times faster per
+layer, while Qwen3.6's 256-way router remains parallel.
 
 ## `materializec.softmax-f32`
 
@@ -237,6 +281,26 @@ leaves at most 32 active lanes. Those levels use explicit warp/wave barriers
 instead of whole-block barriers, without changing any term, addition operand,
 logical index, or parenthesization. GPU tests compare every output bit with the
 canonical CPU tree at lengths 257, 2048, 6144, 8192, and 16,384.
+
+## Primitive supersession status
+
+`materializec.reduce-f32-pair` is the only primitive described above that is
+no longer referenced by a supported model template. Dense and routed paired
+projections now use ownership-aware native or specialized routed primitives,
+which avoid rematerializing pair terms and carry their input owners directly.
+The generic paired reducer remains available and tested in the compiler.
+
+The following primitives are replaced only in particular graphs or modes and
+are therefore still live:
+
+| Older primitive | Replacement | Where the older primitive remains used |
+| --- | --- | --- |
+| `materializec.bf16-gemv` | `materializec.bf16-gemm-wmma` or `materializec.bf16-gemm-blas` | Default BF16 mode and small-row fallbacks |
+| `materializec.borrow-native-bf16-gemv-pair` | Matching paired WMMA or BLAS primitive | Default BF16 mode and small-row fallbacks |
+| `materializec.borrow-routed-native-bf16-gemv-pair` | `materializec.borrow-routed-native-bf16-gemm-wmma-pair` | Default and BLAS modes, decode, CUDA, and unsupported WMMA shapes |
+| `materializec.borrow-routed-native-bf16-gemv-residual` | `materializec.borrow-routed-native-bf16-gemm-wmma-residual` | Default and BLAS modes, decode, CUDA, and unsupported WMMA shapes |
+| `materializec.borrow-routed-bf16-gemv-pair` | Native-BF16 routed primitives | F32 Qwen3/Qwen3.5/Qwen3.6 expert and shared-expert graphs |
+| F32 argmax, cached-context, and DeltaNet variants | Their BF16 counterparts | F32 inference graphs |
 
 ## Stream-ordered GPU execution
 
@@ -305,16 +369,21 @@ remove the underlying slope.
 
 ## Materialized sparse-MoE activation
 
-Qwen activates eight of 128 experts per token. `silu(gate) * up *
-routing_weight` is materialized once for each of the 6144 active intermediate
-values and reused across all 2048 down-projection outputs. This avoids
-recomputing the exponential and routing products inside every down term.
+The older Qwen3 MoE activates eight of 128 experts per token; Qwen3.6-35B
+activates eight of 256. `silu(gate) * up * routing_weight` is materialized once
+for every active expert intermediate and reused across all down-projection
+outputs. For Qwen3.6-35B this is 4096 active values per token. Materialization
+avoids recomputing the exponential and routing products inside every down term.
 
 ## Paired routed gate/up projection
 
 Gate and up weights for each selected expert are read by one typed BF16 kernel.
 The expert ID, row, channel, and input address are shared while the two
-arithmetic paths and deterministic sums remain independent.
+arithmetic paths and deterministic sums remain independent. In matrix-core
+prefill, a stable expert-major permutation converts these routed rows into
+rocWMMA tiles; gate and up share each staged input tile and are scattered back
+to their original route positions. Default inference and decode retain the
+packed-dot SIMT implementation.
 
 ## GPU routing and token selection
 
