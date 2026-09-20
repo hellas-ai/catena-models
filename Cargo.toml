@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-catena-lang = { git = "ssh://git@github.com/georgewhewell/exploratory-catena.git", rev = "a847ff3aba4dfa8739f2f0b73120a19a0083a8e7", version = "0.1.0" }
+catena-lang = { git = "ssh://git@github.com/georgewhewell/exploratory-catena.git", rev = "ed5eca3148c3e31234fe2fe7620c9d0363903f38", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive"] }
 hf-hub = { version = "1.0.0", default-features = false, features = ["blocking", "rustls-tls"] }
 libc = "0.2"
