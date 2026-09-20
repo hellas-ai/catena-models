@@ -18,6 +18,35 @@ const BF16_MODEL_TEMPLATE: &str = include_str!("catena/qwen3_bf16_model.hex");
 const QWEN35_TEMPLATE: &str = include_str!("catena/qwen35_model.hex");
 const QWEN35_BF16_TEMPLATE: &str = include_str!("catena/qwen35_bf16_model.hex");
 
+// Widen only the final host-visible logits. All model activations, recurrent
+// state, cached attention, and argmax continue to use the selected precision.
+const F32_LOGITS_OUTPUT_SOURCE: &str = r#"
+(def program qwen3.logit-to-f32-at :
+  ([n.] {
+    ({cap.ref [.n] bf16} buf val)
+    ({({[.n] u64} :) ([.n] ix val)} *)
+  }) -> ([n.] (f32 val))
+= ([input env.]
+  ([.env] *.elim [_count index.])
+  ({[.index input]} ix [value.])
+  ([.value] bf16.to-f32)
+))
+
+(def program qwen3.logits-to-f32 : (cap.own mem) -> (cap.own mem)
+= ([memory.]
+  ([.memory] mem.cast.bf16 [count buffer.])
+  {
+    [.buffer]
+    [.count]
+    [.count]
+    [.count]
+    (([.count] :.param) name.qwen3.logit-to-f32-at)
+  } materializec.borrow [source widened.]
+  ([.source] buf.free)
+  ({[.count] [.widened]} buf.to-mem)
+))
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferencePrecision {
     F32,
@@ -172,7 +201,11 @@ fn layer_weight_names(config: &ModelConfig, layer: usize) -> Result<&'static [&'
     }
 }
 
-fn generated_entrypoint(config: &ModelConfig, precision: InferencePrecision) -> Result<String> {
+fn generated_entrypoint(
+    config: &ModelConfig,
+    precision: InferencePrecision,
+    host_f32_logits: bool,
+) -> Result<String> {
     let weight_count = weight_specs(config)?.len();
     let described_layer_weight_count =
         (0..config.num_layers).try_fold(0_usize, |total, layer| {
@@ -277,9 +310,19 @@ fn generated_entrypoint(config: &ModelConfig, precision: InferencePrecision) -> 
         InferencePrecision::F32 => ("mem.cast.f32", "materializec.borrow-argmax-f32"),
         InferencePrecision::Bf16 => ("mem.cast.bf16", "materializec.borrow-argmax-bf16"),
     };
-    write!(source, "  ({{[.rope] [.final-logits]}} qwen3.free-f32-before [final-logits-after-rope.])\n  ([.final-logits-after-rope] {logit_cast} [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {{\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  }} {argmax} [logits-after-argmax next-token-buffer.]\n  {{\n").unwrap();
+    write!(source, "  ({{[.rope] [.final-logits]}} qwen3.free-f32-before [final-logits-after-rope.])\n  ([.final-logits-after-rope] {logit_cast} [logit-count logit-buffer.])\n  (const.u64.0x0000000000000001 u64.name [one.])\n  {{\n    [.logit-buffer]\n    [.logit-count]\n    [.one]\n  }} {argmax} [logits-after-argmax next-token-buffer.]\n").unwrap();
+    let widen_logits = host_f32_logits && precision == InferencePrecision::Bf16;
+    if widen_logits {
+        source.push_str("  ({[.logit-count] [.logits-after-argmax]} buf.to-mem [native-logits.])\n  ([.native-logits] qwen3.logits-to-f32 [host-logits.])\n");
+    }
+    source.push_str("  {\n");
     writeln!(source, "    [.cache-{:02}]", config.num_layers).unwrap();
-    source.push_str("    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)\n    ({[.one] [.next-token-buffer]} buf.to-mem)\n  }\n))\n");
+    if widen_logits {
+        source.push_str("    [.host-logits]\n");
+    } else {
+        source.push_str("    ({[.logit-count] [.logits-after-argmax]} buf.to-mem)\n");
+    }
+    source.push_str("    ({[.one] [.next-token-buffer]} buf.to-mem)\n  }\n))\n");
     Ok(source)
 }
 
@@ -599,6 +642,31 @@ pub fn generated_model_source_for_options(
     config: &ModelConfig,
     options: InferenceOptions,
 ) -> Result<String> {
+    generated_model_source_with_output(config, options, false)
+}
+
+/// Complete portable program for the token-native causal-LM host ABI.
+///
+/// Includes helpers and model definitions; the caller supplies the compiler's
+/// stdlib. Computation and argmax retain the selected precision. Only returned
+/// BF16 logits are widened exactly to F32, without changing generated token IDs.
+pub fn causal_lm_source_for_options(
+    config: &ModelConfig,
+    options: InferenceOptions,
+) -> Result<String> {
+    let helpers = match options.precision {
+        InferencePrecision::F32 => HELPER_SOURCE,
+        InferencePrecision::Bf16 => BF16_HELPER_SOURCE,
+    };
+    let model = generated_model_source_with_output(config, options, true)?;
+    Ok(format!("{helpers}\n{model}"))
+}
+
+fn generated_model_source_with_output(
+    config: &ModelConfig,
+    options: InferenceOptions,
+    host_f32_logits: bool,
+) -> Result<String> {
     let precision = options.precision;
     config.validate()?;
     ensure!(
@@ -648,7 +716,10 @@ pub fn generated_model_source_for_options(
         );
     }
     source.push('\n');
-    source.push_str(&generated_entrypoint(config, precision)?);
+    if host_f32_logits && precision == InferencePrecision::Bf16 {
+        source.push_str(F32_LOGITS_OUTPUT_SOURCE);
+    }
+    source.push_str(&generated_entrypoint(config, precision, host_f32_logits)?);
     Ok(retain_reachable_model_programs(&source))
 }
 
@@ -677,6 +748,68 @@ mod tests {
         assert!(model.contains(
             "({[.linear-context-after-temporaries] [.attention-hidden]}\n    qwen3.free-bf16-before [attention-hidden-after-context.])"
         ));
+    }
+
+    #[test]
+    fn causal_lm_export_keeps_bf16_execution_and_native_argmax() -> Result<()> {
+        let config = ModelConfig::qwen36_35b_a3b();
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
+        let ordinary = generated_model_source_for_options(&config, options)?;
+        assert!(!ordinary.contains("qwen3.logits-to-f32"));
+        let portable = causal_lm_source_for_options(&config, options)?;
+        assert!(portable.starts_with(BF16_HELPER_SOURCE));
+        assert!(portable.contains("materializec.borrow-cached-context-bf16"));
+        assert!(portable.contains("materializec.borrow-routed-native-bf16-gemm-wmma-pair"));
+        let entrypoint = portable.split_once(ENTRYPOINT_MARKER).unwrap().1;
+        let argmax = entrypoint.find("materializec.borrow-argmax-bf16").unwrap();
+        let widen = entrypoint.find("qwen3.logits-to-f32").unwrap();
+        assert!(argmax < widen);
+        assert!(entrypoint.contains("[.host-logits]"));
+        let f32 = InferenceOptions::new(InferencePrecision::F32);
+        let config = ModelConfig::qwen3_30b();
+        assert_eq!(
+            causal_lm_source_for_options(&config, f32)?,
+            format!(
+                "{HELPER_SOURCE}\n{}",
+                generated_model_source_for_options(&config, f32)?
+            )
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn causal_lm_bf16_logits_widen_every_bit_pattern_on_gpu_when_requested() -> Result<()> {
+        if std::env::var_os("CATENA_QWEN3_GPU_TESTS").is_none() {
+            return Ok(());
+        }
+        let runtime = Runtime::new(GpuDialect::Hip)?;
+        let artifact = runtime.load_sources(stdlib::sources().chain([F32_LOGITS_OUTPUT_SOURCE]))?;
+        let bits = (0..=u16::MAX).collect::<Vec<_>>();
+        let input = runtime.mem_u16(&bits)?;
+        let [Value::MemOwn(output)] = artifact.exec("qwen3.logits-to-f32", [input.into()])? else {
+            anyhow::bail!("logit adapter returned non-memory");
+        };
+        assert_eq!(
+            output
+                .to_f32_vec()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            bits.into_iter()
+                .map(|bits| u32::from(bits) << 16)
+                .collect::<Vec<_>>()
+        );
+        // Check the complete hybrid MoE entrypoint's ownership and output ABI,
+        // not just the standalone widening helper. No checkpoint is required.
+        let source = causal_lm_source_for_options(
+            &ModelConfig::qwen36_35b_a3b(),
+            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma),
+        )?;
+        let mut sources: Vec<&str> = stdlib::sources().collect();
+        sources.push(&source);
+        runtime.load_sources(sources)?;
+        Ok(())
     }
 
     #[test]
@@ -1081,14 +1214,12 @@ mod tests {
             return Ok(());
         }
         let model = generated_model_source();
-        let runtime = Runtime::from_sources(
-            runtime_sources(&model, InferencePrecision::F32),
-            GpuDialect::Hip,
-        )?;
+        let runtime = Runtime::new(GpuDialect::Hip)?;
+        let artifact = runtime.load_sources(runtime_sources(&model, InferencePrecision::F32))?;
         let config = ModelConfig::qwen3_30b();
         let sequence = config.max_position_embeddings;
         let [output] =
-            runtime.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;
+            artifact.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;
         let Value::MemOwn(output) = output else {
             anyhow::bail!("qwen3.rope-table returned non-owned memory: {output:?}");
         };
@@ -1127,15 +1258,14 @@ mod tests {
             .enumerate()
         {
             let model = generated_model_source_for(&config)?;
-            let runtime = Runtime::from_sources(
-                runtime_sources(&model, InferencePrecision::F32),
-                GpuDialect::Hip,
-            )?;
+            let runtime = Runtime::new(GpuDialect::Hip)?;
+            let artifact =
+                runtime.load_sources(runtime_sources(&model, InferencePrecision::F32))?;
             if index == 0 {
-                let [Value::F32(positive)] = runtime.exec("qwen3.exp", [100.0_f32.into()])? else {
+                let [Value::F32(positive)] = artifact.exec("qwen3.exp", [100.0_f32.into()])? else {
                     anyhow::bail!("qwen3.exp returned an unexpected value")
                 };
-                let [Value::F32(negative)] = runtime.exec("qwen3.exp", [(-100.0_f32).into()])?
+                let [Value::F32(negative)] = artifact.exec("qwen3.exp", [(-100.0_f32).into()])?
                 else {
                     anyhow::bail!("qwen3.exp returned an unexpected value")
                 };
@@ -1157,19 +1287,15 @@ mod tests {
             ModelConfig::qwen36_35b_a3b(),
         ] {
             let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
-            Runtime::from_sources(
-                runtime_sources(&model, InferencePrecision::Bf16),
-                GpuDialect::Hip,
-            )?;
+            Runtime::new(GpuDialect::Hip)?
+                .load_sources(runtime_sources(&model, InferencePrecision::Bf16))?;
         }
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
         for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen36_35b_a3b()] {
             let model = generated_model_source_for_options(&config, options)?;
-            Runtime::from_sources(
-                runtime_sources(&model, InferencePrecision::Bf16),
-                GpuDialect::Hip,
-            )?;
+            Runtime::new(GpuDialect::Hip)?
+                .load_sources(runtime_sources(&model, InferencePrecision::Bf16))?;
         }
 
         Ok(())
