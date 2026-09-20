@@ -21,12 +21,22 @@ use clap::Parser;
 #[command(about = "Greedy BF16 text generation with dense or MoE Qwen3 on Catena GPU")]
 struct Args {
     /// Text prefix to continue.
-    #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
+    #[arg(required_unless_present_any = ["generate_entrypoint", "bench", "export_environment"])]
     prompt: Option<String>,
 
     /// Write the generated model-specific Hex source under target/, then exit.
     #[arg(long, conflicts_with = "prompt")]
     generate_entrypoint: bool,
+
+    /// Export Catena source and tensor-layout settings without loading the GPU.
+    #[arg(long, value_name = "NEW_DIR", conflicts_with_all = ["prompt", "generate_entrypoint", "bench"])]
+    export_environment: Option<PathBuf>,
+
+    #[arg(long, default_value_t = 32768, requires = "export_environment")]
+    capacity: usize,
+
+    #[arg(long, default_value_t = 64, requires = "export_environment")]
+    prefill_chunk_tokens: usize,
 
     /// Run llama-style prompt-processing and token-generation benchmarks.
     #[arg(long, conflicts_with = "generate_entrypoint")]
@@ -109,6 +119,17 @@ fn main() -> Result<()> {
         (None, None) => args.model_dir.join("model-bf16.gguf"),
         (Some(_), Some(_)) => unreachable!("clap rejects --gguf with --model"),
     };
+    if let Some(directory) = &args.export_environment {
+        catena_qwen3::export::write_environment(
+            &selected_gguf,
+            directory,
+            args.capacity,
+            args.prefill_chunk_tokens,
+            options,
+        )?;
+        println!("exported {}", directory.display());
+        return Ok(());
+    }
     if args.generate_entrypoint {
         let config = read_gguf_model_config(&selected_gguf)?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");

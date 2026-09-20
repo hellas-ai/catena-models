@@ -86,7 +86,7 @@ struct GgufFile {
 #[derive(Debug, Clone, Copy)]
 pub struct TensorView {
     pub(crate) dtype: GgufDtype,
-    file_index: usize,
+    pub(crate) file_index: usize,
     pub(crate) file_offset: usize,
     pub(crate) byte_len: usize,
 }
@@ -337,6 +337,28 @@ pub fn validate_gguf_tensors(path: impl AsRef<Path>, config: &ModelConfig) -> Re
         .collect::<Result<Vec<_>>>()?;
     validate_files(&files, &specs, config)?;
     Ok(())
+}
+
+/// Read the model's ordered tensor ranges without registering any GPU memory.
+pub(crate) fn tensor_layout(
+    path: &Path,
+    config: &ModelConfig,
+) -> Result<(Vec<PathBuf>, Vec<TensorView>)> {
+    let specs = weight_specs(config)?;
+    let paths = resolve_gguf_paths(path)?;
+    let files = paths
+        .iter()
+        .map(GgufFile::open)
+        .collect::<Result<Vec<_>>>()?;
+    let tensor_files = validate_files(&files, &specs, config)?;
+    let views = specs
+        .iter()
+        .map(|spec| {
+            let index = tensor_files[&spec.gguf_name];
+            files[index].tensor_view(spec, index)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((paths, views))
 }
 
 #[derive(Debug)]

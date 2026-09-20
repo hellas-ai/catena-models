@@ -3,7 +3,7 @@ use std::{collections::HashSet, env, path::Path};
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, Runtime, Value},
 };
 
 use crate::{
@@ -17,6 +17,7 @@ use crate::{
 /// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
 pub struct Model {
     runtime: Runtime,
+    artifact: Artifact,
     weights: Vec<TensorView>,
     checkpoint: Checkpoint,
     config: ModelConfig,
@@ -67,7 +68,9 @@ impl Model {
             })
             .context("model parameter count overflowed")?;
         let model_source = generated_model_source_for_options(&config, options)?;
-        let runtime = Runtime::from_sources(runtime_sources(&model_source, precision), dialect)
+        let runtime = Runtime::new(dialect).context("failed to initialize the GPU runtime")?;
+        let artifact = runtime
+            .load_sources(runtime_sources(&model_source, precision))
             .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
@@ -103,6 +106,7 @@ impl Model {
         );
         Ok(Self {
             runtime,
+            artifact,
             weights,
             checkpoint,
             config,
@@ -207,7 +211,7 @@ impl Model {
             inputs.len() == model_input_count,
             "internal model ABI mismatch"
         );
-        let mut outputs = self.runtime.exec_values("qwen3", inputs)?;
+        let mut outputs = self.artifact.exec_values("qwen3", inputs)?;
         ensure!(outputs.len() == 3, "internal model output ABI mismatch");
         let next_token_output = outputs.pop().expect("output count was validated");
         let logits_output = outputs.pop().expect("output count was validated");

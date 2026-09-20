@@ -26,7 +26,7 @@ The scripts assume the Nix development environment; invoke them with
 ## Setup
 
 The Catena compiler dependency is pinned to the private
-`hellas-ai/exploratory-catena` repository. Configure an SSH key with access to
+`georgewhewell/exploratory-catena` personal fork. Configure an SSH key with access to
 that GitHub repository before fetching or building dependencies:
 
 ```bash
@@ -219,6 +219,25 @@ GGUF, write it under
 ```bash
 nix develop --command cargo run --release -- --generate-entrypoint
 ```
+
+To serve this same generated program through a causal-LM host such as
+Hellas, export its helpers, entrypoint and validated GGUF tensor layout:
+
+```bash
+cargo run --release -- --bf16 --matrix-cores --gguf /path/to/gguf/shards \
+  --export-environment /path/to/new-export-directory \
+  --capacity 32768 --prefill-chunk-tokens 512
+hellas-cli environment build \
+  --program /path/to/new-export-directory/model.hex \
+  --settings /path/to/new-export-directory/model.toml \
+  --out /path/to/new-export-directory/model.environment
+```
+
+Export reads metadata without loading the GPU. The settings commit the prefill
+schedule and preserve the model's tensor order; Hellas content-addresses the
+program and GGUF shards. The host supplies its own streaming, persistent prefix
+cache and payment transport. BF16 exports retain native BF16 execution and
+cache storage, widening only the final logits to the host's F32 output ABI.
 
 For a fixed-length performance run that continues through EOS:
 
