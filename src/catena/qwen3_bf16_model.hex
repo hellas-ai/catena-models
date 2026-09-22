@@ -1284,6 +1284,45 @@
   }
 ))
 
+# Fuse cached Q.K, F32 online softmax, and V for prefill. The rotary query
+# and persistent cache are already materialized by the surrounding graph.
+(def program qwen3.cached-attention-fused :
+  {
+    (cap.own mem) (cap.own mem) (cap.own mem)
+    (u64 val) (u64 val) (u64 val) (u64 val)
+  }
+  ->
+  {(cap.own mem) (cap.own mem)}
+= ([cache query rope sequence token-capacity start layer.]
+  ({[.query] [.rope] [.sequence]} qwen3.rotate-query [rotated-query.])
+  ([.cache] mem.cast.bf16 [cache-count cache-buffer.])
+  ([.rotated-query] mem.cast.bf16 [query-count query-buffer.])
+  ([.start sequence] u64.add [history.])
+  (const.u64.0x{{QUERY_HEADS}} [query-heads.])
+  (const.u64.0x{{KEY_VALUE_HEADS}} [key-value-heads.])
+  (const.u64.0x{{HEAD_DIM}} [head-dim.])
+  (const.u64.0x{{QUERY_SIZE}} [query-size.])
+  (const.u32.0x{{ATTENTION_SCALE_BITS}} u32.bitcast-f32 [scale.])
+  ([.sequence query-size] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  {
+    [.cache-buffer] [.cache-count]
+    [.query-buffer] [.query-count]
+    [.output-count]
+    [.sequence] [.history] [.token-capacity] [.layer]
+    [.query-heads] [.key-value-heads] [.head-dim] [.scale]
+  } materializec.borrow-cached-attention-bf16
+    [cache-after query-after context-buffer.]
+  ({[.query-count] [.query-after]} buf.to-mem [query-memory.])
+  ({[.output-count] [.context-buffer]} buf.to-mem [context.])
+  ({[.query-memory] [.context]} qwen3.free-bf16-before [context-after-query.])
+  ({[.cache-count] [.cache-after]} buf.to-mem [cache-memory.])
+  {
+    [.cache-memory]
+    [.context-after-query]
+  }
+))
+
 (def program qwen3.cached-attention :
   {
     (cap.own mem)
@@ -1442,6 +1481,38 @@
     ({[.output-count] [.env] (([.output-count] :.param) name.qwen3.routing-weight-at)}
       materializec)
   } buf.to-mem
+))
+
+# Project one dense input through two equal-shaped BF16 weight matrices while
+# preserving ownership of the input until both projections have completed.
+(def program qwen3.dense-linear-pair :
+  {(cap.own mem) (cap.ref mem) (cap.ref mem) (u64 val)}
+  ->
+  {(cap.own mem) (cap.own mem) (cap.own mem)}
+= ([input first-weight second-weight output-features.]
+  ([.input] mem.cast.bf16 [input-count input-buffer.])
+  ([.first-weight] mem.cast.bf16 [first-count first-buffer.])
+  ([.second-weight] mem.cast.bf16 [second-count second-buffer.])
+  ([.input-count] :.forget [input-count-value.])
+  (const.u64.0x{{HIDDEN_SIZE}} [hidden-size-value.])
+  ([.input-count-value hidden-size-value] u64.div [row-count.])
+  ([.row-count output-features] u64.mul [output-count-value.])
+  ([.output-count-value] u64.name [output-count.])
+  ([.hidden-size-value] u64.name [hidden-size.])
+  {
+    [.input-buffer] [.input-count]
+    [.first-buffer] [.first-count]
+    [.second-buffer] [.second-count]
+    [.output-count] [.hidden-size]
+    (const.u64.0x0000000000000000)
+    [.output-features]
+  } materializec.borrow-native-bf16-gemv-pair
+    [input-after first-output second-output.]
+  {
+    ({[.input-count] [.input-after]} buf.to-mem)
+    ({[.output-count] [.first-output]} buf.to-mem)
+    ({[.output-count] [.second-output]} buf.to-mem)
+  }
 ))
 
 (def program qwen3.expert-linear-pair :
@@ -1729,11 +1800,14 @@
   (const.u64.0x{{KEY_VALUE_SIZE}} [key-value-features.])
   ({[.normalized-attention-input] [.q-weight] [.query-features]}
     qwen3.linear [query-raw.])
-  ({[.normalized-attention-input] [.k-weight] [.key-value-features]}
-    qwen3.linear [key-raw.])
-  ({[.normalized-attention-input] [.v-weight] [.key-value-features]}
-    qwen3.linear [value.])
-  ({[.normalized-attention-input] [.value]}
+  ({
+    [.normalized-attention-input]
+    [.k-weight]
+    [.v-weight]
+    [.key-value-features]
+  } qwen3.dense-linear-pair
+    [normalized-attention-input-after-pair key-raw value.])
+  ({[.normalized-attention-input-after-pair] [.value]}
     qwen3.free-bf16-before [value-after-normalized.])
   ({[.query-raw] [.q-norm]} qwen3.head-rmsnorm [query.])
   ({[.key-raw] [.k-norm]} qwen3.head-rmsnorm [key.])
@@ -1762,11 +1836,14 @@
   ({[.attention-hidden-after-residual] [.post-norm] [.mlp-inverse]}
     qwen3.apply-rmsnorm [normalized-mlp-input.])
   (const.u64.0x{{INTERMEDIATE_SIZE}} [intermediate-features.])
-  ({[.normalized-mlp-input] [.gate-weight] [.intermediate-features]}
-    qwen3.linear [gate.])
-  ({[.normalized-mlp-input] [.up-weight] [.intermediate-features]}
-    qwen3.linear [up.])
-  ({[.normalized-mlp-input] [.up]}
+  ({
+    [.normalized-mlp-input]
+    [.gate-weight]
+    [.up-weight]
+    [.intermediate-features]
+  } qwen3.dense-linear-pair
+    [normalized-mlp-input-after-pair gate up.])
+  ({[.normalized-mlp-input-after-pair] [.up]}
     qwen3.free-bf16-before [up-after-normalized.])
   ({[.gate] [.up-after-normalized]} qwen3.dense-activate [activated.])
   ({[.activated] [.down-weight] [.attention-hidden-after-residual] [.intermediate-features]}
