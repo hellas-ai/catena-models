@@ -79,6 +79,10 @@ struct Args {
     /// Use the platform BLAS library for BF16 GEMM during supported Qwen prefill.
     #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
     blas: bool,
+
+    /// Use the experimental fused BF16 cached-attention kernel.
+    #[arg(long, requires = "bf16")]
+    fused_attention: bool,
 }
 
 fn main() -> Result<()> {
@@ -95,7 +99,9 @@ fn main() -> Result<()> {
     } else {
         MatrixCoreMode::Disabled
     };
-    let options = InferenceOptions::new(precision).with_matrix_cores(matrix_cores);
+    let options = InferenceOptions::new(precision)
+        .with_matrix_cores(matrix_cores)
+        .with_fused_attention(args.fused_attention);
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
