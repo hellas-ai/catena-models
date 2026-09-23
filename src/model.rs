@@ -53,6 +53,10 @@ impl Model {
         options: InferenceOptions,
         dialect: GpuDialect,
     ) -> Result<Self> {
+        ensure!(
+            !options.fused_attention || dialect == GpuDialect::Hip,
+            "experimental fused attention currently supports HIP only"
+        );
         let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;

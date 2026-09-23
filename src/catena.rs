@@ -36,6 +36,7 @@ pub enum MatrixCoreMode {
 pub struct InferenceOptions {
     pub precision: InferencePrecision,
     pub matrix_cores: MatrixCoreMode,
+    pub fused_attention: bool,
 }
 
 impl InferenceOptions {
@@ -43,11 +44,17 @@ impl InferenceOptions {
         Self {
             precision,
             matrix_cores: MatrixCoreMode::Disabled,
+            fused_attention: false,
         }
     }
 
     pub const fn with_matrix_cores(mut self, matrix_cores: MatrixCoreMode) -> Self {
         self.matrix_cores = matrix_cores;
+        self
+    }
+
+    pub const fn with_fused_attention(mut self, fused_attention: bool) -> Self {
+        self.fused_attention = fused_attention;
         self
     }
 }
@@ -622,6 +629,11 @@ pub fn generated_model_source_for_options(
                 )),
         "accelerated BF16 GEMM requires a BF16-supported Qwen3, Qwen3.5, or Qwen3.6 model"
     );
+    ensure!(
+        !options.fused_attention
+            || (precision == InferencePrecision::Bf16 && config.head_dim <= 256),
+        "fused attention currently requires BF16 inference and head dimension at most 256"
+    );
     for layer in 0..config.num_layers {
         layer_weight_names(config, layer)?;
     }
@@ -646,6 +658,18 @@ pub fn generated_model_source_for_options(
             "materializec.borrow-native-bf16-gemv-pair",
             "materializec.borrow-native-bf16-gemm-blas-pair",
         );
+    }
+    if options.fused_attention {
+        source = source.replace(
+            "qwen3.cached-attention [cache-after-attention context.]",
+            "qwen3.cached-attention-fused [cache-after-attention context.]",
+        );
+        if options.matrix_cores == MatrixCoreMode::Wmma {
+            source = source.replace(
+                "materializec.borrow-cached-attention-bf16",
+                "materializec.borrow-cached-attention-bf16-wmma",
+            );
+        }
     }
     source.push('\n');
     source.push_str(&generated_entrypoint(config, precision)?);
@@ -815,6 +839,15 @@ mod tests {
         assert!(!model.contains("(def program qwen3.cached-staged-context-reduce-term-at :"));
         assert_eq!(model.matches("materializec.bf16-gemv").count(), 3);
         assert!(!model.contains("} materializec.reduce-f32 [logits-buffer.]"));
+        assert_eq!(model.matches("} qwen3.dense-linear-pair").count(), 2);
+        assert_eq!(
+            model
+                .matches("materializec.borrow-native-bf16-gemv-pair")
+                .count(),
+            1
+        );
+        assert!(model.contains("[normalized-attention-input-after-pair key-raw value.]"));
+        assert!(model.contains("[normalized-mlp-input-after-pair gate up.]"));
         assert!(!model.contains("qwen3.expert-linear-pair"));
         assert!(!model.contains("qwen3.moe-down-residual"));
         let unexpected_f32_casts = model
@@ -840,7 +873,14 @@ mod tests {
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
         let model = generated_model_source_for_options(&config, options)?;
         assert_eq!(model.matches("materializec.bf16-gemm-wmma").count(), 3);
+        assert_eq!(
+            model
+                .matches("materializec.borrow-native-bf16-gemm-wmma-pair")
+                .count(),
+            1
+        );
         assert!(!model.contains("materializec.bf16-gemv"));
+        assert!(!model.contains("materializec.borrow-native-bf16-gemv-pair"));
         Ok(())
     }
 
@@ -851,8 +891,47 @@ mod tests {
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Blas);
         let model = generated_model_source_for_options(&config, options)?;
         assert_eq!(model.matches("materializec.bf16-gemm-blas").count(), 3);
+        assert_eq!(
+            model
+                .matches("materializec.borrow-native-bf16-gemm-blas-pair")
+                .count(),
+            1
+        );
         assert!(!model.contains("materializec.bf16-gemv"));
         assert!(!model.contains("materializec.bf16-gemm-wmma"));
+        assert!(!model.contains("materializec.borrow-native-bf16-gemv-pair"));
+        Ok(())
+    }
+
+    #[test]
+    fn fused_attention_is_opt_in_for_qwen3_and_qwen35() -> Result<()> {
+        for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen36_35b_a3b()] {
+            let staged = generated_model_source_for_options(
+                &config,
+                InferenceOptions::new(InferencePrecision::Bf16),
+            )?;
+            let fused = generated_model_source_for_options(
+                &config,
+                InferenceOptions::new(InferencePrecision::Bf16).with_fused_attention(true),
+            )?;
+            assert!(staged.contains("} materializec.borrow-cached-context-bf16"));
+            assert!(!staged.contains("} materializec.borrow-cached-attention-bf16"));
+            assert!(fused.contains("} materializec.borrow-cached-attention-bf16"));
+            assert!(!fused.contains("} materializec.borrow-cached-context-bf16"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fused_attention_uses_wmma_qk_with_matrix_cores() -> Result<()> {
+        let model = generated_model_source_for_options(
+            &ModelConfig::qwen3_0_6b(),
+            InferenceOptions::new(InferencePrecision::Bf16)
+                .with_matrix_cores(MatrixCoreMode::Wmma)
+                .with_fused_attention(true),
+        )?;
+        assert!(model.contains("} materializec.borrow-cached-attention-bf16-wmma"));
+        assert!(!model.contains("} materializec.borrow-cached-attention-bf16\n"));
         Ok(())
     }
 

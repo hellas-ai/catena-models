@@ -69,7 +69,7 @@ struct Args {
     ignore_eos: bool,
 
     /// Use the native mixed-BF16 graph (Qwen3 dense and Qwen3.5/3.6 dense or MoE).
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     bf16: bool,
 
     /// Use BF16 WMMA matrix cores for supported Qwen prefill (experimental).
@@ -79,6 +79,10 @@ struct Args {
     /// Use the platform BLAS library for BF16 GEMM during supported Qwen prefill.
     #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
     blas: bool,
+
+    /// Use the experimental fused BF16 cached-attention kernel.
+    #[arg(long, requires = "bf16", default_value_t = true)]
+    fused_attention: bool,
 }
 
 fn main() -> Result<()> {
@@ -95,7 +99,9 @@ fn main() -> Result<()> {
     } else {
         MatrixCoreMode::Disabled
     };
-    let options = InferenceOptions::new(precision).with_matrix_cores(matrix_cores);
+    let options = InferenceOptions::new(precision)
+        .with_matrix_cores(matrix_cores)
+        .with_fused_attention(args.fused_attention);
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
@@ -411,7 +417,8 @@ mod tests {
         assert_eq!(args.tg, 128);
         assert_eq!(args.bench_runs, 1);
         assert!(args.prompt.is_none());
-        assert!(!args.bf16);
+        assert!(args.bf16);
+        assert!(args.fused_attention);
     }
 
     #[test]

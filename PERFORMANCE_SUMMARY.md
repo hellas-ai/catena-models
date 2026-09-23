@@ -170,11 +170,55 @@ use a fixed `8 x 32` shared-memory tile (1 KiB per block). This replaces the
 generic one-block-per-output-channel reduction, its strided V reads, and
 history-sized dynamic shared memory. The BF16 variant widens loads, accumulates
 in F32, and rounds once per output channel.
+Both variants now stop the V scan at each query's causal key boundary rather
+than reading masked future values.
 
 This remains exact global attention and therefore still reads every prior V
 entry for every decoded token; the primitive removes avoidable layout and
 reduction overhead but does not change the linear per-token dependence on
 context length.
+
+## Experimental fused BF16 cached attention
+
+`--bf16 --fused-attention` selects the HIP-only
+`materializec.borrow-cached-attention-bf16` path for Qwen3 and Qwen3.5/3.6
+full-attention layers; it can be combined with `--matrix-cores`. The primitive
+takes the already rotary-encoded BF16 query and persistent KV cache, computes
+Q·K, a deterministic F32 online softmax, and the V-weighted context in one
+kernel, and returns both input owners. It allocates no quadratic score or
+probability buffers. The staged F32 and CUDA graphs remain unchanged, and the
+staged BF16 path remains the default. Fused and staged arithmetic need not be
+bit-identical because their reduction and softmax orders differ.
+
+The current SIMT kernel tiles eight tokens, two GQA query heads, and 32 keys
+per 256-thread block. Q is loaded once and each shared K/V tile is reused by
+16 query/head rows; online softmax is wave-parallel. With `--matrix-cores`,
+prefills of at least 1024 tokens use the matching
+`materializec.borrow-cached-attention-bf16-wmma` operation, which evaluates
+16×16 Q·K tiles using rocWMMA while leaving softmax and P·V in F32 SIMT.
+Decode retains the vector fused kernel.
+
+Matched single-run measurements on the local HIP device for
+Qwen3.6-35B-A3B with `--matrix-cores` (including the causal V bound in the
+staged path) were:
+
+| Test | Staged BF16 | Fused BF16 |
+| --- | ---: | ---: |
+| pp512 | 153.78 tok/s | 155.74 tok/s |
+| pp4096 | 138.29 tok/s | 189.98 tok/s |
+| pp8192 | 86.05 tok/s | 182.76 tok/s |
+| tg128 | 21.52 tok/s | 21.44 tok/s |
+
+Matched PP4096 HIP kernel traces measured 5.45 s in staged Q·K, 1.95 s in
+cached context, and 0.10 s in softmax, versus 3.27 s in fused attention across
+the ten full-attention layers before the tiled replacement. Routed expert
+gate/up (8.31 s) remains the largest 35B kernel group.
+
+On dense Qwen3-0.6B, matched three-run matrix-core measurements improved from
+914.65 to 986.00 tok/s at PP512 (+7.8%) and from 773.15 to 1204.51 tok/s at
+PP1024 (+55.8%). At PP512 the tiled attention kernel accounts for only 4.6%
+of GPU kernel time; at PP4096 it grows to 38.9%, explaining the much stronger
+long-context payoff.
 
 ## Native-BF16 routed expert primitives
 
