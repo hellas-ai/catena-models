@@ -69,7 +69,7 @@ struct Args {
     ignore_eos: bool,
 
     /// Use the native mixed-BF16 graph (Qwen3 dense and Qwen3.5/3.6 dense or MoE).
-    #[arg(long)]
+    #[arg(long, default_value_t = true)]
     bf16: bool,
 
     /// Use BF16 WMMA matrix cores for supported Qwen prefill (experimental).
@@ -81,7 +81,7 @@ struct Args {
     blas: bool,
 
     /// Use the experimental fused BF16 cached-attention kernel.
-    #[arg(long, requires = "bf16")]
+    #[arg(long, requires = "bf16", default_value_t = true)]
     fused_attention: bool,
 }
 
@@ -417,7 +417,8 @@ mod tests {
         assert_eq!(args.tg, 128);
         assert_eq!(args.bench_runs, 1);
         assert!(args.prompt.is_none());
-        assert!(!args.bf16);
+        assert!(args.bf16);
+        assert!(args.fused_attention);
     }
 
     #[test]
