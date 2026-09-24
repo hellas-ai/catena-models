@@ -73,15 +73,15 @@ struct Args {
     bf16: bool,
 
     /// Use BF16 WMMA matrix cores for supported Qwen prefill (experimental).
-    #[arg(long, requires = "bf16")]
+    #[arg(long, default_value_t = true)]
     matrix_cores: bool,
 
     /// Use the platform BLAS library for BF16 GEMM during supported Qwen prefill.
-    #[arg(long, requires = "bf16", conflicts_with = "matrix_cores")]
+    #[arg(long, conflicts_with = "matrix_cores")]
     blas: bool,
 
     /// Use the experimental fused BF16 cached-attention kernel.
-    #[arg(long, requires = "bf16", default_value_t = true)]
+    #[arg(long, default_value_t = true)]
     fused_attention: bool,
 }
 
@@ -92,10 +92,10 @@ fn main() -> Result<()> {
     } else {
         InferencePrecision::F32
     };
-    let matrix_cores = if args.matrix_cores {
-        MatrixCoreMode::Wmma
-    } else if args.blas {
+    let matrix_cores = if args.blas {
         MatrixCoreMode::Blas
+    } else if args.matrix_cores {
+        MatrixCoreMode::Wmma
     } else {
         MatrixCoreMode::Disabled
     };
@@ -298,7 +298,8 @@ fn parse_positive_usize(value: &str) -> std::result::Result<usize, String> {
 #[derive(Debug, Clone)]
 struct BenchRow {
     test: String,
-    tokens_per_second: f64,
+    mean_tokens_per_second: f64,
+    stddev_tokens_per_second: Option<f64>,
 }
 
 fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()> {
@@ -312,9 +313,11 @@ fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()>
             session.prefill_next_token(&tokens)?;
             samples.push((pp, started.elapsed()));
         }
+        let (mean, stddev) = tokens_per_second_stats(&samples);
         rows.push(BenchRow {
             test: format!("pp{pp}"),
-            tokens_per_second: mean_tokens_per_second(&samples),
+            mean_tokens_per_second: mean,
+            stddev_tokens_per_second: stddev,
         });
     }
     if tg > 0 {
@@ -329,9 +332,11 @@ fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()>
             }
             samples.push((tg, started.elapsed()));
         }
+        let (mean, stddev) = tokens_per_second_stats(&samples);
         rows.push(BenchRow {
             test: format!("tg{tg}"),
-            tokens_per_second: mean_tokens_per_second(&samples),
+            mean_tokens_per_second: mean,
+            stddev_tokens_per_second: stddev,
         });
     }
     print_benchmark_table(model, &rows);
@@ -350,12 +355,18 @@ fn synthetic_tokens(count: usize, vocabulary_size: usize) -> Vec<u64> {
         .collect()
 }
 
-fn mean_tokens_per_second(samples: &[(usize, Duration)]) -> f64 {
-    samples
+fn tokens_per_second_stats(samples: &[(usize, Duration)]) -> (f64, Option<f64>) {
+    let rates = samples
         .iter()
         .map(|(tokens, elapsed)| *tokens as f64 / elapsed.as_secs_f64())
-        .sum::<f64>()
-        / samples.len() as f64
+        .collect::<Vec<_>>();
+    let mean = rates.iter().sum::<f64>() / rates.len() as f64;
+    let stddev = (rates.len() > 1).then(|| {
+        let variance =
+            rates.iter().map(|rate| (rate - mean).powi(2)).sum::<f64>() / (rates.len() - 1) as f64;
+        variance.sqrt()
+    });
+    (mean, stddev)
 }
 
 fn print_benchmark_table(model: &Model, rows: &[BenchRow]) {
@@ -375,13 +386,17 @@ fn print_benchmark_table(model: &Model, rows: &[BenchRow]) {
     let size = format_byte_size(model.weight_byte_len());
     let params = format_parameter_count(model.parameter_count());
     for row in rows {
+        let rate = row.stddev_tokens_per_second.map_or_else(
+            || format!("{:.2}", row.mean_tokens_per_second),
+            |stddev| format!("{:.2} ± {stddev:.2}", row.mean_tokens_per_second),
+        );
         println!(
-            "| {:model_width$} | {:>10} | {:>10} | {:>15} | {:>20.2} |",
+            "| {:model_width$} | {:>10} | {:>10} | {:>15} | {:>20} |",
             model.display_name(),
             size,
             params,
             row.test,
-            row.tokens_per_second
+            rate
         );
     }
 }
@@ -418,6 +433,7 @@ mod tests {
         assert_eq!(args.bench_runs, 1);
         assert!(args.prompt.is_none());
         assert!(args.bf16);
+        assert!(args.matrix_cores);
         assert!(args.fused_attention);
     }
 
@@ -435,17 +451,25 @@ mod tests {
     }
 
     #[test]
-    fn matrix_cores_require_bf16() {
-        assert!(Args::try_parse_from(["catena-qwen3", "--matrix-cores", "hello"]).is_err());
-        let args =
-            Args::try_parse_from(["catena-qwen3", "--bf16", "--matrix-cores", "hello"]).unwrap();
+    fn acceleration_defaults_do_not_require_explicit_bf16() {
+        let args = Args::try_parse_from(["catena-qwen3", "hello"]).unwrap();
+        assert!(args.bf16);
         assert!(args.matrix_cores);
+        assert!(args.fused_attention);
+
+        let explicit = Args::try_parse_from([
+            "catena-qwen3",
+            "--matrix-cores",
+            "--fused-attention",
+            "hello",
+        ])
+        .unwrap();
+        assert!(explicit.bf16);
     }
 
     #[test]
-    fn blas_requires_bf16_and_conflicts_with_matrix_cores() {
-        assert!(Args::try_parse_from(["catena-qwen3", "--blas", "hello"]).is_err());
-        let args = Args::try_parse_from(["catena-qwen3", "--bf16", "--blas", "hello"]).unwrap();
+    fn blas_overrides_the_default_and_conflicts_with_explicit_matrix_cores() {
+        let args = Args::try_parse_from(["catena-qwen3", "--blas", "hello"]).unwrap();
         assert!(args.blas);
         assert!(
             Args::try_parse_from([
@@ -500,6 +524,9 @@ mod tests {
         assert_eq!(format_byte_size(3 << 30), "3.00 GiB");
         assert_eq!(format_parameter_count(30_532_122_624), "30.53 B");
         let samples = [(10, Duration::from_secs(2)), (10, Duration::from_secs(1))];
-        assert_eq!(mean_tokens_per_second(&samples), 7.5);
+        let (mean, stddev) = tokens_per_second_stats(&samples);
+        assert_eq!(mean, 7.5);
+        assert_eq!(stddev, Some(2.5_f64 * 2.0_f64.sqrt()));
+        assert_eq!(tokens_per_second_stats(&samples[..1]), (5.0, None));
     }
 }
