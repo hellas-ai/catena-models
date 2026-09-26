@@ -5,9 +5,10 @@
 `Cargo.toml` is pinned to compiler commit `21bb780`, which is also the current
 compiler `origin/master`. The development `.cargo/config.toml` overrides it
 with the adjacent `../exploratory-catena/catena-lang` checkout. That checkout
-is on `refactor-kernel-families`; its implementation refactor ends at
-`744aa29`, with the accompanying feature documentation at `84ebdbf`. The table
-below records the earlier compiler additions now present on `origin/master`:
+is on `refactor-kernel-families`. The commit identifiers below document the
+refactor stages without treating a temporary branch head as part of the public
+dependency contract. The table records the earlier compiler additions now
+present on `origin/master`:
 
 | Commit | Compiler addition | Use in this repository |
 | --- | --- | --- |
@@ -40,6 +41,14 @@ centralizes fused-attention SIMT/rocWMMA tiles, launch geometry, shared-memory
 sizing, and dispatch thresholds. Finally, `744aa29` provides one optimized
 operation registry for validation, host placement, and BLAS linkage.
 
+A subsequent cleanup makes that structure authoritative rather than additive.
+`0fa3a25` characterizes all 17 optimized spellings and their policies;
+`896c1d2` replaces freely combinable projection flags with supported-family
+variants; and `deeb4e7` moves auxiliary-kernel and call rendering behind the
+typed registry, removing optimized-name dispatch from `gpu.rs`. `ee09c61`
+removes attention configuration fields that were identical in every variant,
+leaving only key width and score-buffer count in the SIMT/WMMA specifications.
+
 The refactor parameterizes the values that must move together but deliberately
 keeps separate dense, routed-pair, routed-down, attention-SIMT, and
 attention-WMMA leaf kernels. It therefore preserves the tuned memory layouts,
@@ -48,21 +57,20 @@ primitive was deprecated by this work; the supersession table below remains
 unchanged.
 
 The initial branch baseline measured 288.67 tok/s at PP512 and 20.49 tok/s at
-TG128. The final focused five-run gate measured 289.71 ± 0.72 tok/s and
-20.48 ± 0.01 tok/s respectively. A broader three-run comparison between the
-early tile-spec checkpoint and the final compiler state likewise stayed within
-ordinary run variance:
+TG128. The final cleanup sweep remained within ordinary run variance across
+the complete measured range:
 
-| Test | Early refactor checkpoint | Final refactor state |
+| Test | Early refactor checkpoint | Final cleanup state |
 | --- | ---: | ---: |
-| pp128 | 121.67 tok/s | 122.40 ± 0.41 tok/s |
-| pp256 | 197.72 tok/s | 199.06 ± 0.95 tok/s |
-| pp512 | 289.41 tok/s | 291.22 ± 0.54 tok/s |
-| pp1024 | 383.44 tok/s | 386.49 ± 1.11 tok/s |
-| pp2048 | 444.28 tok/s | 444.89 ± 6.04 tok/s |
-| pp4096 | 443.53 tok/s | 445.34 ± 5.80 tok/s |
-| pp8192 | 405.91 tok/s | 407.03 ± 6.70 tok/s |
-| tg1024 | 19.59 tok/s | 19.58 ± 0.00 tok/s |
+| pp128 | 121.67 tok/s | 120.62 ± 0.38 tok/s |
+| pp256 | 197.72 tok/s | 196.76 ± 0.88 tok/s |
+| pp512 | 289.41 tok/s | 287.35 ± 0.35 tok/s |
+| pp1024 | 383.44 tok/s | 382.31 ± 1.14 tok/s |
+| pp2048 | 444.28 tok/s | 441.50 ± 3.07 tok/s |
+| pp4096 | 443.53 tok/s | 446.13 ± 5.08 tok/s |
+| pp8192 | 405.91 tok/s | 413.14 ± 1.79 tok/s |
+| tg128 | 20.49 tok/s | 20.56 ± 0.01 tok/s |
+| tg1024 | 19.59 tok/s | 19.66 ± 0.01 tok/s |
 
 ## `materializec.bf16-gemv`
 
