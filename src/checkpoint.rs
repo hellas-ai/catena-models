@@ -733,9 +733,10 @@ impl Drop for CudaDeviceCopy {
     }
 }
 
-struct GpuRegistration {
+pub(crate) struct GpuRegistration {
     dialect: GpuDialect,
     host_base: NonNull<c_void>,
+    byte_len: usize,
     device_base: NonNull<c_void>,
     unregister: HostUnregister,
     error_string: GetErrorString,
@@ -743,7 +744,25 @@ struct GpuRegistration {
 }
 
 impl GpuRegistration {
-    fn new(bytes: &[u8], dialect: GpuDialect) -> Result<Self> {
+    pub(crate) fn reference<'a>(&'a self, offset: usize, len: usize) -> Result<MemRef<'a>> {
+        ensure!(
+            offset
+                .checked_add(len)
+                .is_some_and(|end| end <= self.byte_len),
+            "GPU mapping view out of bounds"
+        );
+        // SAFETY: callers validate ranges against the live backing mapping.
+        unsafe {
+            Ok(MemRef::from_raw_parts(
+                self.device_base.as_ptr().cast::<u8>().add(offset).cast(),
+                len as u64,
+                self.dialect,
+                self,
+            ))
+        }
+    }
+
+    pub(crate) fn new(bytes: &[u8], dialect: GpuDialect) -> Result<Self> {
         ensure!(!bytes.is_empty(), "cannot register an empty GGUF mapping");
         let library = load_gpu_library(dialect)?;
         let (register_symbol, get_pointer_symbol, unregister_symbol, error_symbol) = match dialect {
@@ -806,6 +825,7 @@ impl GpuRegistration {
         Ok(Self {
             dialect,
             host_base,
+            byte_len: bytes.len(),
             device_base,
             unregister,
             error_string,

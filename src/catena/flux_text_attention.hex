@@ -1,0 +1,36 @@
+# Qwen conditioning attention: reuse Qwen projections, head norm, cache layout
+# and rotary helpers; use full-precision scores and mask right-padding keys.
+(def program flux.qwen-attention :
+ {(cap.own mem) (cap.own mem) (cap.own mem) (u64 val) (u64 val) (u64 val) (u64 val)}
+ -> {(cap.own mem) (cap.own mem)}
+= ([cache query rope sequence capacity start layer.]
+ ({[.query] [.rope] [.sequence]} qwen3.rotate-query [rotated.])
+ ({[.cache] (const.u64.0x0000000000080000) (const.u64.0x0000000000000400)
+  (const.u64.0x0000000000000400) (const.u64.0x0000000000000000)} flux.slice-bf16-o [key.])
+ ({[.cache] (const.u64.0x0000000000080000) (const.u64.0x0000000000000400)
+  (const.u64.0x0000000000000400) (const.u64.0x0000000000080000)} flux.slice-bf16-o [value.])
+ ({[.rotated] [.key] [.value] [.sequence] [.sequence]
+  (const.u64.0x0000000000000020) (const.u64.0x0000000000000008)
+  (const.u64.0x0000000000000080) (const.u32.0x3DB504F3 u32.bitcast-f32)
+  (const.u64.0x0000000000000001) (const.u64.0x{{VALID_KEYS}})} flux.attention-bf16-ooo [context.])
+ ({[.rotated] [.context]} qwen3.free-bf16-before [c1.])
+ ({[.key] [.c1]} qwen3.free-bf16-before [c2.])
+ ({[.value] [.c2]} qwen3.free-bf16-before [c3.])
+ {[.cache] [.c3]}
+))
+
+# Bridge the legacy decoder's owned RoPE ABI without leaking the temporary copy.
+(def program flux.text-layer :
+ {(cap.own mem) (cap.ref mem) (u64 val) (cap.own mem) (u64 val) (u64 val) (u64 val)
+  (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)
+  (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem) (cap.ref mem)}
+ -> {(cap.own mem) (cap.own mem)}
+= ([hidden rope sequence cache capacity start layer input-norm q-weight k-weight v-weight o-weight q-norm k-norm post-norm gate-weight up-weight down-weight.]
+ ({[.rope] (const.u64.0x0000000000010000)} flux.copy-f32 [rope-copy.])
+ ({[.hidden] [.rope-copy] [.sequence] [.cache] [.capacity] [.start] [.layer]
+  [.input-norm] [.q-weight] [.k-weight] [.v-weight] [.o-weight] [.q-norm] [.k-norm]
+  [.post-norm] [.gate-weight] [.up-weight] [.down-weight]}
+  qwen3.cached-dense-decoder-layer [result cache-result.])
+ ({[.rope-copy] [.result]} qwen3.free-f32-before [after-rope.])
+ {[.after-rope] [.cache-result]}
+))

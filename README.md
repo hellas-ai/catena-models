@@ -238,3 +238,14 @@ tok/s. The retained techniques are summarized in
 [`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md); detailed measurements,
 rejected experiments, and the EOS protocol caveat are documented in
 [`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
+
+## FLUX.2-klein text to image
+
+The separate `flux2-klein` app loads the cached FLUX.2-klein-4B safetensors
+checkpoint and writes one PNG. See [setup, component review order and validation](docs/flux2-klein.md).
+Use `--backend legacy` to run the separate implementation with existing compiler
+primitives; see [comparison and benchmarks](docs/flux2-klein-legacy.md).
+
+```bash
+cargo run --offline --bin flux2-klein -- --prompt 'A fox in a snowy forest' --output fox.png
+```
