@@ -2,12 +2,13 @@
 
 ## Experimental Catena dependency delta
 
-`Cargo.toml` is pinned to compiler commit `6812290`; the development
-`.cargo/config.toml` overrides it with the adjacent
-`../exploratory-catena/catena-lang` checkout. That checkout is currently at
-`6978e8d`, one compiler commit beyond the manifest pin. The table records the
-compiler additions introduced for this implementation, including additions
-that have since reached compiler `origin/master`:
+`Cargo.toml` is pinned to compiler commit `21bb780`, which is also the current
+compiler `origin/master`. The development `.cargo/config.toml` overrides it
+with the adjacent `../exploratory-catena/catena-lang` checkout. That checkout
+is on `refactor-kernel-families`. The commit identifiers below document the
+refactor stages without treating a temporary branch head as part of the public
+dependency contract. The table records the earlier compiler additions now
+present on `origin/master`:
 
 | Commit | Compiler addition | Use in this repository |
 | --- | --- | --- |
@@ -25,6 +26,51 @@ The additions are compiler operations, not opaque model-side foreign kernels:
 their Catena types preserve ownership of persistent buffers, validation checks
 the tensor capacities and layout parameters, and the GPU backend emits HIP or
 CUDA source for the selected storage type.
+
+## Performance-preserving kernel-family refactor
+
+The local compiler branch reorganizes the specialized kernels without adding
+new Catena operations or changing the Qwen graphs. Commit `5d9b59c` first
+captures dispatch thresholds and tuned layouts in tests. `6258b19` shares
+BF16/F32 storage policy and HIP capability guards; `94fba6e` classifies
+projection backend, topology, and output shape; and `57563f3` makes the dense
+WMMA renderer consume an explicit tile specification. `38369c5` shares stable
+expert grouping between routed gate/up and routed down, while `a33f85e` makes
+both routed WMMA renderers consume their own tile specifications. `7177392`
+centralizes fused-attention SIMT/rocWMMA tiles, launch geometry, shared-memory
+sizing, and dispatch thresholds. Finally, `744aa29` provides one optimized
+operation registry for validation, host placement, and BLAS linkage.
+
+A subsequent cleanup makes that structure authoritative rather than additive.
+`0fa3a25` characterizes all 17 optimized spellings and their policies;
+`896c1d2` replaces freely combinable projection flags with supported-family
+variants; and `deeb4e7` moves auxiliary-kernel and call rendering behind the
+typed registry, removing optimized-name dispatch from `gpu.rs`. `ee09c61`
+removes attention configuration fields that were identical in every variant,
+leaving only key width and score-buffer count in the SIMT/WMMA specifications.
+
+The refactor parameterizes the values that must move together but deliberately
+keeps separate dense, routed-pair, routed-down, attention-SIMT, and
+attention-WMMA leaf kernels. It therefore preserves the tuned memory layouts,
+matrix instructions, arithmetic order, and deterministic route grouping. No
+primitive was deprecated by this work; the supersession table below remains
+unchanged.
+
+The initial branch baseline measured 288.67 tok/s at PP512 and 20.49 tok/s at
+TG128. The final cleanup sweep remained within ordinary run variance across
+the complete measured range:
+
+| Test | Early refactor checkpoint | Final cleanup state |
+| --- | ---: | ---: |
+| pp128 | 121.67 tok/s | 120.62 ± 0.38 tok/s |
+| pp256 | 197.72 tok/s | 196.76 ± 0.88 tok/s |
+| pp512 | 289.41 tok/s | 287.35 ± 0.35 tok/s |
+| pp1024 | 383.44 tok/s | 382.31 ± 1.14 tok/s |
+| pp2048 | 444.28 tok/s | 441.50 ± 3.07 tok/s |
+| pp4096 | 443.53 tok/s | 446.13 ± 5.08 tok/s |
+| pp8192 | 405.91 tok/s | 413.14 ± 1.79 tok/s |
+| tg128 | 20.49 tok/s | 20.56 ± 0.01 tok/s |
+| tg1024 | 19.59 tok/s | 19.66 ± 0.01 tok/s |
 
 ## `materializec.bf16-gemv`
 
@@ -47,9 +93,10 @@ measured:
 
 ## Experimental BF16 accelerated prefill
 
-`--bf16 --matrix-cores` selects `materializec.bf16-gemm-wmma` for ordinary
-dense projections in Qwen3 dense, Qwen3.5 dense, and Qwen3.5/3.6 MoE graphs.
-`--bf16 --blas` selects the matching `materializec.bf16-gemm-blas`
+Native BF16, matrix cores, and fused attention are enabled by default.
+The matrix-core mode selects `materializec.bf16-gemm-wmma` for ordinary dense
+projections in Qwen3 dense, Qwen3.5 dense, and Qwen3.5/3.6 MoE graphs.
+`--blas` selects the matching `materializec.bf16-gemm-blas`
 backend. The typed API uses
 `InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(...)` with
 `MatrixCoreMode::Wmma` or `MatrixCoreMode::Blas`. F32 and the older Qwen3 MoE
@@ -60,8 +107,10 @@ rocWMMA BF16 matrix operations with F32 accumulators; CUDA uses
 `nvcuda::wmma`. The BLAS mode uses `hipblasGemmEx` on HIP and `cublasGemmEx`
 on CUDA, with BF16 input/output and F32 accumulation. Smaller
 inputs use the packed-dot SIMT kernel in either mode, so cached single-token
-decode is unchanged. Both modes are opt-in because accelerated GEMM does not
-retain the deterministic SIMT reduction order.
+decode is unchanged. WMMA is the default prefill backend; BLAS remains an
+explicit reference mode. Accelerated GEMM does not retain the deterministic
+SIMT reduction order, although repeated execution within one backend remains
+deterministic.
 
 For Qwen3.5/3.6 MoE, the large dense shared-expert gate/up pair uses matching
 paired WMMA or BLAS projections. WMMA mode also replaces routed gate/up with
@@ -180,20 +229,21 @@ context length.
 
 ## Experimental fused BF16 cached attention
 
-`--bf16 --fused-attention` selects the HIP-only
+The default BF16 fused-attention mode selects the HIP-only
 `materializec.borrow-cached-attention-bf16` path for Qwen3 and Qwen3.5/3.6
-full-attention layers; it can be combined with `--matrix-cores`. The primitive
+full-attention layers and uses its rocWMMA variant when matrix cores are
+enabled. The primitive
 takes the already rotary-encoded BF16 query and persistent KV cache, computes
 Q·K, a deterministic F32 online softmax, and the V-weighted context in one
 kernel, and returns both input owners. It allocates no quadratic score or
-probability buffers. The staged F32 and CUDA graphs remain unchanged, and the
-staged BF16 path remains the default. Fused and staged arithmetic need not be
+probability buffers. The staged F32 and CUDA graphs remain unchanged. Fused
+and staged arithmetic need not be
 bit-identical because their reduction and softmax orders differ.
 
 The current SIMT kernel tiles eight tokens, two GQA query heads, and 32 keys
 per 256-thread block. Q is loaded once and each shared K/V tile is reused by
-16 query/head rows; online softmax is wave-parallel. With `--matrix-cores`,
-prefills of at least 1024 tokens use the matching
+16 query/head rows; online softmax is wave-parallel. With the default
+matrix-core mode, prefills of at least 1024 tokens use the matching
 `materializec.borrow-cached-attention-bf16-wmma` operation, which evaluates
 16×16 Q·K tiles using rocWMMA while leaving softmax and P·V in F32 SIMT.
 Decode retains the vector fused kernel.
