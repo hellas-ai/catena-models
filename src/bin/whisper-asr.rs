@@ -1,0 +1,74 @@
+use anyhow::{Result, ensure};
+use catena_qwen3::whisper::{self, Config, Options, Whisper};
+use clap::Parser;
+use std::path::PathBuf;
+#[derive(Parser)]
+#[command(about = "Whisper-small ASR through Catena (16 kHz WAV, up to 30 seconds)")]
+struct Args {
+    wav: Option<PathBuf>,
+    /// Override the cached openai/whisper-small snapshot with a local directory.
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
+    #[arg(long)]
+    language: Option<String>,
+    #[arg(long, default_value_t = 256)]
+    max_new_tokens: usize,
+    #[arg(long)]
+    timings: bool,
+    #[arg(long)]
+    dump_dir: Option<PathBuf>,
+    /// Write the rendered model Hex and exit without initializing the GPU.
+    #[arg(long, value_name = "PATH")]
+    generate_entrypoint: Option<PathBuf>,
+    /// Validate model configuration and checkpoint shapes without initializing the GPU.
+    #[arg(long)]
+    inspect: bool,
+    /// Write CPU log-mel features and exit without initializing the GPU.
+    #[arg(long)]
+    features_only: bool,
+}
+fn main() -> Result<()> {
+    let a = Args::parse();
+    let model_dir = whisper::hub::snapshot(a.model_dir.as_deref())?;
+    let config = Config::read(&model_dir)?;
+    if a.timings || a.inspect {
+        eprintln!("Whisper snapshot: {}", model_dir.display());
+    }
+    if let Some(path) = a.generate_entrypoint {
+        std::fs::write(path, whisper::graph::source(&config)?)?;
+        return Ok(());
+    }
+    if a.inspect {
+        let w = catena_qwen3::flux::weights::Weights::open(&model_dir)?;
+        whisper::validate_weights(&w, &config)?;
+        eprintln!(
+            "Whisper-small: {} tensors, {:.2} GiB",
+            w.tensors.len(),
+            w.byte_len() as f64 / (1u64 << 30) as f64
+        );
+        return Ok(());
+    }
+    ensure!(a.max_new_tokens > 0, "--max-new-tokens must be positive");
+    let wav = a
+        .wav
+        .ok_or_else(|| anyhow::anyhow!("a WAV path is required"))?;
+    let samples = whisper::audio::read_wav(&wav)?;
+    if a.features_only {
+        ensure!(a.dump_dir.is_some(), "--features-only requires --dump-dir");
+        let mel = whisper::audio::log_mel(&samples)?;
+        whisper::dump_f32(a.dump_dir.as_deref(), "log_mel", &mel, &[3000, 80])?;
+        return Ok(());
+    }
+    let model = Whisper::load(&model_dir, a.timings)?;
+    let text = model.transcribe(
+        &samples,
+        &Options {
+            language: a.language,
+            max_new_tokens: a.max_new_tokens,
+            timings: a.timings,
+            dump_dir: a.dump_dir,
+        },
+    )?;
+    println!("{text}");
+    Ok(())
+}

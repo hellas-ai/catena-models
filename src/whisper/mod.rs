@@ -1,0 +1,557 @@
+pub mod audio;
+pub mod graph;
+pub mod hub;
+use crate::flux::weights::Weights;
+use anyhow::{Context, Result, bail, ensure};
+use catena_lang::{
+    codegen::GpuDialect,
+    runtime::{MemOwn, Runtime, Value},
+};
+use serde::Deserialize;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::{Path, PathBuf},
+    time::Instant,
+};
+
+#[derive(Debug, Deserialize)]
+pub struct Config {
+    pub model_type: String,
+    pub d_model: usize,
+    pub num_mel_bins: usize,
+    pub encoder_layers: usize,
+    pub decoder_layers: usize,
+    pub encoder_attention_heads: usize,
+    pub decoder_attention_heads: usize,
+    pub encoder_ffn_dim: usize,
+    pub decoder_ffn_dim: usize,
+    pub max_source_positions: usize,
+    pub max_target_positions: usize,
+    pub vocab_size: usize,
+    pub decoder_start_token_id: u32,
+    pub eos_token_id: u32,
+    pub activation_function: String,
+    #[serde(default)]
+    pub scale_embedding: bool,
+}
+impl Config {
+    pub fn read(dir: &Path) -> Result<Self> {
+        let c: Self = read_json(&dir.join("config.json"))?;
+        c.validate()?;
+        Ok(c)
+    }
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.model_type == "whisper"
+                && self.d_model == 768
+                && self.num_mel_bins == 80
+                && self.encoder_layers == 12
+                && self.decoder_layers == 12
+                && self.encoder_attention_heads == 12
+                && self.decoder_attention_heads == 12
+                && self.encoder_ffn_dim == 3072
+                && self.decoder_ffn_dim == 3072
+                && self.max_source_positions == 1500
+                && self.max_target_positions == 448
+                && self.vocab_size == 51865
+                && self.activation_function == "gelu"
+                && !self.scale_embedding,
+            "only multilingual openai/whisper-small is supported"
+        );
+        ensure!(
+            (self.decoder_start_token_id as usize) < self.vocab_size
+                && (self.eos_token_id as usize) < self.vocab_size,
+            "invalid special token IDs"
+        );
+        Ok(())
+    }
+}
+fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Result<T> {
+    serde_json::from_reader(
+        std::fs::File::open(p).with_context(|| format!("reading {}", p.display()))?,
+    )
+    .with_context(|| format!("parsing {}", p.display()))
+}
+#[derive(Deserialize)]
+struct Generation {
+    lang_to_id: BTreeMap<String, u32>,
+    task_to_id: BTreeMap<String, u32>,
+    no_timestamps_token_id: u32,
+    #[serde(default)]
+    suppress_tokens: Vec<u32>,
+    #[serde(default)]
+    begin_suppress_tokens: Vec<u32>,
+}
+impl Generation {
+    fn language(&self, logits: &[f32]) -> Result<u32> {
+        ensure!(
+            logits.iter().all(|v| v.is_finite()),
+            "language detection produced nonfinite logits"
+        );
+        self.lang_to_id
+            .values()
+            .copied()
+            .max_by(|a, b| {
+                logits[*a as usize]
+                    .total_cmp(&logits[*b as usize])
+                    .then_with(|| b.cmp(a))
+            })
+            .context("checkpoint has no language tokens")
+    }
+    fn text_token(&self, logits: &mut [f32], eos: u32, first: bool) -> Result<u32> {
+        ensure!(
+            logits.iter().all(|v| v.is_finite()),
+            "decoder produced nonfinite logits"
+        );
+        for &id in &self.suppress_tokens {
+            logits[id as usize] = f32::NEG_INFINITY;
+        }
+        if first {
+            for &id in &self.begin_suppress_tokens {
+                logits[id as usize] = f32::NEG_INFINITY;
+            }
+        }
+        // Whisper control tokens follow endoftext in the vocabulary.
+        for score in logits.iter_mut().skip(eos as usize + 1) {
+            *score = f32::NEG_INFINITY;
+        }
+        logits
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.is_finite())
+            .max_by(|(ai, a), (bi, b)| a.total_cmp(b).then_with(|| bi.cmp(ai)))
+            .map(|(id, _)| id as u32)
+            .context("no finite unsuppressed logits")
+    }
+}
+pub fn bf16(values: &[f32]) -> Vec<u16> {
+    values
+        .iter()
+        .map(|x| {
+            let bits = x.to_bits();
+            ((bits.wrapping_add(0x7fff + ((bits >> 16) & 1))) >> 16) as u16
+        })
+        .collect()
+}
+pub fn host(mem: &MemOwn) -> Result<Vec<f32>> {
+    Ok(mem
+        .try_to_u16_vec()?
+        .into_iter()
+        .map(|x| f32::from_bits((x as u32) << 16))
+        .collect())
+}
+fn memories(values: Vec<Value<'_>>) -> Result<Vec<MemOwn>> {
+    values
+        .into_iter()
+        .map(|v| match v {
+            Value::MemOwn(m) => Ok(m),
+            _ => bail!("Whisper graph returned a non-owned value"),
+        })
+        .collect()
+}
+
+pub fn validate_weights(w: &Weights, c: &Config) -> Result<()> {
+    let d = c.d_model;
+    let ff = c.encoder_ffn_dim;
+    for (n, shape) in [
+        ("model.encoder.conv1.weight", vec![d, 80, 3]),
+        ("model.encoder.conv1.bias", vec![d]),
+        ("model.encoder.conv2.weight", vec![d, d, 3]),
+        ("model.encoder.conv2.bias", vec![d]),
+        ("model.encoder.embed_positions.weight", vec![1500, d]),
+        ("model.decoder.embed_tokens.weight", vec![c.vocab_size, d]),
+        ("model.decoder.embed_positions.weight", vec![448, d]),
+    ] {
+        w.validate(n, &shape)?;
+    }
+    for kind in ["encoder", "decoder"] {
+        for suffix in ["weight", "bias"] {
+            w.validate(&format!("model.{kind}.layer_norm.{suffix}"), &[d])?;
+        }
+        let layers = if kind == "encoder" {
+            c.encoder_layers
+        } else {
+            c.decoder_layers
+        };
+        for l in 0..layers {
+            let mut names = graph::layer_names(kind, l, graph::ATTN);
+            names.extend(graph::layer_names(kind, l, graph::FF));
+            if kind == "decoder" {
+                names.extend(graph::layer_names(kind, l, graph::CROSS));
+                names.extend(graph::layer_names(
+                    kind,
+                    l,
+                    &[
+                        "encoder_attn.k_proj.weight",
+                        "encoder_attn.v_proj.weight",
+                        "encoder_attn.v_proj.bias",
+                    ],
+                ));
+            }
+            for name in names {
+                let shape = if name.ends_with("fc1.weight") {
+                    vec![ff, d]
+                } else if name.ends_with("fc2.weight") {
+                    vec![d, ff]
+                } else if name.ends_with("fc1.bias") {
+                    vec![ff]
+                } else if name.ends_with("bias") || name.contains("layer_norm") {
+                    vec![d]
+                } else {
+                    vec![d, d]
+                };
+                w.validate(&name, &shape)?;
+            }
+        }
+    }
+    if w.tensors.contains_key("proj_out.weight") {
+        w.validate("proj_out.weight", &[c.vocab_size, d])?;
+        ensure!(
+            w.host_f32("proj_out.weight")? == w.host_f32("model.decoder.embed_tokens.weight")?,
+            "untied output weights are unsupported"
+        );
+    }
+    Ok(())
+}
+pub struct Options {
+    pub language: Option<String>,
+    pub max_new_tokens: usize,
+    pub timings: bool,
+    pub dump_dir: Option<PathBuf>,
+}
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            language: None,
+            max_new_tokens: 256,
+            timings: false,
+            dump_dir: None,
+        }
+    }
+}
+pub struct Whisper {
+    pub runtime: Runtime,
+    pub config: Config,
+    weights: BTreeMap<String, MemOwn>,
+    tokenizer: tokenizers::Tokenizer,
+    generation: Generation,
+}
+impl Whisper {
+    pub fn load(dir: &Path, timings: bool) -> Result<Self> {
+        let start = Instant::now();
+        let config = Config::read(dir)?;
+        let checkpoint = Weights::open(dir)?;
+        validate_weights(&checkpoint, &config)?;
+        let generation: Generation = read_json(&dir.join("generation_config.json"))?;
+        ensure!(
+            !generation.lang_to_id.is_empty(),
+            "checkpoint has no language tokens"
+        );
+        ensure!(
+            generation
+                .lang_to_id
+                .values()
+                .chain(generation.task_to_id.values())
+                .chain(generation.suppress_tokens.iter())
+                .chain(generation.begin_suppress_tokens.iter())
+                .chain(std::iter::once(&generation.no_timestamps_token_id))
+                .all(|id| (*id as usize) < config.vocab_size),
+            "generation config contains out-of-range tokens"
+        );
+        ensure!(
+            generation.task_to_id.contains_key("transcribe"),
+            "missing transcribe task token"
+        );
+        let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        ensure!(
+            tokenizer.get_vocab_size(true) == config.vocab_size,
+            "tokenizer vocabulary does not match model"
+        );
+        let source = graph::source(&config)?;
+        let runtime = Runtime::from_sources(
+            catena_lang::stdlib::sources()
+                .map(|s| -> &str { s })
+                .chain([
+                    crate::catena::BF16_HELPER_SOURCE,
+                    graph::HELPERS,
+                    source.as_str(),
+                ]),
+            GpuDialect::Hip,
+        )
+        .context("compiling Whisper Hex graphs")?;
+        let names: BTreeSet<_> = graph::encoder_names(&config)
+            .into_iter()
+            .chain(graph::cross_names(&config))
+            .chain(graph::decoder_names(&config))
+            .collect();
+        let mut weights = BTreeMap::new();
+        for name in names {
+            weights.insert(
+                name.clone(),
+                runtime.mem_u16(&bf16(&checkpoint.host_f32(&name)?))?,
+            );
+        }
+        if timings {
+            eprintln!(
+                "load/compile/weight preparation: {:.3}s",
+                start.elapsed().as_secs_f64()
+            );
+        }
+        Ok(Self {
+            runtime,
+            config,
+            weights,
+            tokenizer,
+            generation,
+        })
+    }
+    fn weight_args<'a>(&'a self, names: &[String]) -> Vec<Value<'a>> {
+        names
+            .iter()
+            .map(|n| self.weights[n].as_ref().into())
+            .collect()
+    }
+    fn fresh_cache(&self) -> Result<Vec<MemOwn>> {
+        (0..self.config.decoder_layers * 2)
+            .map(|_| {
+                self.runtime
+                    .mem_bf16_zeroed(self.config.max_target_positions * self.config.d_model)
+                    .map_err(Into::into)
+            })
+            .collect()
+    }
+    pub fn encode(&self, features: &[f32]) -> Result<MemOwn> {
+        ensure!(
+            features.len() == audio::FRAMES * audio::MELS,
+            "wrong mel feature dimensions"
+        );
+        let mut args = vec![self.runtime.mem_u16(&bf16(features))?.into()];
+        args.extend(self.weight_args(&graph::encoder_names(&self.config)));
+        let mut output = memories(self.runtime.exec_values("whisper.encode", args)?)?;
+        ensure!(output.len() == 1, "wrong encoder output count");
+        Ok(output.remove(0))
+    }
+    pub fn prepare_cross(&self, encoder: MemOwn) -> Result<Vec<MemOwn>> {
+        let mut args = vec![encoder.into()];
+        args.extend(self.weight_args(&graph::cross_names(&self.config)));
+        let out = memories(self.runtime.exec_values("whisper.prepare-cross-kv", args)?)?;
+        ensure!(
+            out.len() == self.config.decoder_layers * 2,
+            "wrong cross cache count"
+        );
+        Ok(out)
+    }
+    pub fn step(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: Vec<MemOwn>,
+        cross: &[MemOwn],
+    ) -> Result<(Vec<f32>, Vec<MemOwn>)> {
+        ensure!(
+            (token as usize) < self.config.vocab_size && pos < self.config.max_target_positions,
+            "invalid decoder token or position"
+        );
+        ensure!(
+            cache.len() == self.config.decoder_layers * 2 && cross.len() == cache.len(),
+            "wrong decoder cache count"
+        );
+        let mut args = vec![(token as u64).into(), (pos as u64).into()];
+        for (l, owner) in cache.into_iter().enumerate() {
+            args.push(owner.into());
+            if l % 2 == 1 {
+                args.push(cross[l - 1].as_ref().into());
+                args.push(cross[l].as_ref().into());
+            }
+        }
+        args.extend(self.weight_args(&graph::decoder_names(&self.config)));
+        let mut out = memories(self.runtime.exec_values("whisper.decode-step", args)?)?;
+        ensure!(
+            out.len() == 1 + self.config.decoder_layers * 2,
+            "wrong decoder output count"
+        );
+        let logits = host(&out.remove(0))?;
+        Ok((logits, out))
+    }
+    pub fn transcribe(&self, samples: &[f32], options: &Options) -> Result<String> {
+        ensure!(
+            options.max_new_tokens > 0,
+            "--max-new-tokens must be positive"
+        );
+        let language_override = options
+            .language
+            .as_ref()
+            .map(|lang| {
+                self.generation
+                    .lang_to_id
+                    .get(&format!("<|{lang}|>"))
+                    .copied()
+                    .with_context(|| format!("unknown language code {lang}"))
+            })
+            .transpose()?;
+        let start = Instant::now();
+        let features = audio::log_mel(samples)?;
+        let preprocessing = start.elapsed();
+        dump_f32(
+            options.dump_dir.as_deref(),
+            "log_mel",
+            &features,
+            &[3000, 80],
+        )?;
+        let start = Instant::now();
+        let encoder = self.encode(&features)?;
+        // Host reads synchronize measured stages and optionally retain validation artifacts.
+        let encoded = host(&encoder)?;
+        let encoder_time = start.elapsed();
+        dump_f32(
+            options.dump_dir.as_deref(),
+            "encoder",
+            &encoded,
+            &[1500, self.config.d_model],
+        )?;
+        let start = Instant::now();
+        let cross = self.prepare_cross(encoder)?;
+        let _ = host(&cross[cross.len() - 1])?;
+        let cross_time = start.elapsed();
+        let start = Instant::now();
+        let mut cache = self.fresh_cache()?;
+        let language = if let Some(id) = language_override {
+            id
+        } else {
+            let (logits, _) = self.step(self.config.decoder_start_token_id, 0, cache, &cross)?;
+            cache = self.fresh_cache()?;
+            self.generation.language(&logits)?
+        };
+        if options.timings {
+            let name = self
+                .generation
+                .lang_to_id
+                .iter()
+                .find(|(_, id)| **id == language)
+                .unwrap()
+                .0;
+            eprintln!("language: {name}");
+        }
+        let prefix = [
+            self.config.decoder_start_token_id,
+            language,
+            self.generation.task_to_id["transcribe"],
+            self.generation.no_timestamps_token_id,
+        ];
+        let mut logits = Vec::new();
+        for (pos, token) in prefix.into_iter().enumerate() {
+            (logits, cache) = self.step(token, pos, cache, &cross)?;
+        }
+        let mut generated = Vec::new();
+        let mut eos = false;
+        let limit = options
+            .max_new_tokens
+            .min(self.config.max_target_positions - prefix.len());
+        if let Some(dir) = &options.dump_dir {
+            std::fs::write(dir.join("prefix.json"), serde_json::to_vec(&prefix)?)?;
+        }
+        for i in 0..limit {
+            ensure!(
+                logits.iter().all(|x| x.is_finite()),
+                "decoder produced nonfinite logits"
+            );
+            dump_f32(
+                options.dump_dir.as_deref(),
+                &format!("logits_{i:03}"),
+                &logits,
+                &[self.config.vocab_size],
+            )?;
+            let token =
+                self.generation
+                    .text_token(&mut logits, self.config.eos_token_id, i == 0)?;
+            if token == self.config.eos_token_id {
+                eos = true;
+                break;
+            }
+            generated.push(token);
+            if i + 1 < limit {
+                (logits, cache) = self.step(token, prefix.len() + i, cache, &cross)?;
+            }
+        }
+        if !eos {
+            eprintln!("transcription truncated at the token/position limit");
+        }
+        if options.timings {
+            let decoding = start.elapsed().as_secs_f64();
+            let total = preprocessing.as_secs_f64()
+                + encoder_time.as_secs_f64()
+                + cross_time.as_secs_f64()
+                + decoding;
+            eprintln!(
+                "preprocessing: {:.3}s; encoder: {:.3}s; cross K/V: {:.3}s; decode: {:.3}s ({:.2} text tokens/s); warm RTF: {:.3}",
+                preprocessing.as_secs_f64(),
+                encoder_time.as_secs_f64(),
+                cross_time.as_secs_f64(),
+                decoding,
+                generated.len() as f64 / decoding,
+                total / (samples.len() as f64 / 16000.)
+            );
+            eprintln!(
+                "persistent K/V: {:.2} MiB",
+                (self.config.decoder_layers
+                    * 2
+                    * self.config.d_model
+                    * (self.config.max_source_positions + self.config.max_target_positions)
+                    * 2) as f64
+                    / 1048576.
+            );
+        }
+        if let Some(dir) = &options.dump_dir {
+            std::fs::write(dir.join("tokens.json"), serde_json::to_vec(&generated)?)?;
+        }
+        self.tokenizer
+            .decode(&generated, true)
+            .map(|s| s.trim().to_string())
+            .map_err(|e| anyhow::anyhow!(e.to_string()))
+    }
+}
+pub fn dump_f32(dir: Option<&Path>, name: &str, values: &[f32], shape: &[usize]) -> Result<()> {
+    if let Some(dir) = dir {
+        std::fs::create_dir_all(dir)?;
+        let bytes: Vec<_> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        std::fs::write(dir.join(format!("{name}.f32")), bytes)?;
+        std::fs::write(
+            dir.join(format!("{name}.shape.json")),
+            serde_json::to_vec(shape)?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn generation() -> Generation {
+        Generation {
+            lang_to_id: BTreeMap::from([("<|en|>".into(), 5), ("<|fr|>".into(), 6)]),
+            task_to_id: BTreeMap::new(),
+            no_timestamps_token_id: 7,
+            suppress_tokens: vec![1],
+            begin_suppress_tokens: vec![4],
+        }
+    }
+    #[test]
+    fn language_selection_suppression_eos_and_ties() {
+        let g = generation();
+        assert_eq!(g.language(&[0., 0., 0., 0., 0., 2., 3., 0.]).unwrap(), 6);
+        assert_eq!(g.language(&[0., 0., 0., 0., 0., 3., 3., 0.]).unwrap(), 5);
+        let logits = [0., 99., 2., 2., 3., 100., 100., 100.];
+        assert_eq!(g.text_token(&mut logits.clone(), 4, true).unwrap(), 2);
+        assert_eq!(g.text_token(&mut logits.clone(), 4, false).unwrap(), 4);
+        assert!(g.text_token(&mut [f32::NAN; 8], 4, false).is_err());
+        assert!(g.language(&[f32::NAN; 8]).is_err());
+    }
+    #[test]
+    fn bf16_rounds_ties_to_even() {
+        assert_eq!(
+            bf16(&[f32::from_bits(0x3f808000), f32::from_bits(0x3f818000)]),
+            [0x3f80, 0x3f82]
+        );
+    }
+}
