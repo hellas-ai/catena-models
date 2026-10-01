@@ -278,7 +278,7 @@ dependencies = [
 [[package]]
 name = "catena-lang"
 version = "0.1.0"
-source = "git+ssh://git@github.com/hellas-ai/exploratory-catena.git?rev=6ab404d3ae7991140e54576df8e09da2da95e00e#6ab404d3ae7991140e54576df8e09da2da95e00e"
+source = "git+ssh://git@github.com/hellas-ai/exploratory-catena.git?rev=fd6793920e8d3e34ee2fad18690f5fe4e31d4c67#fd6793920e8d3e34ee2fad18690f5fe4e31d4c67"
 dependencies = [
  "anyhow",
  "bincode",
@@ -307,6 +307,7 @@ dependencies = [
  "libc",
  "libloading",
  "memmap2",
+ "metacat",
  "png",
  "rand 0.9.5",
  "rand_chacha",
