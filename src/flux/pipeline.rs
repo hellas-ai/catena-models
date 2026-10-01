@@ -87,15 +87,26 @@ impl FluxPipeline {
             )?;
         }
         let t = Instant::now();
-        let encoder = TextEncoder::load_with_backend(&self.snapshot, tokens.valid, o.backend)?;
+        let encoder = TextEncoder::load_with_backend(
+            &self.snapshot,
+            tokens.valid,
+            dump.is_some(),
+            o.backend,
+        )?;
         eprintln!("text load/compile: {:.2}s", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let conditioning = encoder.encode(&tokens, dump)?;
         eprintln!("text encode: {:.2}s", t.elapsed().as_secs_f64());
         drop(encoder);
         let t = Instant::now();
-        let transformer =
-            Transformer::load_with_backend(&self.snapshot, o.height, o.width, o.backend)?;
+        let transformer = Transformer::load_with_backend(
+            &self.snapshot,
+            o.height,
+            o.width,
+            o.steps,
+            dump.is_some(),
+            o.backend,
+        )?;
         eprintln!(
             "transformer load/compile: {:.2}s",
             t.elapsed().as_secs_f64()
@@ -110,72 +121,33 @@ impl FluxPipeline {
                 .map(|_| StandardNormal.sample(&mut rng))
                 .collect::<Vec<f32>>()
         };
-        let bits: Vec<_> = noise.into_iter().map(f32_to_bf16).collect();
-        let mut latents = transformer.ops.runtime.mem_u16(&bits)?;
-        super::debug::dump(dump, "initial_noise", &latents, &[1, rows, 128], true)?;
-        let sigmas = schedule(rows, o.steps);
-        if let Some(dir) = dump {
-            std::fs::write(
-                dir.join("schedule.json"),
-                serde_json::to_vec_pretty(&sigmas)?,
-            )?;
-        }
+        let noise = transformer.ops.runtime.mem_f32(&noise)?;
         let t = Instant::now();
-        for step in 0..o.steps {
-            let st = Instant::now();
-            let velocity = transformer.predict_velocity(
-                latents.as_ref(),
-                conditioning.as_ref(),
-                sigmas[step],
-                step,
-                dump,
-            )?;
-            latents = transformer.ops.run(
-                "flux.euler",
-                vec![
-                    latents.as_ref().into(),
-                    velocity.as_ref().into(),
-                    (count as u64).into(),
-                    (sigmas[step + 1] - sigmas[step]).into(),
-                ],
-            )?;
-            super::debug::dump(
-                dump,
-                &format!("step_{step}_latents"),
-                &latents,
-                &[1, rows, 128],
-                true,
-            )?;
-            eprintln!(
-                "diffusion step {}/{}: {:.2}s",
-                step + 1,
-                o.steps,
-                st.elapsed().as_secs_f64()
-            );
-        }
+        let latents = transformer.denoise(noise.as_ref(), conditioning.as_ref(), dump)?;
         eprintln!("denoise: {:.2}s", t.elapsed().as_secs_f64());
         drop(transformer);
         drop(conditioning);
         let t = Instant::now();
-        let vae = VaeDecoder::load_with_backend(&self.snapshot, o.backend)?;
+        let vae = VaeDecoder::load_with_backend(
+            &self.snapshot,
+            o.height,
+            o.width,
+            dump.is_some(),
+            o.backend,
+        )?;
         eprintln!("VAE load/compile: {:.2}s", t.elapsed().as_secs_f64());
         let t = Instant::now();
-        let rgb = vae.decode(&latents, o.height, o.width, dump)?;
+        let rgb = vae.decode(&latents, dump)?;
         let values = rgb.try_to_f32_vec()?;
         ensure!(
             values.iter().all(|v| v.is_finite()),
             "VAE produced non-finite pixels"
         );
-        let pixels = o.width * o.height;
-        let mut bytes = Vec::with_capacity(pixels * 3);
-        for pixel in 0..pixels {
-            for channel in 0..3 {
-                bytes.push(
-                    ((values[channel * pixels + pixel] / 2. + 0.5).clamp(0., 1.) * 255.)
-                        .round_ties_even() as u8,
-                );
-            }
-        }
+        // Generated inference returns normalized HWC RGB; this is generic PNG quantization.
+        let bytes: Vec<u8> = values
+            .into_iter()
+            .map(|v| (v * 255.).round_ties_even() as u8)
+            .collect();
         let mut png = png::Encoder::new(
             BufWriter::new(
                 File::create(&o.output)

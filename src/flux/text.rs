@@ -8,7 +8,7 @@ use crate::catena::{
     InferenceOptions, InferencePrecision, MatrixCoreMode, generated_model_source_for_options,
 };
 use anyhow::{Context, Result, ensure};
-use catena_lang::runtime::{MemOwn, Value};
+use catena_lang::runtime::MemOwn;
 use std::path::Path;
 use tokenizers::Tokenizer;
 pub const SEQUENCE: usize = 512;
@@ -44,15 +44,16 @@ pub struct TextEncoder {
     pub ops: Ops,
     weights: Weights,
     names: Vec<String>,
-    config: crate::spec::ModelConfig,
+    debug: bool,
 }
 impl TextEncoder {
     pub fn load(snapshot: &Path, valid: usize) -> Result<Self> {
-        Self::load_with_backend(snapshot, valid, super::ops::Backend::Fast)
+        Self::load_with_backend(snapshot, valid, false, super::ops::Backend::Fast)
     }
     pub fn load_with_backend(
         snapshot: &Path,
-        valid: usize,
+        _valid: usize,
+        debug: bool,
         backend: super::ops::Backend,
     ) -> Result<Self> {
         let tc: TextConfig = read(snapshot.join("text_encoder/config.json"))?;
@@ -98,40 +99,7 @@ impl TextEncoder {
             }
         }
         let source_start = std::time::Instant::now();
-        let mut source = generated_model_source_for_options(
-            &config,
-            InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma),
-        )?;
-        let end = source
-            .find("(def program qwen3 :\n")
-            .context("Qwen entrypoint marker missing")?;
-        source.truncate(end);
-        source = source.replace(
-            "qwen3.cached-attention [cache-after-attention context.]",
-            "flux.qwen-attention [cache-after-attention context.]",
-        );
-        // HF Qwen rounds RoPE cos/sin and each product to BF16 before adding.
-        source = source
-            .replace(
-                "qwen3.f32-buffer-at [cosine.]",
-                "qwen3.f32-buffer-at f32.to-bf16 bf16.to-f32 [cosine.]",
-            )
-            .replace(
-                "qwen3.f32-buffer-at [sine.]",
-                "qwen3.f32-buffer-at f32.to-bf16 bf16.to-f32 [sine.]",
-            )
-            .replace(
-                "([.projection-value cosine] f32.mul [cosine-term.])",
-                "([.projection-value cosine] f32.mul f32.to-bf16 bf16.to-f32 [cosine-term.])",
-            )
-            .replace(
-                "([.partner-value sine] f32.mul [sine-term.])",
-                "([.partner-value sine] f32.mul f32.to-bf16 bf16.to-f32 [sine-term.])",
-            );
-        source.push_str(
-            &include_str!("../catena/flux_text_attention.hex")
-                .replace("{{VALID_KEYS}}", &format!("{valid:016X}")),
-        );
+        let source = generated_source_with_debug(&config, debug)?;
         super::ops::startup_timing("text source assembly", source_start);
         let ops = Ops::with_backend(Some(&source), backend)?;
         weights.prepare(&ops.runtime, &names, false)?;
@@ -145,83 +113,206 @@ impl TextEncoder {
             ops,
             weights,
             names,
-            config,
+            debug,
         })
     }
     pub fn encode(&self, tokens: &PromptTokens, dump: Option<&Path>) -> Result<MemOwn> {
-        ensure!(tokens.ids.len() == SEQUENCE, "expected 512 tokens");
-        let r = &self.ops.runtime;
-        let ids = r.mem_u64(&tokens.ids)?;
-        let mut hidden = self.ops.run(
-            "qwen3.embedding",
-            vec![
-                ids.as_ref().into(),
-                self.weights.gpu_ref(&self.names[0])?.into(),
-            ],
-        )?;
-        let rope = self.ops.run(
-            "qwen3.rope-table",
-            vec![0u64.into(), (SEQUENCE as u64).into()],
-        )?;
-        let mut cache = r.mem_bf16_zeroed(
-            2 * SEQUENCE * self.config.num_key_value_heads * self.config.head_dim,
-        )?;
-        let mut captures = Vec::new();
-        for layer in 0..27 {
-            let mut args = vec![
-                hidden.into(),
-                rope.as_ref().into(),
-                (SEQUENCE as u64).into(),
-                cache.into(),
-                (SEQUENCE as u64).into(),
-                0u64.into(),
-                0u64.into(),
-            ];
-            for name in &self.names[1 + layer * 11..1 + (layer + 1) * 11] {
-                args.push(self.weights.gpu_ref(name)?.into());
-            }
-            let mut outputs = r.exec_values("flux.text-layer", args)?;
-            cache = take_memory(outputs.pop().context("missing cache")?)?;
-            hidden = take_memory(outputs.pop().context("missing hidden")?)?;
-            if CAPTURES.contains(&(layer + 1)) {
-                super::debug::dump(
-                    dump,
-                    &format!("text_{}", layer + 1),
-                    &hidden,
-                    &[1, 512, 2560],
-                    true,
-                )?;
-                captures.push(self.ops.copy(hidden.as_ref(), true)?);
-            }
-            eprintln!("text layer {}/27", layer + 1);
+        ensure!(
+            tokens.ids.len() == SEQUENCE && tokens.valid > 0 && tokens.valid <= SEQUENCE,
+            "invalid prompt tokens"
+        );
+        let ids = self.ops.runtime.mem_u64(&tokens.ids)?;
+        let mut args = vec![ids.as_ref().into(), (tokens.valid as u64).into()];
+        for name in &self.names {
+            args.push(self.weights.gpu_ref(name)?.into());
         }
-        let first = self.ops.run(
-            "flux.concat-bf16",
-            vec![
-                captures[0].as_ref().into(),
-                captures[1].as_ref().into(),
-                (512 * 5120u64).into(),
-                2560u64.into(),
-                2560u64.into(),
-            ],
-        )?;
-        let result = self.ops.run(
-            "flux.concat-bf16",
-            vec![
-                first.as_ref().into(),
-                captures[2].as_ref().into(),
-                (512 * 7680u64).into(),
-                5120u64.into(),
-                2560u64.into(),
-            ],
-        )?;
+        let program = super::graph::Program {
+            source: String::new(),
+            weights: vec![],
+            captures: if self.debug {
+                CAPTURES
+                    .iter()
+                    .map(|n| (format!("text_{n}"), vec![1, 512, 2560], true))
+                    .collect()
+            } else {
+                vec![]
+            },
+        };
+        let result =
+            super::graph::execute(&self.ops.runtime, "flux.encode-text", args, &program, dump)?;
         super::debug::dump(dump, "conditioning", &result, &[1, 512, 7680], true)?;
         Ok(result)
     }
 }
-fn take_memory(v: Value<'_>) -> Result<MemOwn> {
-    match v {
-        Value::MemOwn(m) => Ok(m),
-        _ => anyhow::bail!("unexpected Qwen output"),
+
+/// Generates the complete encoder once; valid length remains a runtime scalar.
+pub fn generated_source(config: &crate::spec::ModelConfig) -> Result<String> {
+    generated_source_with_debug(config, false)
+}
+pub fn generated_source_with_debug(
+    config: &crate::spec::ModelConfig,
+    debug: bool,
+) -> Result<String> {
+    let mut source = generated_model_source_for_options(
+        config,
+        InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma),
+    )?;
+    let end = source
+        .find("(def program qwen3 :\n")
+        .context("Qwen entrypoint marker missing")?;
+    source.truncate(end);
+    source = source.replace(
+        "qwen3.cached-attention [cache-after-attention context.]",
+        "flux.qwen-attention [cache-after-attention context.]",
+    );
+    // Preserve the existing HF BF16 RoPE operation boundaries.
+    source = source
+        .replace(
+            "qwen3.f32-buffer-at [cosine.]",
+            "qwen3.f32-buffer-at f32.to-bf16 bf16.to-f32 [cosine.]",
+        )
+        .replace(
+            "qwen3.f32-buffer-at [sine.]",
+            "qwen3.f32-buffer-at f32.to-bf16 bf16.to-f32 [sine.]",
+        )
+        .replace(
+            "([.projection-value cosine] f32.mul [cosine-term.])",
+            "([.projection-value cosine] f32.mul f32.to-bf16 bf16.to-f32 [cosine-term.])",
+        )
+        .replace(
+            "([.partner-value sine] f32.mul [sine-term.])",
+            "([.partner-value sine] f32.mul f32.to-bf16 bf16.to-f32 [sine-term.])",
+        );
+    // Extend only the dense layer. Cache addressing still receives start=layer=0.
+    let begin = source
+        .find("(def program qwen3.cached-dense-decoder-layer :")
+        .unwrap();
+    let end = source[begin + 1..]
+        .find("(def program ")
+        .map_or(source.len(), |i| begin + 1 + i);
+    let layer = source[begin..end].to_string();
+    let layer = layer
+        .replacen("\n  }\n  ->", "\n    (u64 val)\n  }\n  ->", 1)
+        .replacen("down-weight.]", "down-weight valid.]", 1)
+        .replace(
+            "[.start] [.layer]}\n    flux.qwen-attention",
+            "[.start] [.layer] [.valid]}\n    flux.qwen-attention",
+        );
+    source.replace_range(begin..end, &layer);
+    source += include_str!("../catena/flux_text_attention.hex");
+    let c = |n: usize| format!("(const.u64.0x{n:016X})");
+    let mut body = format!(
+        " ({{[.ids] [.w0]}} qwen3.embedding [h0.])\n ({{{} {}}} qwen3.rope-table [rope.])\n ({} inference.zeros-bf16 [cache0.])\n",
+        c(0),
+        c(512),
+        c(2 * 512 * config.num_key_value_heads * config.head_dim)
+    );
+    let mut hidden = "h0".to_string();
+    let mut cache = "cache0".to_string();
+    let mut captures = Vec::new();
+    for l in 0..27 {
+        let args = (1 + l * 11..1 + (l + 1) * 11)
+            .map(|i| format!("[.w{i}]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        body += &format!(
+            " ({{[.{hidden}] [.rope] {} [.{cache}] {} {} {} {args} [.valid]}} flux.text-layer [h{} cache{}.])\n",
+            c(512),
+            c(512),
+            c(0),
+            c(0),
+            l + 1,
+            l + 1
+        );
+        hidden = format!("h{}", l + 1);
+        cache = format!("cache{}", l + 1);
+        if CAPTURES.contains(&(l + 1)) {
+            let name = format!("capture{}", l + 1);
+            body += &format!(
+                " ({{[.{hidden}] {}}} flux.copy-bf16-o [{name}.])\n",
+                c(512 * 2560)
+            );
+            captures.push(name);
+        }
     }
+    body += &format!(
+        " ({{[.{}] [.{}] {} {} {}}} flux.concat-bf16-oo [first.])\n ({{[.first] [.{}] {} {} {}}} flux.concat-bf16-oo [result.])\n",
+        captures[0],
+        captures[1],
+        c(512 * 5120),
+        c(2560),
+        c(2560),
+        captures[2],
+        c(512 * 7680),
+        c(5120),
+        c(2560)
+    );
+    let mut result = "result".to_string();
+    for (i, m) in captures
+        .iter()
+        .filter(|_| !debug)
+        .chain([&hidden, &cache, &"first".to_string()])
+        .enumerate()
+    {
+        body += &format!(" ({{[.{m}] [.{result}]}} qwen3.free-bf16-before [done{i}.])\n");
+        result = format!("done{i}");
+    }
+    body += &format!(" ({{[.rope] [.{result}]}} qwen3.free-f32-before [done-rope.])\n");
+    if debug {
+        body += &format!(
+            " {{[.done-rope] {}}}\n",
+            captures
+                .iter()
+                .map(|n| format!("[.{n}]"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    } else {
+        body += " [.done-rope]\n";
+    }
+    let output_types = if debug {
+        "{(cap.own mem) (cap.own mem) (cap.own mem) (cap.own mem)}"
+    } else {
+        "(cap.own mem)"
+    };
+    source.push_str(
+        "\n# Safetensors arguments for flux.encode-text:\n# w0: model.embed_tokens.weight (BF16)\n",
+    );
+    for l in 0..27 {
+        for (i, suffix) in [
+            "input_layernorm.weight",
+            "self_attn.q_proj.weight",
+            "self_attn.k_proj.weight",
+            "self_attn.v_proj.weight",
+            "self_attn.o_proj.weight",
+            "self_attn.q_norm.weight",
+            "self_attn.k_norm.weight",
+            "post_attention_layernorm.weight",
+            "mlp.gate_proj.weight",
+            "mlp.up_proj.weight",
+            "mlp.down_proj.weight",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let dtype = if suffix.ends_with("norm.weight") {
+                "F32"
+            } else {
+                "BF16"
+            };
+            source.push_str(&format!(
+                "# w{}: model.layers.{l}.{suffix} ({dtype})\n",
+                1 + l * 11 + i
+            ));
+        }
+    }
+    let weights = (0..1 + 27 * 11)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>();
+    source += &format!(
+        "\n(def program flux.encode-text : {{(cap.ref mem) (u64 val) {}}} -> {output_types}\n= ([ids valid {}.]\n{body}))\n",
+        vec!["(cap.ref mem)"; weights.len()].join(" "),
+        weights.join(" ")
+    );
+    Ok(source)
 }

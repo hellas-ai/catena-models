@@ -1278,3 +1278,47 @@
  {[.xb] [.xc] [.wb] [.wc] [.n] [.k] (const.u64.0x0000000000000000) [.co]}
  materializec.linear-bf16 [output.] ({[.n] [.output]} buf.to-mem)
 ))
+
+(def program flux.noise-to-bf16-at : ([n.] {({(cap.ref mem) (u64 val)} *) ([.n] ix val)}) -> ([n.] (bf16 val))
+= ([env index.] ([.env] *.elim [x count.]) ([.index] ix.to-u64 [i.])
+ ({[.x] [.i]} flux.read-f32 [value.]) ([.value] f32.to-bf16)
+))
+(def program flux.noise-to-bf16 : {(cap.ref mem) (u64 val)} -> (cap.own mem)
+= ([x count.]
+ ([.count] u64.name [n.])
+ ({[.x] [.count]} *.intro [env.])
+ {[.n] ({[.n] [.env] (([.n] :.param) name.flux.noise-to-bf16-at)} materializec)} buf.to-mem
+))
+
+(def program flux.noise-to-bf16-o-at : ([n.] {({(cap.own mem) (u64 val)} *) ([.n] ix val)}) -> ([n.] (bf16 val))
+= ([env index.] ([.env] *.elim [x count.]) ([.index] ix.to-u64 [i.])
+ ({[.x] [.i]} flux.read-f32-o [value.]) ([.value] f32.to-bf16)
+))
+(def program flux.noise-to-bf16-o : {(cap.own mem) (u64 val)} -> (cap.own mem)
+= ([x count.]
+ ([.count] u64.name [n.])
+ ({[.x] [.count]} *.intro [env.])
+ {[.n] ({[.n] [.env] (([.n] :.param) name.flux.noise-to-bf16-o-at)} materializec)} buf.to-mem
+))
+
+(def program flux.image-rgb-at : ([n.] {({(cap.ref mem) ({(u64 val) (u64 val)} *)} *) ([.n] ix val)}) -> ([n.] (f32 val))
+= ([env index.] ([.env] *.elim [x env-rest-0.]) ([.env-rest-0] *.elim [count pixels.]) ([.index] ix.to-u64 [i.])
+ (const.u64.0x0000000000000003 [three.]) ([.i three] u64.div [pixel.]) ([.i three] u64.rem [channel.]) ([.channel pixels] u64.mul [base.]) ([.base pixel] u64.add [source.]) ({[.x] [.source]} flux.read-f32 [value.])(const.u32.0x3F000000 u32.bitcast-f32 [half.])(const.u32.0x00000000 u32.bitcast-f32 [zero.])(const.u32.0x3F800000 u32.bitcast-f32 [one.]) ([.value half] f32.mul [scaled.]) ([.scaled half] f32.add [unit.]) ([.unit zero] f32.lt [negative.]) ([.negative zero unit] f32.select [lower.]) ([.one lower] f32.lt [above.]) ([.above one lower] f32.select)
+))
+(def program flux.image-rgb : {(cap.ref mem) (u64 val) (u64 val)} -> (cap.own mem)
+= ([x count pixels.]
+ ([.count] u64.name [n.])
+ ({[.count] [.pixels]} *.intro [env-1.]) ({[.x] [.env-1]} *.intro [env.])
+ {[.n] ({[.n] [.env] (([.n] :.param) name.flux.image-rgb-at)} materializec)} buf.to-mem
+))
+
+(def program flux.image-rgb-o-at : ([n.] {({(cap.own mem) ({(u64 val) (u64 val)} *)} *) ([.n] ix val)}) -> ([n.] (f32 val))
+= ([env index.] ([.env] *.elim [x env-rest-0.]) ([.env-rest-0] *.elim [count pixels.]) ([.index] ix.to-u64 [i.])
+ (const.u64.0x0000000000000003 [three.]) ([.i three] u64.div [pixel.]) ([.i three] u64.rem [channel.]) ([.channel pixels] u64.mul [base.]) ([.base pixel] u64.add [source.]) ({[.x] [.source]} flux.read-f32-o [value.])(const.u32.0x3F000000 u32.bitcast-f32 [half.])(const.u32.0x00000000 u32.bitcast-f32 [zero.])(const.u32.0x3F800000 u32.bitcast-f32 [one.]) ([.value half] f32.mul [scaled.]) ([.scaled half] f32.add [unit.]) ([.unit zero] f32.lt [negative.]) ([.negative zero unit] f32.select [lower.]) ([.one lower] f32.lt [above.]) ([.above one lower] f32.select)
+))
+(def program flux.image-rgb-o : {(cap.own mem) (u64 val) (u64 val)} -> (cap.own mem)
+= ([x count pixels.]
+ ([.count] u64.name [n.])
+ ({[.count] [.pixels]} *.intro [env-1.]) ({[.x] [.env-1]} *.intro [env.])
+ {[.n] ({[.n] [.env] (([.n] :.param) name.flux.image-rgb-o-at)} materializec)} buf.to-mem
+))

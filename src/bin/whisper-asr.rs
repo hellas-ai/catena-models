@@ -35,7 +35,7 @@ fn main() -> Result<()> {
         eprintln!("Whisper snapshot: {}", model_dir.display());
     }
     if let Some(path) = a.generate_entrypoint {
-        std::fs::write(path, whisper::graph::source(&config)?)?;
+        std::fs::write(path, whisper::graph::bundle(&config, a.dump_dir.is_some())?)?;
         return Ok(());
     }
     if a.inspect {
@@ -59,7 +59,7 @@ fn main() -> Result<()> {
         whisper::dump_f32(a.dump_dir.as_deref(), "log_mel", &mel, &[3000, 80])?;
         return Ok(());
     }
-    let model = Whisper::load(&model_dir, a.timings)?;
+    let model = Whisper::load_with_debug(&model_dir, a.timings, a.dump_dir.is_some())?;
     let text = model.transcribe(
         &samples,
         &Options {

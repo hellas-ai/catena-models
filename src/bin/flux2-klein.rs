@@ -23,6 +23,9 @@ struct Args {
     steps: usize,
     #[arg(long)]
     inspect: bool,
+    /// Write the three complete Hex stage assets and exit without initializing a GPU.
+    #[arg(long, value_name = "DIR", conflicts_with = "inspect")]
+    generate_entrypoint: Option<PathBuf>,
     /// Print checkpoint, compiler and weight preparation startup timings.
     #[arg(long)]
     startup_timings: bool,
@@ -44,6 +47,36 @@ fn main() -> Result<()> {
     d.validate()?;
     let v: config::VaeConfig = config::read(p.join("vae/config.json"))?;
     v.validate()?;
+    if let Some(dir) = &a.generate_entrypoint {
+        let options = catena_qwen3::flux::pipeline::GenerationOptions {
+            backend: a.backend,
+            prompt: String::new(),
+            output: a.output.clone(),
+            seed: a.seed,
+            width: a.width,
+            height: a.height,
+            steps: a.steps,
+            dump_dir: a.dump_dir.clone(),
+            noise: a.noise.clone(),
+        };
+        options.validate()?;
+        let debug = a.dump_dir.is_some();
+        let text = catena_qwen3::flux::text::generated_source_with_debug(&t.qwen()?, debug)?;
+        let denoise =
+            catena_qwen3::flux::graph::transformer(&d, a.height, a.width, a.steps, debug)?;
+        let vae = catena_qwen3::flux::graph::vae(&v, a.height, a.width, debug)?;
+        std::fs::create_dir_all(dir)?;
+        for (name, source) in [
+            ("flux-encode-text.hex", text),
+            ("flux-denoise.hex", denoise.source),
+            ("flux-decode-image.hex", vae.source),
+        ] {
+            let path = dir.join(name);
+            std::fs::write(&path, catena_qwen3::flux::graph::bundle(&source, a.backend))?;
+            println!("generated {}", path.display());
+        }
+        return Ok(());
+    }
     for component in ["text_encoder", "transformer", "vae"] {
         let w = Weights::open(&p.join(component))?;
         eprintln!(

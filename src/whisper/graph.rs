@@ -108,6 +108,9 @@ pub fn decoder_names(cfg: &Config) -> Vec<String> {
     n
 }
 pub fn source(cfg: &Config) -> Result<String> {
+    source_with_debug(cfg, false)
+}
+pub fn source_with_debug(cfg: &Config, debug: bool) -> Result<String> {
     cfg.validate()?;
     let mut s = MODEL.to_string();
     for (k, n) in [
@@ -309,5 +312,18 @@ pub fn source(cfg: &Config) -> Result<String> {
         caches.iter().map(|n| v(n)).collect::<Vec<_>>().join(" ")
     );
     s += &entry("decode-step", &inputs, &vec![own; 1 + caches.len()], &b);
+    let control = super::generation::source(cfg, &s, debug);
+    s += &control;
     Ok(s)
+}
+
+/// Full deployable model asset; the receiving node supplies only compiler stdlib.
+pub fn bundle(cfg: &Config, debug: bool) -> Result<String> {
+    Ok([
+        crate::catena::BF16_HELPER_SOURCE,
+        include_str!("../catena/inference_helpers.hex"),
+        HELPERS,
+        &source_with_debug(cfg, debug)?,
+    ]
+    .join("\n"))
 }
