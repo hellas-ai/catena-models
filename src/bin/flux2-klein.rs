@@ -1,9 +1,9 @@
 use anyhow::Result;
-use catena_qwen3::flux::{config, weights::Weights};
+use catena_qwen3::{flux::config, weights::Weights};
 use clap::Parser;
 use std::path::PathBuf;
 #[derive(Parser)]
-#[command(about = "Offline FLUX.2-klein-4B text-to-image generation")]
+#[command(about = "FLUX.2-klein-4B text-to-image generation")]
 struct Args {
     #[arg(long, value_enum, default_value_t = catena_qwen3::flux::ops::Backend::Fast)]
     backend: catena_qwen3::flux::ops::Backend,
@@ -77,8 +77,12 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    for component in ["text_encoder", "transformer", "vae"] {
-        let w = Weights::open(&p.join(component))?;
+    for (component, filename) in [
+        ("text_encoder", "model.safetensors.index.json"),
+        ("transformer", "diffusion_pytorch_model.safetensors"),
+        ("vae", "diffusion_pytorch_model.safetensors"),
+    ] {
+        let w = Weights::open(&p.join(component).join(filename))?;
         eprintln!(
             "{component}: {} tensors, {:.2} GiB",
             w.tensors.len(),

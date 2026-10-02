@@ -4,11 +4,7 @@ use catena_lang::{
     runtime::{MemOwn, MemRef, Runtime, Value},
 };
 pub const SOURCE: &str = include_str!("../catena/flux_helpers.hex");
-pub(crate) fn startup_timing(stage: &str, start: std::time::Instant) {
-    if std::env::var_os("CATENA_STARTUP_TIMINGS").is_some() {
-        eprintln!("[startup] {stage}: {:.4}s", start.elapsed().as_secs_f64());
-    }
-}
+pub(crate) use crate::weights::startup_timing;
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum Backend {
     #[default]

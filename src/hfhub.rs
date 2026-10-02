@@ -243,3 +243,271 @@ mod tests {
         assert!(!is_model_gguf("vision/mmproj.gguf"));
     }
 }
+
+/// A safetensors index names its shards relative to the index file.
+#[derive(serde::Deserialize)]
+pub(crate) struct SafetensorsIndex {
+    pub weight_map: BTreeMap<String, String>,
+}
+impl SafetensorsIndex {
+    pub fn shards(&self) -> Result<Vec<String>> {
+        ensure!(!self.weight_map.is_empty(), "empty safetensors index");
+        let shards: std::collections::BTreeSet<_> = self.weight_map.values().cloned().collect();
+        for name in &shards {
+            relative_path(name)?;
+        }
+        Ok(shards.into_iter().collect())
+    }
+}
+pub fn read_json<T: serde::de::DeserializeOwned>(path: impl AsRef<std::path::Path>) -> Result<T> {
+    let path = path.as_ref();
+    serde_json::from_reader(
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))
+}
+fn relative_path(name: &str) -> Result<&std::path::Path> {
+    use std::path::{Component, Path};
+    let path = Path::new(name);
+    ensure!(
+        !name.is_empty() && path.components().all(|c| matches!(c, Component::Normal(_))),
+        "unsafe model filename {name}"
+    );
+    Ok(path)
+}
+
+/// Resolve model-owned filenames on the Hub's default branch, or in an explicit
+/// local directory. Hub caching, authentication and offline fallback remain
+/// owned by hf-hub. Index files automatically bring their referenced shards.
+pub fn resolve_model_files(
+    model: &str,
+    filenames: &[&str],
+    model_dir: Option<&std::path::Path>,
+) -> Result<PathBuf> {
+    if let Some(dir) = model_dir {
+        return resolve_files(filenames, |name| {
+            let path = dir.join(name);
+            ensure!(path.is_file(), "missing model file {}", path.display());
+            Ok(path)
+        });
+    }
+    let client = HFClientSync::new().context("initializing Hugging Face Hub client")?;
+    resolve_hub_files(&client, model, filenames)
+}
+fn resolve_hub_files(client: &HFClientSync, model: &str, filenames: &[&str]) -> Result<PathBuf> {
+    let (owner, name) = split_id(model);
+    ensure!(
+        !owner.is_empty() && !name.is_empty(),
+        "model must be owner/name"
+    );
+    let repo = client.model(owner, name);
+    resolve_files(filenames, |filename| {
+        repo.download_file()
+            .filename(filename)
+            .send()
+            .with_context(|| format!("resolving {model}/{filename}"))
+    })
+}
+fn resolve_files(
+    filenames: &[&str],
+    mut fetch: impl FnMut(&str) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    use std::collections::BTreeSet;
+    let mut pending: Vec<String> = filenames.iter().map(|s| s.to_string()).collect();
+    let mut seen = BTreeSet::new();
+    let mut root = None;
+    while let Some(name) = pending.pop() {
+        let relative = relative_path(&name)?;
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let path = fetch(&name)?;
+        let mut directory = path.as_path();
+        for _ in relative.components() {
+            directory = directory
+                .parent()
+                .context("model file has no snapshot root")?;
+        }
+        if let Some(existing) = &root {
+            ensure!(
+                existing == directory,
+                "model files resolved to different snapshots; retry resolution"
+            );
+        } else {
+            root = Some(directory.to_owned());
+        }
+        if name.ends_with(".safetensors.index.json") {
+            let index: SafetensorsIndex = read_json(&path)?;
+            for shard in index.shards()? {
+                pending.push(
+                    relative
+                        .parent()
+                        .unwrap()
+                        .join(shard)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+    }
+    root.context("model file list is empty")
+}
+
+#[cfg(test)]
+mod model_files_tests {
+    use super::*;
+    use std::{
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+        time::Duration,
+    };
+    struct Temp(PathBuf);
+    impl Temp {
+        fn new(name: &str) -> Self {
+            let p = std::env::temp_dir().join(format!("hub-{name}-{}", std::process::id()));
+            fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    #[test]
+    fn local_files_expand_indexes_and_report_missing_files() -> Result<()> {
+        let t = Temp::new("local");
+        fs::create_dir_all(t.0.join("encoder"))?;
+        fs::write(
+            t.0.join("encoder/model.safetensors.index.json"),
+            r#"{"weight_map":{"a":"one.safetensors","b":"two.safetensors"}}"#,
+        )?;
+        fs::write(t.0.join("encoder/one.safetensors"), b"one")?;
+        fs::write(t.0.join("encoder/two.safetensors"), b"two")?;
+        assert_eq!(
+            resolve_model_files(
+                "unused/model",
+                &["encoder/model.safetensors.index.json"],
+                Some(&t.0)
+            )?,
+            t.0
+        );
+        fs::remove_file(t.0.join("encoder/two.safetensors"))?;
+        assert!(
+            resolve_model_files(
+                "unused/model",
+                &["encoder/model.safetensors.index.json"],
+                Some(&t.0)
+            )
+            .is_err()
+        );
+        assert!(resolve_model_files("unused/model", &["../secret"], Some(&t.0)).is_err());
+        assert!(resolve_model_files("unused/model", &[], Some(&t.0)).is_err());
+        Ok(())
+    }
+    #[test]
+    fn named_downloads_use_main_then_reuse_cache_without_public_network() -> Result<()> {
+        let cache = Temp::new("download");
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        listener.set_nonblocking(true)?;
+        let endpoint = format!("http://{}", listener.local_addr()?);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let server = thread::spawn(move || -> Result<()> {
+            while !worker_stop.load(Ordering::Relaxed) {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+                socket.set_read_timeout(Some(Duration::from_secs(2)))?;
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut buffer)?;
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let request = String::from_utf8(request)?;
+                let first = request.lines().next().unwrap();
+                assert!(
+                    first.contains("/owner/model/resolve/main/"),
+                    "unexpected request {first}"
+                );
+                let path = first.split_whitespace().nth(1).unwrap();
+                let (etag, body) = if path.ends_with("config.json") {
+                    ("config", b"{}".as_slice())
+                } else if path.ends_with("encoder/model.safetensors.index.json") {
+                    (
+                        "index",
+                        br#"{"weight_map":{"a":"one.safetensors"}}"#.as_slice(),
+                    )
+                } else if path.ends_with("encoder/one.safetensors") {
+                    ("one", b"tensor".as_slice())
+                } else {
+                    panic!("unexpected model file {path}")
+                };
+                let head = first.starts_with("HEAD ");
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"{etag}\"\r\nX-Repo-Commit: 0123456789012345678901234567890123456789\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )?;
+                if !head {
+                    socket.write_all(body)?;
+                }
+            }
+            Ok(())
+        });
+        let client = hf_hub::HFClient::builder()
+            .cache_dir(&cache.0)
+            .endpoint(&endpoint)
+            .retry_max_attempts(1)
+            .build_sync()?;
+        let files = ["config.json", "encoder/model.safetensors.index.json"];
+        let result = resolve_hub_files(&client, "owner/model", &files);
+        stop.store(true, Ordering::Relaxed);
+        server.join().unwrap()?;
+        let snapshot = result?;
+        assert_eq!(
+            fs::read(snapshot.join("encoder/one.safetensors"))?,
+            b"tensor"
+        );
+        // The same endpoint is now unavailable. hf-hub owns the cache fallback.
+        assert_eq!(resolve_hub_files(&client, "owner/model", &files)?, snapshot);
+        Ok(())
+    }
+    #[test]
+    fn snapshot_mismatch_and_bad_index_are_errors() -> Result<()> {
+        assert!(
+            resolve_files(&["a.json", "b.json"], |name| Ok(PathBuf::from(format!(
+                "/{name}/{name}"
+            ))))
+            .is_err()
+        );
+        let t = Temp::new("bad-index");
+        for text in [
+            "not json",
+            r#"{"weight_map":{}}"#,
+            r#"{"weight_map":{"a":"../bad.safetensors"}}"#,
+        ] {
+            fs::write(t.0.join("model.safetensors.index.json"), text)?;
+            assert!(
+                resolve_model_files("owner/model", &["model.safetensors.index.json"], Some(&t.0))
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+}

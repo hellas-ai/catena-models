@@ -1,47 +1,23 @@
 use crate::spec::{ModelArchitecture, ModelConfig};
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use serde::Deserialize;
-use std::{
-    env,
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 pub const MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
-pub const REVISION: &str = "e7b7dc27f91deacad38e78976d1f2b499d76a294";
+const FILES: &[&str] = &[
+    "model_index.json",
+    "scheduler/scheduler_config.json",
+    "tokenizer/tokenizer.json",
+    "text_encoder/config.json",
+    "text_encoder/model.safetensors.index.json",
+    "transformer/config.json",
+    "transformer/diffusion_pytorch_model.safetensors",
+    "vae/config.json",
+    "vae/diffusion_pytorch_model.safetensors",
+];
 pub fn snapshot(explicit: Option<&Path>) -> Result<PathBuf> {
-    let p = if let Some(p) = explicit {
-        p.to_owned()
-    } else {
-        let hub = if let Some(p) = env::var_os("HF_HUB_CACHE") {
-            PathBuf::from(p)
-        } else {
-            env::var_os("HF_HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    env::var_os("XDG_CACHE_HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|| {
-                            PathBuf::from(env::var_os("HOME").unwrap_or_default()).join(".cache")
-                        })
-                        .join("huggingface")
-                })
-                .join("hub")
-        };
-        hub.join("models--black-forest-labs--FLUX.2-klein-4B/snapshots")
-            .join(REVISION)
-    };
-    ensure!(
-        p.join("model_index.json").exists(),
-        "cached model not found at {}; provide --model-dir pointing to the complete Diffusers snapshot",
-        p.display()
-    );
-    Ok(p)
+    crate::hfhub::resolve_model_files(MODEL_ID, FILES, explicit)
 }
-pub fn read<T: serde::de::DeserializeOwned>(p: impl AsRef<Path>) -> Result<T> {
-    let p = p.as_ref();
-    serde_json::from_reader(File::open(p).with_context(|| format!("reading {}", p.display()))?)
-        .with_context(|| format!("parsing {}", p.display()))
-}
+pub use crate::hfhub::read_json as read;
 #[derive(Deserialize, Debug)]
 pub struct TextConfig {
     pub hidden_size: usize,

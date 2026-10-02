@@ -5,4 +5,6 @@ pub mod hfhub;
 pub mod model;
 pub mod spec;
 pub mod tokenizer;
+pub mod tts;
+pub mod weights;
 pub mod whisper;

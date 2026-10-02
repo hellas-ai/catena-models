@@ -39,7 +39,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if a.inspect {
-        let w = catena_qwen3::flux::weights::Weights::open(&model_dir)?;
+        let w = catena_qwen3::weights::Weights::open(&model_dir.join("model.safetensors"))?;
         whisper::validate_weights(&w, &config)?;
         eprintln!(
             "Whisper-small: {} tensors, {:.2} GiB",

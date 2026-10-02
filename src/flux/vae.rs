@@ -1,8 +1,8 @@
 use super::{
     config::{VaeConfig, read},
     ops::Ops,
-    weights::Weights,
 };
+use crate::weights::Weights;
 use anyhow::Result;
 use catena_lang::runtime::MemOwn;
 use std::path::Path;
@@ -24,7 +24,7 @@ impl VaeDecoder {
     ) -> Result<Self> {
         let config: VaeConfig = read(snapshot.join("vae/config.json"))?;
         config.validate()?;
-        let mut weights = Weights::open(&snapshot.join("vae"))?;
+        let mut weights = Weights::open(&snapshot.join("vae/diffusion_pytorch_model.safetensors"))?;
         weights.validate("bn.running_mean", &[128])?;
         weights.validate("bn.running_var", &[128])?;
         for (name, ci, co, ks) in [

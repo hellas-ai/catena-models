@@ -189,16 +189,7 @@ pub fn schedule(image_seq_len: usize, steps: usize) -> Vec<f32> {
     sigmas.push(0.);
     sigmas
 }
-pub fn f32_to_bf16(x: f32) -> u16 {
-    let bits = x.to_bits();
-    if bits & 0x7fffffff > 0x7f800000 {
-        return ((bits >> 16) | 0x40) as u16;
-    }
-    ((bits.wrapping_add(0x7fff + ((bits >> 16) & 1))) >> 16) as u16
-}
-pub fn bf16_to_f32(x: u16) -> f32 {
-    f32::from_bits((x as u32) << 16)
-}
+pub use crate::weights::{bf16_to_f32, f32_to_bf16};
 #[cfg(test)]
 mod tests {
     use super::*;

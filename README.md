@@ -25,6 +25,10 @@ The scripts assume the Nix development environment; invoke them with
 
 ## Setup
 
+The local compiler supports a shared [HIP artifact cache](docs/gpu-artifact-cache.md)
+for Qwen, Flux, Whisper and MMS TTS. Warm runs reuse compiled libraries while still
+lowering Hex to C++.
+
 The Catena compiler dependency is pinned to the private
 `hellas-ai/exploratory-catena` repository. Configure an SSH key with access to
 that GitHub repository before fetching or building dependencies:
@@ -242,7 +246,9 @@ rejected experiments, and the EOS protocol caveat are documented in
 ## FLUX.2-klein text to image
 
 The separate `flux2-klein` app loads the cached FLUX.2-klein-4B safetensors
-checkpoint and writes one PNG. See [setup, component review order and validation](docs/flux2-klein.md).
+checkpoint and writes one PNG. Missing model files are downloaded through the
+shared Rust `hf-hub` loader. See
+[setup, component review order and validation](docs/flux2-klein.md).
 Use `--backend legacy` to run the separate implementation with existing compiler
 primitives; see [comparison and benchmarks](docs/flux2-klein-legacy.md).
 
@@ -256,9 +262,21 @@ The separate `whisper-asr` binary transcribes 16 kHz WAV clips up to 30 seconds
 with `openai/whisper-small`, using the current local compiler without new
 primitives. Model execution is composed in Hex, with persistent decoder caches.
 The Rust `hf-hub` API downloads missing files to the standard Hugging Face cache
-and reuses the pinned snapshot on subsequent runs. See
+and reuses cached files on subsequent runs. Model resolution uses the Hub default
+branch without a pinned revision. See
 [setup, compiler alternatives and validation](docs/whisper-asr.md).
 
 ```bash
 cargo run --release --bin whisper-asr -- recording.wav
+```
+
+## MMS English text to speech
+
+The `mms-tts` app synthesizes a mono 16 kHz WAV with `facebook/mms-tts-eng`.
+It shares unpinned Hub file resolution and safetensors loading with Whisper and
+Flux, and composes inference and seeded sampling in one Catena/Hex entrypoint.
+See [usage and validation](docs/mms-tts.md).
+
+```bash
+cargo run --release --bin mms-tts -- 'Hello, world.' --output speech.wav
 ```

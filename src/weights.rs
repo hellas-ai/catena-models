@@ -8,7 +8,7 @@ use catena_lang::{
 use memmap2::{Mmap, MmapOptions};
 use safetensors::{Dtype, SafeTensors};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::File,
     path::{Path, PathBuf},
 };
@@ -30,38 +30,22 @@ pub struct Weights {
     pub tensors: BTreeMap<String, TensorInfo>,
     converted: BTreeMap<String, MemOwn>,
 }
-#[derive(serde::Deserialize)]
-struct Index {
-    weight_map: BTreeMap<String, String>,
-}
 impl Weights {
-    pub fn open(component: &Path) -> Result<Self> {
+    pub fn open(checkpoint: &Path) -> Result<Self> {
         let start = std::time::Instant::now();
-        let index = component.join("model.safetensors.index.json");
-        let indexed: Option<Index> = if index.exists() {
-            Some(serde_json::from_reader(File::open(index)?)?)
-        } else {
-            None
-        };
-        let paths: Vec<PathBuf> = if let Some(i) = &indexed {
-            let names: BTreeSet<_> = i.weight_map.values().collect();
-            names
-                .into_iter()
-                .map(|n| {
-                    ensure!(
-                        Path::new(n).components().count() == 1,
-                        "unsafe shard path {n}"
-                    );
-                    Ok(component.join(n))
-                })
-                .collect::<Result<_>>()?
-        } else {
-            let model = component.join("model.safetensors");
-            vec![if model.exists() {
-                model
+        let indexed: Option<crate::hfhub::SafetensorsIndex> =
+            if checkpoint.to_string_lossy().ends_with(".index.json") {
+                Some(crate::hfhub::read_json(checkpoint)?)
             } else {
-                component.join("diffusion_pytorch_model.safetensors")
-            }]
+                None
+            };
+        let paths: Vec<PathBuf> = if let Some(i) = &indexed {
+            i.shards()?
+                .into_iter()
+                .map(|n| checkpoint.parent().unwrap().join(n))
+                .collect()
+        } else {
+            vec![checkpoint.to_owned()]
         };
         let mut shards = Vec::new();
         let mut tensors = BTreeMap::new();
@@ -80,7 +64,7 @@ impl Weights {
                         .get(&name)
                         .with_context(|| format!("unindexed tensor {name}"))?;
                     ensure!(
-                        Path::new(declared).file_name() == path.file_name(),
+                        checkpoint.parent().unwrap().join(declared) == *path,
                         "shard index mismatch for {name}"
                     );
                 }
@@ -107,8 +91,8 @@ impl Weights {
                 "incomplete shard index"
             );
         }
-        super::ops::startup_timing(
-            &format!("{} checkpoint metadata/mmap", component.display()),
+        startup_timing(
+            &format!("{} checkpoint metadata/mmap", checkpoint.display()),
             start,
         );
         Ok(Self {
@@ -168,7 +152,12 @@ impl Weights {
                 self.converted
                     .insert(name.clone(), runtime.mem_f32(&self.host_f32(name)?)?);
             } else {
-                ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16");
+                if t.dtype == Dtype::F32 {
+                    self.converted
+                        .insert(name.clone(), runtime.mem_u16(&bf16(&self.host_f32(name)?))?);
+                    continue;
+                }
+                ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16 or F32");
                 // Matrix kernels require naturally aligned scalars, not a GGUF-specific tensor alignment.
                 if t.offset % 2 != 0 {
                     let bytes = &self.shards[t.file].bytes[t.offset..t.offset + t.len];
@@ -186,7 +175,7 @@ impl Weights {
                 }
             }
         }
-        super::ops::startup_timing(
+        startup_timing(
             if f32_storage {
                 "weights F32 conversion/upload"
             } else {
@@ -213,4 +202,26 @@ impl Weights {
     pub fn byte_len(&self) -> usize {
         self.shards.iter().map(|s| s.bytes.len()).sum()
     }
+}
+
+/// Round F32 to nearest-even BF16; preserve NaNs.
+pub fn f32_to_bf16(x: f32) -> u16 {
+    let bits = x.to_bits();
+    if x.is_nan() {
+        ((bits >> 16) as u16) | 0x0040
+    } else {
+        (bits.wrapping_add(0x7fff + ((bits >> 16) & 1)) >> 16) as u16
+    }
+}
+pub fn bf16(values: &[f32]) -> Vec<u16> {
+    values.iter().copied().map(f32_to_bf16).collect()
+}
+pub(crate) fn startup_timing(stage: &str, start: std::time::Instant) {
+    if std::env::var_os("CATENA_STARTUP_TIMINGS").is_some() {
+        eprintln!("[startup] {stage}: {:.4}s", start.elapsed().as_secs_f64());
+    }
+}
+
+pub fn bf16_to_f32(x: u16) -> f32 {
+    f32::from_bits((x as u32) << 16)
 }

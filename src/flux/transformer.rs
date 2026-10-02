@@ -1,8 +1,8 @@
 use super::{
     config::{TransformerConfig, read},
     ops::Ops,
-    weights::Weights,
 };
+use crate::weights::Weights;
 use anyhow::Result;
 use catena_lang::runtime::{MemOwn, MemRef};
 use std::path::Path;
@@ -32,7 +32,8 @@ impl Transformer {
     ) -> Result<Self> {
         let config: TransformerConfig = read(snapshot.join("transformer/config.json"))?;
         config.validate()?;
-        let mut weights = Weights::open(&snapshot.join("transformer"))?;
+        let mut weights =
+            Weights::open(&snapshot.join("transformer/diffusion_pytorch_model.safetensors"))?;
         for (name, shape) in [
             ("x_embedder.weight", vec![3072, 128]),
             ("context_embedder.weight", vec![3072, 7680]),
