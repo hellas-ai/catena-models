@@ -25,7 +25,7 @@ The scripts assume the Nix development environment; invoke them with
 
 ## Setup
 
-The local compiler supports a shared [HIP artifact cache](docs/gpu-artifact-cache.md)
+The local compiler supports a shared [GPU artifact cache](docs/gpu-artifact-cache.md)
 for Qwen, Flux, Whisper and MMS TTS. Warm runs reuse compiled libraries while still
 lowering Hex to C++.
 
