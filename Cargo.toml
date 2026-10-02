@@ -6,7 +6,7 @@ default-run = "catena-qwen3"
 
 [dependencies]
 anyhow = "1.0"
-catena-lang = { git = "ssh://git@github.com/hellas-ai/exploratory-catena.git", rev = "fd6793920e8d3e34ee2fad18690f5fe4e31d4c67", version = "0.1.0" }
+catena-lang = { git = "ssh://git@github.com/hellas-ai/exploratory-catena.git", rev = "e3b44b1ba5609b6c6c2e9b6bb9235910f7899358", version = "0.1.0" }
 clap = { version = "4.5", features = ["derive"] }
 hf-hub = { version = "1.0.0", default-features = false, features = ["blocking", "rustls-tls"] }
 libc = "0.2"
