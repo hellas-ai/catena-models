@@ -6,4 +6,3 @@ pub mod pipeline;
 pub mod text;
 pub mod transformer;
 pub mod vae;
-pub mod weights;

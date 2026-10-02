@@ -2,7 +2,7 @@ pub mod audio;
 mod generation;
 pub mod graph;
 pub mod hub;
-use crate::flux::weights::Weights;
+use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{
     codegen::GpuDialect,
@@ -67,12 +67,7 @@ impl Config {
         Ok(())
     }
 }
-fn read_json<T: serde::de::DeserializeOwned>(p: &Path) -> Result<T> {
-    serde_json::from_reader(
-        std::fs::File::open(p).with_context(|| format!("reading {}", p.display()))?,
-    )
-    .with_context(|| format!("parsing {}", p.display()))
-}
+use crate::hfhub::read_json;
 #[derive(Deserialize)]
 struct Generation {
     lang_to_id: BTreeMap<String, u32>,
@@ -105,15 +100,7 @@ impl Generation {
     }
 }
 
-pub fn bf16(values: &[f32]) -> Vec<u16> {
-    values
-        .iter()
-        .map(|x| {
-            let bits = x.to_bits();
-            ((bits.wrapping_add(0x7fff + ((bits >> 16) & 1))) >> 16) as u16
-        })
-        .collect()
-}
+pub use crate::weights::bf16;
 pub fn host(mem: &MemOwn) -> Result<Vec<f32>> {
     Ok(mem
         .try_to_u16_vec()?
@@ -213,7 +200,7 @@ impl Default for Options {
 pub struct Whisper {
     pub runtime: Runtime,
     pub config: Config,
-    weights: BTreeMap<String, MemOwn>,
+    weights: Weights,
     tokenizer: tokenizers::Tokenizer,
     generation: Generation,
     debug: bool,
@@ -225,7 +212,7 @@ impl Whisper {
     pub fn load_with_debug(dir: &Path, timings: bool, debug: bool) -> Result<Self> {
         let start = Instant::now();
         let config = Config::read(dir)?;
-        let checkpoint = Weights::open(dir)?;
+        let mut checkpoint = Weights::open(&dir.join("model.safetensors"))?;
         validate_weights(&checkpoint, &config)?;
         let generation: Generation = read_json(&dir.join("generation_config.json"))?;
         ensure!(
@@ -271,13 +258,7 @@ impl Whisper {
             .chain(graph::cross_names(&config))
             .chain(graph::decoder_names(&config))
             .collect();
-        let mut weights = BTreeMap::new();
-        for name in names {
-            weights.insert(
-                name.clone(),
-                runtime.mem_u16(&bf16(&checkpoint.host_f32(&name)?))?,
-            );
-        }
+        checkpoint.prepare(&runtime, &names.into_iter().collect::<Vec<_>>(), false)?;
         if timings {
             eprintln!(
                 "load/compile/weight preparation: {:.3}s",
@@ -287,17 +268,17 @@ impl Whisper {
         Ok(Self {
             runtime,
             config,
-            weights,
+            weights: checkpoint,
             tokenizer,
             generation,
             debug,
         })
     }
-    fn weight_args<'a>(&'a self, names: &[String]) -> Vec<Value<'a>> {
+    fn weight_args<'a>(&'a self, names: &[String]) -> Result<Vec<Value<'a>>> {
         names
             .iter()
-            .map(|n| self.weights[n].as_ref().into())
-            .collect()
+            .map(|n| self.weights.gpu_ref(n).map(Into::into))
+            .collect::<Result<Vec<_>>>()
     }
     pub fn encode(&self, features: &[f32]) -> Result<MemOwn> {
         ensure!(
@@ -305,14 +286,14 @@ impl Whisper {
             "wrong mel feature dimensions"
         );
         let mut args = vec![self.runtime.mem_u16(&bf16(features))?.into()];
-        args.extend(self.weight_args(&graph::encoder_names(&self.config)));
+        args.extend(self.weight_args(&graph::encoder_names(&self.config))?);
         let mut output = memories(self.runtime.exec_values("whisper.encode", args)?)?;
         ensure!(output.len() == 1, "wrong encoder output count");
         Ok(output.remove(0))
     }
     pub fn prepare_cross(&self, encoder: MemOwn) -> Result<Vec<MemOwn>> {
         let mut args = vec![encoder.into()];
-        args.extend(self.weight_args(&graph::cross_names(&self.config)));
+        args.extend(self.weight_args(&graph::cross_names(&self.config))?);
         let out = memories(self.runtime.exec_values("whisper.prepare-cross-kv", args)?)?;
         ensure!(
             out.len() == self.config.decoder_layers * 2,
@@ -343,7 +324,7 @@ impl Whisper {
                 args.push(cross[l].as_ref().into());
             }
         }
-        args.extend(self.weight_args(&graph::decoder_names(&self.config)));
+        args.extend(self.weight_args(&graph::decoder_names(&self.config))?);
         let mut out = memories(self.runtime.exec_values("whisper.decode-step", args)?)?;
         ensure!(
             out.len() == 1 + self.config.decoder_layers * 2,
@@ -396,9 +377,9 @@ impl Whisper {
             text_mask.as_ref().into(),
             begin_mask.as_ref().into(),
         ];
-        args.extend(self.weight_args(&graph::encoder_names(&self.config)));
-        args.extend(self.weight_args(&graph::cross_names(&self.config)));
-        args.extend(self.weight_args(&graph::decoder_names(&self.config)));
+        args.extend(self.weight_args(&graph::encoder_names(&self.config))?);
+        args.extend(self.weight_args(&graph::cross_names(&self.config))?);
+        args.extend(self.weight_args(&graph::decoder_names(&self.config))?);
         let start = Instant::now();
         let outputs = self.runtime.exec_values("whisper.transcribe", args)?;
         let mut outputs = outputs.into_iter();

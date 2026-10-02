@@ -2,11 +2,11 @@
 use super::{
     config::{TextConfig, read},
     ops::Ops,
-    weights::Weights,
 };
 use crate::catena::{
     InferenceOptions, InferencePrecision, MatrixCoreMode, generated_model_source_for_options,
 };
+use crate::weights::Weights;
 use anyhow::{Context, Result, ensure};
 use catena_lang::runtime::MemOwn;
 use std::path::Path;
@@ -58,7 +58,8 @@ impl TextEncoder {
     ) -> Result<Self> {
         let tc: TextConfig = read(snapshot.join("text_encoder/config.json"))?;
         let config = tc.qwen()?;
-        let mut weights = Weights::open(&snapshot.join("text_encoder"))?;
+        let mut weights =
+            Weights::open(&snapshot.join("text_encoder/model.safetensors.index.json"))?;
         let mut names = vec!["model.embed_tokens.weight".to_owned()];
         weights.validate(&names[0], &[config.vocabulary_size, config.hidden_size])?;
         let layer_names = [
