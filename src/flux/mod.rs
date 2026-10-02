@@ -1,5 +1,6 @@
 pub mod config;
 pub mod debug;
+pub mod graph;
 pub mod ops;
 pub mod pipeline;
 pub mod text;

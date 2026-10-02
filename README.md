@@ -249,3 +249,16 @@ primitives; see [comparison and benchmarks](docs/flux2-klein-legacy.md).
 ```bash
 cargo run --offline --bin flux2-klein -- --prompt 'A fox in a snowy forest' --output fox.png
 ```
+
+## Whisper ASR
+
+The separate `whisper-asr` binary transcribes 16 kHz WAV clips up to 30 seconds
+with `openai/whisper-small`, using the current local compiler without new
+primitives. Model execution is composed in Hex, with persistent decoder caches.
+The Rust `hf-hub` API downloads missing files to the standard Hugging Face cache
+and reuses the pinned snapshot on subsequent runs. See
+[setup, compiler alternatives and validation](docs/whisper-asr.md).
+
+```bash
+cargo run --release --bin whisper-asr -- recording.wav
+```

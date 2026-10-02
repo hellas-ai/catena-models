@@ -31,7 +31,11 @@ impl Ops {
         let runtime = Runtime::from_sources(
             catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
-                .chain([crate::catena::BF16_HELPER_SOURCE, source])
+                .chain([
+                    crate::catena::BF16_HELPER_SOURCE,
+                    include_str!("../catena/inference_helpers.hex"),
+                    source,
+                ])
                 .chain(extra),
             GpuDialect::Hip,
         )
