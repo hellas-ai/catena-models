@@ -8,7 +8,8 @@ use catena_lang::{
 
 use crate::{
     catena::{
-        InferenceOptions, InferencePrecision, generated_model_source_for_options, runtime_sources,
+        InferenceOptions, InferencePrecision, generated_model_source_for_options,
+        generated_multimodal_source, runtime_sources,
     },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
@@ -23,6 +24,8 @@ pub struct Model {
     parameter_count: usize,
     weight_byte_len: usize,
     precision: InferencePrecision,
+    dialect: GpuDialect,
+    multimodal: bool,
 }
 
 impl Model {
@@ -53,6 +56,35 @@ impl Model {
         options: InferenceOptions,
         dialect: GpuDialect,
     ) -> Result<Self> {
+        Self::load_impl(gguf_path, options, dialect, false)
+    }
+
+    /// Compile the additional embedding/MRoPE entrypoint for image-conditioned sessions.
+    pub fn load_gguf_with_multimodal_options(
+        gguf_path: impl AsRef<Path>,
+        options: InferenceOptions,
+    ) -> Result<Self> {
+        Self::load_gguf_with_multimodal_options_and_dialect(
+            gguf_path,
+            options,
+            configured_gpu_dialect()?,
+        )
+    }
+
+    pub fn load_gguf_with_multimodal_options_and_dialect(
+        gguf_path: impl AsRef<Path>,
+        options: InferenceOptions,
+        dialect: GpuDialect,
+    ) -> Result<Self> {
+        Self::load_impl(gguf_path, options, dialect, true)
+    }
+
+    fn load_impl(
+        gguf_path: impl AsRef<Path>,
+        options: InferenceOptions,
+        dialect: GpuDialect,
+        multimodal: bool,
+    ) -> Result<Self> {
         ensure!(
             !options.fused_attention || dialect == GpuDialect::Hip,
             "experimental fused attention currently supports HIP only"
@@ -70,7 +102,11 @@ impl Model {
                 total.checked_add(spec.element_count())
             })
             .context("model parameter count overflowed")?;
-        let model_source = generated_model_source_for_options(&config, options)?;
+        let model_source = if multimodal {
+            generated_multimodal_source(&config, options)?
+        } else {
+            generated_model_source_for_options(&config, options)?
+        };
         let runtime = Runtime::from_sources(runtime_sources(&model_source, precision), dialect)
             .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
@@ -113,6 +149,8 @@ impl Model {
             parameter_count,
             weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
             precision,
+            dialect,
+            multimodal,
         })
     }
 
@@ -159,6 +197,7 @@ impl Model {
             cache: Some(self.allocate_cache(capacity)?),
             position: 0,
             capacity,
+            next_rope_position: None,
         })
     }
 
@@ -211,7 +250,16 @@ impl Model {
             inputs.len() == model_input_count,
             "internal model ABI mismatch"
         );
-        let mut outputs = self.runtime.exec_values("qwen3", inputs)?;
+        Self::cached_result(
+            self.runtime.exec_values("qwen3", inputs)?,
+            self.config.vocabulary_size,
+        )
+    }
+
+    fn cached_result(
+        mut outputs: Vec<Value<'_>>,
+        vocabulary_size: usize,
+    ) -> Result<(MemOwn, MemOwn, u64)> {
         ensure!(outputs.len() == 3, "internal model output ABI mismatch");
         let next_token_output = outputs.pop().expect("output count was validated");
         let logits_output = outputs.pop().expect("output count was validated");
@@ -233,10 +281,55 @@ impl Model {
             );
         };
         ensure!(
-            *next_token < self.config.vocabulary_size as u64,
+            *next_token < vocabulary_size as u64,
             "qwen3 returned next-token ID {next_token} outside the vocabulary"
         );
         Ok((cache, logits_output, *next_token))
+    }
+
+    pub fn gpu_dialect(&self) -> GpuDialect {
+        self.dialect
+    }
+
+    fn token_embedding(&self, token: u64) -> Result<MemOwn> {
+        let tokens = self.runtime.mem_u64(&[token])?;
+        let mut output = self.runtime.exec_values(
+            "qwen3.embedding",
+            vec![
+                tokens.as_ref().into(),
+                self.checkpoint.gpu_ref(&self.weights[0])?.into(),
+            ],
+        )?;
+        ensure!(output.len() == 1, "embedding ABI mismatch");
+        match output.pop().unwrap() {
+            Value::MemOwn(m) => Ok(m),
+            _ => anyhow::bail!("expected embedding memory"),
+        }
+    }
+
+    fn cached_embedding_outputs(
+        &self,
+        hidden: MemOwn,
+        positions: [u64; 3],
+        start: usize,
+        capacity: usize,
+        cache: MemOwn,
+    ) -> Result<(MemOwn, MemOwn, u64)> {
+        let positions = self.runtime.mem_u64(&positions)?;
+        let mut inputs = vec![
+            hidden.into(),
+            positions.as_ref().into(),
+            cache.into(),
+            (capacity as u64).into(),
+            (start as u64).into(),
+        ];
+        for weight in &self.weights {
+            inputs.push(self.checkpoint.gpu_ref(weight)?.into());
+        }
+        Self::cached_result(
+            self.runtime.exec_values("qwen3.multimodal", inputs)?,
+            self.config.vocabulary_size,
+        )
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
@@ -260,7 +353,7 @@ impl Model {
     }
 }
 
-fn configured_gpu_dialect() -> Result<GpuDialect> {
+pub fn configured_gpu_dialect() -> Result<GpuDialect> {
     const ENVIRONMENT_VARIABLE: &str = "CATENA_GPU_DIALECT";
     match env::var(ENVIRONMENT_VARIABLE).as_deref() {
         Ok("hip") | Err(env::VarError::NotPresent) => Ok(GpuDialect::Hip),
@@ -280,6 +373,7 @@ pub struct Session<'model> {
     cache: Option<MemOwn>,
     position: usize,
     capacity: usize,
+    next_rope_position: Option<u64>,
 }
 
 impl Session<'_> {
@@ -323,7 +417,148 @@ impl Session<'_> {
         Ok(next_token)
     }
 
+    pub fn prefill_multimodal_logits(
+        &mut self,
+        prompt: &crate::vision::PreparedMultimodalPrompt,
+    ) -> Result<Vec<f32>> {
+        let (logits, _) = self.prefill_multimodal(prompt)?;
+        read_logits(
+            logits,
+            self.model.config.vocabulary_size,
+            self.model.precision,
+        )
+    }
+
+    pub fn prefill_multimodal_next_token(
+        &mut self,
+        prompt: &crate::vision::PreparedMultimodalPrompt,
+    ) -> Result<u64> {
+        let (_, next) = self.prefill_multimodal(prompt)?;
+        Ok(next)
+    }
+
+    fn prefill_multimodal(
+        &mut self,
+        prompt: &crate::vision::PreparedMultimodalPrompt,
+    ) -> Result<(MemOwn, u64)> {
+        ensure!(self.position == 0, "a session can only be prefilled once");
+        ensure!(
+            self.model.config.is_qwen35(),
+            "image inputs require Qwen3.5 dense or MoE"
+        );
+        ensure!(
+            self.model.multimodal,
+            "load the model with load_gguf_with_multimodal_options for image inputs"
+        );
+        ensure!(
+            !prompt.tokens.is_empty()
+                && prompt.tokens.len() <= self.capacity
+                && prompt.positions.len() == prompt.tokens.len(),
+            "multimodal prompt exceeds capacity or has invalid positions"
+        );
+        ensure!(
+            prompt
+                .tokens
+                .iter()
+                .all(|&t| t < self.model.config.vocabulary_size as u64),
+            "prompt token outside vocabulary"
+        );
+        ensure!(
+            prompt.images.len() == prompt.spans.len(),
+            "image span count mismatch"
+        );
+        for (image, span) in prompt.images.iter().zip(&prompt.spans) {
+            ensure!(
+                image.width == self.model.config.hidden_size && image.dialect == self.model.dialect,
+                "image embedding width or GPU dialect mismatch"
+            );
+            ensure!(
+                span.len == image.token_count()
+                    && image.values.byte_len() == (span.len * image.width * 4) as u64,
+                "image embedding length mismatch"
+            );
+        }
+        let mut result = None;
+        let mut image_index = 0;
+        for (index, &token) in prompt.tokens.iter().enumerate() {
+            while image_index < prompt.spans.len()
+                && index >= prompt.spans[image_index].start + prompt.spans[image_index].len
+            {
+                image_index += 1;
+            }
+            let hidden =
+                if image_index < prompt.spans.len() && index >= prompt.spans[image_index].start {
+                    let image = &prompt.images[image_index];
+                    let mut out = self.model.runtime.exec_values(
+                        "qwen3.mm-image-row",
+                        vec![
+                            image.values.as_ref().into(),
+                            ((index - prompt.spans[image_index].start) as u64).into(),
+                        ],
+                    )?;
+                    match out.pop() {
+                        Some(Value::MemOwn(m)) => m,
+                        _ => anyhow::bail!("image row ABI mismatch"),
+                    }
+                } else {
+                    self.model.token_embedding(token)?
+                };
+            result = Some(self.forward_embedding(hidden, prompt.positions[index])?);
+        }
+        self.next_rope_position = Some(prompt.next_rope_position);
+        result.context("empty multimodal prefill")
+    }
+
+    fn forward_embedding(
+        &mut self,
+        hidden: MemOwn,
+        coordinates: [u64; 3],
+    ) -> Result<(MemOwn, u64)> {
+        ensure!(
+            self.position < self.capacity,
+            "token exceeds cache capacity"
+        );
+        let cache = self
+            .cache
+            .take()
+            .context("session cache unavailable after failed execution")?;
+        let (cache, logits, token) = self.model.cached_embedding_outputs(
+            hidden,
+            coordinates,
+            self.position,
+            self.capacity,
+            cache,
+        )?;
+        self.cache = Some(cache);
+        self.position += 1;
+        Ok((logits, token))
+    }
+
     fn forward(&mut self, tokens: &[u64]) -> Result<(MemOwn, u64)> {
+        ensure!(
+            !tokens.is_empty()
+                && self
+                    .position
+                    .checked_add(tokens.len())
+                    .is_some_and(|n| n <= self.capacity),
+            "token range exceeds cache capacity"
+        );
+        ensure!(
+            tokens
+                .iter()
+                .all(|&t| t < self.model.config.vocabulary_size as u64),
+            "token ID outside vocabulary"
+        );
+        if let Some(mut rope_position) = self.next_rope_position {
+            let mut result = None;
+            for &token in tokens {
+                let hidden = self.model.token_embedding(token)?;
+                result = Some(self.forward_embedding(hidden, [rope_position; 3])?);
+                rope_position += 1;
+            }
+            self.next_rope_position = Some(rope_position);
+            return result.context("empty decode");
+        }
         let cache = self
             .cache
             .take()

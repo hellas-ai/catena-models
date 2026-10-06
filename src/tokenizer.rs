@@ -162,6 +162,21 @@ impl QwenTokenizer {
         Ok(Self { inner })
     }
 
+    pub fn special_token_id(&self, token: &str) -> Result<u64> {
+        self.inner
+            .token_to_id(token)
+            .map(u64::from)
+            .with_context(|| format!("tokenizer is missing {token}"))
+    }
+
+    pub fn encode_without_special_tokens(&self, prompt: &str) -> Result<Vec<u64>> {
+        let encoded = self
+            .inner
+            .encode(prompt, false)
+            .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+        Ok(encoded.get_ids().iter().map(|&id| u64::from(id)).collect())
+    }
+
     pub fn encode(&self, prompt: &str) -> Result<Vec<u64>> {
         let encoding = self
             .inner

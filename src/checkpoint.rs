@@ -137,12 +137,21 @@ impl Checkpoint {
         dialect: GpuDialect,
     ) -> Result<Self> {
         let specs = weight_specs(config)?;
+        Self::open_inventory(path, &specs, Some(config), dialect)
+    }
+
+    pub(crate) fn open_inventory(
+        path: impl AsRef<Path>,
+        specs: &[TensorSpec],
+        config: Option<&ModelConfig>,
+        dialect: GpuDialect,
+    ) -> Result<Self> {
         let paths = resolve_gguf_paths(path.as_ref())?;
         let files = paths
             .iter()
             .map(GgufFile::open)
             .collect::<Result<Vec<_>>>()?;
-        let tensor_files = validate_files(&files, &specs, config)?;
+        let tensor_files = validate_files(&files, specs, config)?;
         let gpu_files = files
             .into_iter()
             .map(|file| {
@@ -305,6 +314,37 @@ pub(crate) fn read_gguf_tokenizer_metadata(
         .with_context(|| format!("failed to parse GGUF tokenizer metadata {}", path.display()))
 }
 
+/// Read selected small metadata without materializing the tokenizer vocabulary.
+pub(crate) fn read_metadata(path: &Path) -> Result<HashMap<String, serde_json::Value>> {
+    let file = GgufFile::open(path)?;
+    let mut c = Cursor::new(&file.bytes);
+    c.take(16)?;
+    let count = c.usize_u64("metadata count")?;
+    let mut out = HashMap::new();
+    for _ in 0..count {
+        let key = c.string("metadata key")?.to_owned();
+        let ty = ValueType::from_u32(c.u32()?)?;
+        if key.starts_with("clip.")
+            || key.ends_with("rope.dimension_sections")
+            || key == "general.architecture"
+        {
+            out.insert(key, c.json_value(ty)?);
+        } else {
+            c.skip_value(ty, 0)?;
+        }
+    }
+    Ok(out)
+}
+
+pub(crate) fn tensor_inventory(path: &Path) -> Result<HashMap<String, (Vec<usize>, GgufDtype)>> {
+    let file = GgufFile::open(path)?;
+    Ok(file
+        .tensors
+        .iter()
+        .map(|(name, t)| (name.clone(), (t.shape.clone(), t.dtype)))
+        .collect())
+}
+
 pub fn read_gguf_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
     let paths = resolve_gguf_paths(path.as_ref())?;
     let path = paths
@@ -335,7 +375,7 @@ pub fn validate_gguf_tensors(path: impl AsRef<Path>, config: &ModelConfig) -> Re
         .iter()
         .map(GgufFile::open)
         .collect::<Result<Vec<_>>>()?;
-    validate_files(&files, &specs, config)?;
+    validate_files(&files, &specs, Some(config))?;
     Ok(())
 }
 
@@ -354,6 +394,7 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     );
     let _tensor_count = cursor.usize_u64("tensor count")?;
     let metadata_count = cursor.usize_u64("metadata count")?;
+    let mut mrope_sections = None;
     let mut architecture = None;
     let mut model_name = None;
     let mut values = HashMap::new();
@@ -378,6 +419,18 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
             }
         } else if key == "tokenizer.ggml.eos_token_id" {
             eos_token_id = Some(cursor.unsigned_value(ty, &key)? as u64);
+        } else if key.ends_with("rope.dimension_sections") {
+            let value = cursor.json_value(ty)?;
+            let array = value.as_array().context("RoPE sections must be an array")?;
+            ensure!(
+                array.len() == 3 || (array.len() == 4 && array[3].as_u64() == Some(0)),
+                "unsupported RoPE sections"
+            );
+            let mut sections = [0; 3];
+            for i in 0..3 {
+                sections[i] = usize::try_from(array[i].as_u64().context("invalid RoPE section")?)?;
+            }
+            mrope_sections = Some(sections);
         } else if is_model_scalar_key(&key) {
             let value = match ty {
                 ValueType::F32 => ScalarMetadata::Float(cursor.f32()?),
@@ -458,6 +511,14 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         rms_norm_eps: f("attention.layer_norm_rms_epsilon")?,
         rope_theta: f("rope.freq_base")?,
         rope_dimension_count: optional_u("rope.dimension_count")?.unwrap_or(head_dim),
+        mrope_sections: if matches!(
+            architecture,
+            ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
+        ) {
+            mrope_sections.unwrap_or([11, 11, 10])
+        } else {
+            [0; 3]
+        },
         num_experts: optional_u("expert_count")?.unwrap_or(0),
         experts_per_token: optional_u("expert_used_count")?.unwrap_or(0),
         shared_expert_intermediate_size: optional_u("expert_shared_feed_forward_length")?,
@@ -509,7 +570,7 @@ fn is_model_scalar_key(key: &str) -> bool {
 fn validate_files(
     files: &[GgufFile],
     specs: &[TensorSpec],
-    config: &ModelConfig,
+    config: Option<&ModelConfig>,
 ) -> Result<HashMap<String, usize>> {
     let mut tensor_files = HashMap::with_capacity(specs.len());
     for (file_index, file) in files.iter().enumerate() {
@@ -530,7 +591,7 @@ fn validate_files(
         .collect::<BTreeSet<_>>();
     let actual_names = tensor_files
         .keys()
-        .filter(|name| !is_auxiliary_nextn_tensor(name, config))
+        .filter(|name| !config.is_some_and(|config| is_auxiliary_nextn_tensor(name, config)))
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if expected_names != actual_names {
@@ -1116,6 +1177,34 @@ impl<'a> Cursor<'a> {
         Self { bytes, position: 0 }
     }
 
+    fn json_value(&mut self, ty: ValueType) -> Result<serde_json::Value> {
+        use serde_json::json;
+        Ok(match ty {
+            ValueType::String => json!(self.string("metadata value")?),
+            ValueType::F32 => json!(self.f32()?),
+            ValueType::F64 => json!(self.f64()?),
+            ValueType::Bool => json!(self.take(1)?[0] != 0),
+            ValueType::I8 => json!(self.take(1)?[0] as i8),
+            ValueType::I16 => json!(i16::from_le_bytes(self.take(2)?.try_into().unwrap())),
+            ValueType::I32 => json!(i32::from_le_bytes(self.take(4)?.try_into().unwrap())),
+            ValueType::I64 => json!(i64::from_le_bytes(self.take(8)?.try_into().unwrap())),
+            ValueType::Array => {
+                let element = ValueType::from_u32(self.u32()?)?;
+                ensure!(
+                    !matches!(element, ValueType::Array),
+                    "nested metadata arrays unsupported"
+                );
+                let count = self.usize_u64("array length")?;
+                ensure!(count <= 1_000_000, "unreasonable metadata array length");
+                let values = (0..count)
+                    .map(|_| self.json_value(element))
+                    .collect::<Result<Vec<_>>>()?;
+                json!(values)
+            }
+            _ => json!(self.unsigned_value(ty, "metadata integer")?),
+        })
+    }
+
     fn position(&self) -> usize {
         self.position
     }
@@ -1286,6 +1375,27 @@ mod tests {
     use super::*;
 
     const GGUF_PATH: &str = "models/Qwen3-30B-A3B-Base/model-bf16.gguf";
+
+    #[test]
+    fn signed_metadata_arrays_preserve_mrope_sections() -> Result<()> {
+        let mut bytes = Vec::new();
+        bytes.extend((ValueType::I32 as u32).to_le_bytes());
+        bytes.extend(4_u64.to_le_bytes());
+        for value in [11_i32, 11, 10, 0] {
+            bytes.extend(value.to_le_bytes());
+        }
+        let mut cursor = Cursor::new(&bytes);
+        assert_eq!(
+            cursor.json_value(ValueType::Array)?,
+            serde_json::json!([11, 11, 10, 0])
+        );
+        assert_eq!(cursor.position(), bytes.len());
+        assert_eq!(
+            Cursor::new(&(-7_i32).to_le_bytes()).json_value(ValueType::I32)?,
+            serde_json::json!(-7)
+        );
+        Ok(())
+    }
 
     fn push_u32(bytes: &mut Vec<u8>, value: u32) {
         bytes.extend(value.to_le_bytes());

@@ -11,17 +11,18 @@ use catena_qwen3::{
         InferenceOptions, InferencePrecision, MatrixCoreMode, generated_model_source_for_options,
     },
     checkpoint::read_gguf_model_config,
-    hfhub::download_gguf,
+    hfhub::{download_gguf, download_mmproj},
     model::Model,
     tokenizer::QwenTokenizer,
+    vision::{PreparedMultimodalPrompt, VisionModel},
 };
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(about = "Greedy BF16 text generation with dense or MoE Qwen3 on Catena GPU")]
+#[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
 struct Args {
-    /// Text prefix to continue.
-    #[arg(required_unless_present_any = ["generate_entrypoint", "bench"])]
+    /// Text prefix, or user-message text when images are supplied.
+    #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image"])]
     prompt: Option<String>,
 
     /// Write the generated model-specific Hex source under target/, then exit.
@@ -60,6 +61,18 @@ struct Args {
     #[arg(long, value_name = "MODEL", conflicts_with = "gguf")]
     model: Option<String>,
 
+    /// Still images, in order, preceding the text in one Qwen3.5 user message.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["bench", "generate_entrypoint"])]
+    image: Vec<PathBuf>,
+
+    /// BF16/F32 companion vision/projector GGUF (required with local --gguf images).
+    #[arg(long, value_name = "PATH", requires = "image")]
+    mmproj: Option<PathBuf>,
+
+    /// Override the projector's maximum resized image pixel area.
+    #[arg(long, value_parser = parse_positive_usize, requires = "image")]
+    image_max_pixels: Option<usize>,
+
     /// Maximum number of tokens to generate.
     #[arg(short = 'n', long, default_value_t = 20)]
     max_new_tokens: usize,
@@ -69,11 +82,13 @@ struct Args {
     ignore_eos: bool,
 
     /// Use the native mixed-BF16 graph (Qwen3 dense and Qwen3.5/3.6 dense or MoE).
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true",
+        require_equals = true)]
     bf16: bool,
 
     /// Use BF16 WMMA matrix cores for supported Qwen prefill (experimental).
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true",
+        require_equals = true)]
     matrix_cores: bool,
 
     /// Use the platform BLAS library for BF16 GEMM during supported Qwen prefill.
@@ -81,12 +96,17 @@ struct Args {
     blas: bool,
 
     /// Use the experimental fused BF16 cached-attention kernel.
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set, num_args = 0..=1, default_missing_value = "true",
+        require_equals = true)]
     fused_attention: bool,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    ensure!(
+        args.image.is_empty() || args.mmproj.is_some() || args.model.is_some(),
+        "local image runs require --mmproj PATH"
+    );
     let precision = if args.bf16 {
         InferencePrecision::Bf16
     } else {
@@ -138,10 +158,7 @@ fn main() -> Result<()> {
         return run_benchmark(&model, args.pp, args.tg, args.bench_runs);
     }
 
-    let prompt = args
-        .prompt
-        .as_deref()
-        .expect("clap requires a prompt unless entrypoint generation was selected");
+    let prompt = args.prompt.as_deref().unwrap_or_default();
     let gguf_path = selected_gguf;
     let tokenizer = if let Some(tokenizer_path) = args.tokenizer {
         QwenTokenizer::open(tokenizer_path)?
@@ -153,17 +170,58 @@ fn main() -> Result<()> {
     };
     let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
-        !tokens.is_empty(),
+        !tokens.is_empty() || !args.image.is_empty(),
         "the prompt encoded to an empty token prefix"
     );
 
+    let projector = if !args.image.is_empty() {
+        let config = read_gguf_model_config(&gguf_path)?;
+        ensure!(
+            config.is_qwen35(),
+            "image inputs require a Qwen3.5 dense or MoE model"
+        );
+        let path = if let Some(path) = &args.mmproj {
+            path.clone()
+        } else {
+            download_mmproj(
+                args.model
+                    .as_deref()
+                    .expect("validated image model selector"),
+            )?
+        };
+        let vision_config = catena_qwen3::vision::VisionConfig::from_gguf(&path)?;
+        ensure!(
+            vision_config.output_size == config.hidden_size,
+            "projector output width does not match language model"
+        );
+        Some(path)
+    } else {
+        None
+    };
     let load_started = Instant::now();
-    let model = Model::load_gguf_with_options(&gguf_path, options)?;
+    let model = if projector.is_some() {
+        Model::load_gguf_with_multimodal_options(&gguf_path, options)?
+    } else {
+        Model::load_gguf_with_options(&gguf_path, options)?
+    };
     let eos_token_id = model.config().eos_token_id;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
         load_started.elapsed()
     );
+    let multimodal = if let Some(path) = projector {
+        let vision = VisionModel::load_gguf(&path, model.gpu_dialect(), args.image_max_pixels)?;
+        let images = args
+            .image
+            .iter()
+            .map(|path| vision.encode_image(path))
+            .collect::<Result<Vec<_>>>()?;
+        let prepared = PreparedMultimodalPrompt::new(&tokenizer, prompt, images)?;
+        tokens = prepared.tokens().to_vec();
+        Some(prepared)
+    } else {
+        None
+    };
     if let Some(fifo_path) = std::env::var_os("CATENA_QWEN3_PROFILE_FIFO") {
         let pid_path = std::env::var_os("CATENA_QWEN3_PROFILE_PID_FILE").ok_or_else(|| {
             anyhow::anyhow!(
@@ -209,12 +267,16 @@ fn main() -> Result<()> {
 
     let mut stdout = io::stdout().lock();
     let mut decode_stream = tokenizer.decode_stream(true);
-    for &token in &tokens {
-        if let Some(chunk) = decode_stream
-            .step(u32::try_from(token)?)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        {
-            write!(stdout, "{chunk}")?;
+    if multimodal.is_some() {
+        writeln!(stdout, "{prompt}")?;
+    } else {
+        for &token in &tokens {
+            if let Some(chunk) = decode_stream
+                .step(u32::try_from(token)?)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+            {
+                write!(stdout, "{chunk}")?;
+            }
         }
     }
     stdout.flush()?;
@@ -231,7 +293,11 @@ fn main() -> Result<()> {
     let mut session = model.session(capacity)?;
     let generation_started = Instant::now();
     let prompt_started = Instant::now();
-    let mut next_token = session.prefill_next_token(&tokens)?;
+    let mut next_token = if let Some(prepared) = &multimodal {
+        session.prefill_multimodal_next_token(prepared)?
+    } else {
+        session.prefill_next_token(&tokens)?
+    };
     let prompt_elapsed = prompt_started.elapsed();
     let mut eval_elapsed = std::time::Duration::ZERO;
     let mut generated = 0_usize;
@@ -444,6 +510,7 @@ mod tests {
             "--bf16",
             "--model",
             "unsloth/Qwen3-0.6B-GGUF:BF16",
+            "--prompt",
             "hello",
         ])
         .unwrap();
@@ -452,7 +519,10 @@ mod tests {
 
     #[test]
     fn acceleration_defaults_do_not_require_explicit_bf16() {
-        let args = Args::try_parse_from(["catena-qwen3", "hello"]).unwrap();
+        let args = Args::try_parse_from(["catena-qwen3", "--prompt", "hello"]).unwrap();
+        assert_eq!(args.prompt.as_deref(), Some("hello"));
+        assert!(Args::try_parse_from(["catena-qwen3", "hello"]).is_err());
+        assert!(Args::try_parse_from(["catena-qwen3"]).is_err());
         assert!(args.bf16);
         assert!(args.matrix_cores);
         assert!(args.fused_attention);
@@ -461,6 +531,7 @@ mod tests {
             "catena-qwen3",
             "--matrix-cores",
             "--fused-attention",
+            "--prompt",
             "hello",
         ])
         .unwrap();
@@ -469,7 +540,7 @@ mod tests {
 
     #[test]
     fn blas_overrides_the_default_and_conflicts_with_explicit_matrix_cores() {
-        let args = Args::try_parse_from(["catena-qwen3", "--blas", "hello"]).unwrap();
+        let args = Args::try_parse_from(["catena-qwen3", "--blas", "--prompt", "hello"]).unwrap();
         assert!(args.blas);
         assert!(
             Args::try_parse_from([
@@ -477,6 +548,7 @@ mod tests {
                 "--bf16",
                 "--matrix-cores",
                 "--blas",
+                "--prompt",
                 "hello"
             ])
             .is_err()
@@ -485,8 +557,15 @@ mod tests {
 
     #[test]
     fn benchmark_prompt_is_accepted_and_ignored_by_the_mode() {
-        let args =
-            Args::try_parse_from(["catena-qwen3", "--bench", "--pp", "8", "ignored"]).unwrap();
+        let args = Args::try_parse_from([
+            "catena-qwen3",
+            "--bench",
+            "--pp",
+            "8",
+            "--prompt",
+            "ignored",
+        ])
+        .unwrap();
         assert_eq!(args.prompt.as_deref(), Some("ignored"));
         assert_eq!(args.pp, 8);
     }
@@ -512,6 +591,7 @@ mod tests {
                 "unsloth/Qwen3.5-0.8B-GGUF:BF16",
                 "--gguf",
                 "model.gguf",
+                "--prompt",
                 "prompt",
             ])
             .is_err()
@@ -528,5 +608,65 @@ mod tests {
         assert_eq!(mean, 7.5);
         assert_eq!(stddev, Some(2.5_f64 * 2.0_f64.sqrt()));
         assert_eq!(tokens_per_second_stats(&samples[..1]), (5.0, None));
+    }
+}
+
+#[cfg(test)]
+mod image_cli_tests {
+    use super::*;
+    #[test]
+    fn repeated_images_and_boolean_overrides_parse() {
+        let args = Args::try_parse_from([
+            "catena-qwen3",
+            "--image",
+            "one.png",
+            "--image",
+            "two.jpg",
+            "--mmproj",
+            "vision.gguf",
+            "--bf16=false",
+            "--matrix-cores=false",
+            "--fused-attention=false",
+            "--prompt",
+            "Describe these.",
+        ])
+        .unwrap();
+        assert_eq!(args.image.len(), 2);
+        assert!(!args.bf16 && !args.matrix_cores && !args.fused_attention);
+        let image_only = Args::try_parse_from(["catena-qwen3", "--image", "one.png"]).unwrap();
+        assert!(image_only.prompt.is_none());
+    }
+    #[test]
+    fn images_conflict_with_bench_and_require_companion_options() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--image", "one.png"]).is_err());
+        assert!(
+            Args::try_parse_from([
+                "catena-qwen3",
+                "--generate-entrypoint",
+                "--image",
+                "one.png"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "catena-qwen3",
+                "--mmproj",
+                "vision.gguf",
+                "--prompt",
+                "Describe."
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from([
+                "catena-qwen3",
+                "--image-max-pixels",
+                "0",
+                "--prompt",
+                "Describe."
+            ])
+            .is_err()
+        );
     }
 }
