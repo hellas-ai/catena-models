@@ -6,5 +6,6 @@ pub mod model;
 pub mod spec;
 pub mod tokenizer;
 pub mod tts;
+pub mod vision;
 pub mod weights;
 pub mod whisper;

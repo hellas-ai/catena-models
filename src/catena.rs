@@ -676,6 +676,24 @@ pub fn generated_model_source_for_options(
     Ok(retain_reachable_model_programs(&source))
 }
 
+/// Add a token-at-a-time embedding entrypoint with independent MRoPE coordinates.
+pub(crate) fn generated_multimodal_source(
+    config: &ModelConfig,
+    options: InferenceOptions,
+) -> Result<String> {
+    ensure!(
+        config.is_qwen35(),
+        "image inputs require a Qwen3.5 dense or MoE model"
+    );
+    let mut source = generated_model_source_for_options(config, options)?;
+    source.push_str(&crate::vision::language::source(
+        config,
+        options.precision,
+        generated_entrypoint(config, options.precision)?,
+    )?);
+    Ok(source)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

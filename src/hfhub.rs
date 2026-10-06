@@ -67,6 +67,63 @@ pub fn download_gguf(model: &str) -> Result<HubGguf> {
     })
 }
 
+/// Select an unambiguous unquantized companion projector from the same repository.
+pub fn download_mmproj(model: &str) -> Result<PathBuf> {
+    let (repo_id, _) = parse_model_selector(model)?;
+    let (owner, name) = split_id(repo_id);
+    let client = HFClientSync::new().context("initializing Hugging Face Hub client")?;
+    let repo = client.model(owner, name);
+    let paths = repo
+        .list_tree()
+        .recursive(true)
+        .send()?
+        .into_iter()
+        .filter_map(|e| match e {
+            RepoTreeEntry::File { path, .. } if is_mmproj_gguf(&path) => Some(path),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let selected = select_mmproj(&paths)?;
+    repo.download_file()
+        .filename(selected)
+        .send()
+        .with_context(|| format!("downloading vision projector from {repo_id}"))
+}
+fn is_mmproj_gguf(path: &str) -> bool {
+    has_gguf_extension(path) && !is_model_gguf(path)
+}
+fn select_mmproj(paths: &[String]) -> Result<String> {
+    ensure!(
+        !paths.is_empty(),
+        "repository has no mmproj GGUF; provide --mmproj PATH"
+    );
+    let bf16: Vec<_> = paths
+        .iter()
+        .filter(|p| p.to_ascii_lowercase().contains("bf16"))
+        .collect();
+    let f32: Vec<_> = paths
+        .iter()
+        .filter(|p| p.to_ascii_lowercase().contains("f32"))
+        .collect();
+    let candidates = if !bf16.is_empty() {
+        bf16
+    } else if !f32.is_empty() {
+        f32
+    } else {
+        paths.iter().collect()
+    };
+    ensure!(
+        candidates.len() == 1,
+        "projector selection is ambiguous: {}; provide --mmproj PATH",
+        candidates
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(candidates[0].clone())
+}
+
 fn parse_model_selector(value: &str) -> Result<(&str, Option<&str>)> {
     let (repo, variant) = match value.rsplit_once(':') {
         Some((repo, variant)) => (repo, Some(variant)),
@@ -191,6 +248,18 @@ mod tests {
 
     fn paths(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn projector_selection_prefers_bf16_without_affecting_language_selection() {
+        let paths = vec!["mmproj-F16.gguf".into(), "mmproj-BF16.gguf".into()];
+        assert_eq!(select_mmproj(&paths).unwrap(), "mmproj-BF16.gguf");
+        assert!(select_mmproj(&[]).is_err());
+        assert!(
+            select_mmproj(&["a/mmproj-BF16.gguf".into(), "b/mmproj-BF16.gguf".into()]).is_err()
+        );
+        assert!(is_mmproj_gguf("vision/mmproj.gguf"));
+        assert!(!is_mmproj_gguf("model-BF16.gguf"));
     }
 
     #[test]

@@ -105,7 +105,7 @@ prompt/cached timings. The llama.cpp run used full ROCm offload with
 
 ```bash
 nix develop --command cargo run --release -- \
-  "The capital of France is" --max-new-tokens 20
+  --prompt "The capital of France is" --max-new-tokens 20
 ```
 
 HIP is the default backend. Select CUDA for compilation, runtime allocation,
@@ -136,7 +136,7 @@ Alternatively, let the runner list and cache a checkpoint from Hugging Face:
 
 ```bash
 nix develop --command cargo run --release -- \
-  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 "The capital of France is"
+  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --prompt "The capital of France is"
 ```
 
 Qwen3 dense and Qwen3.5/3.6 dense or MoE models have an opt-in native-BF16
@@ -154,7 +154,7 @@ existing history for each decoded token:
 ```bash
 nix develop --command cargo run --release -- \
   --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
-  "The capital of France is"
+  --prompt "The capital of France is"
 
 nix develop --command cargo run --release -- \
   --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
@@ -197,7 +197,7 @@ nix develop --command cargo run --release -- \
 
 `--pp` and `--tg` default to 512 and 128; set either one to zero to skip that
 row. `--bench-runs N` reports the mean throughput across `N` measured runs
-(default 1). Benchmark mode ignores any positional prompt and uses deterministic
+(default 1). Benchmark mode ignores `--prompt` and uses deterministic
 token IDs directly, so it does not load or require a tokenizer.
 
 RoPE is also part of the Catena program rather than a model-specific Rust
@@ -228,7 +228,7 @@ For a fixed-length performance run that continues through EOS:
 
 ```bash
 nix develop --command cargo run --release -- \
-  "The capital of France is" --max-new-tokens 1000 --ignore-eos
+  --prompt "The capital of France is" --max-new-tokens 1000 --ignore-eos
 ```
 
 The current exploratory compiler fork produces the known continuation. The
@@ -242,6 +242,20 @@ tok/s. The retained techniques are summarized in
 [`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md); detailed measurements,
 rejected experiments, and the EOS protocol caveat are documented in
 [`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
+
+## Qwen3.5 image inputs
+
+The experimental native Catena image path accepts multiple PNG/JPEG images
+with a matching BF16/F32 vision/projector GGUF:
+
+```bash
+cargo run --release -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
+  --mmproj /path/to/mmproj-BF16.gguf \
+  --image photo.jpg --prompt 'Describe this image.'
+```
+
+See [setup, precision limits and validation](docs/qwen35-images.md). Image runs
+use a single Qwen3.5 user message; text-only runs retain raw completion.
 
 ## FLUX.2-klein text to image
 
