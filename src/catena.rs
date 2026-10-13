@@ -32,9 +32,18 @@ pub enum MatrixCoreMode {
     Blas,
 }
 
+/// Experimental Hex kernel implementation; the default compiler ignores this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ExperimentalKernelKind {
+    Reference,
+    #[default]
+    Fused,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InferenceOptions {
     pub codegen: CodegenKind,
+    pub experimental_kernels: ExperimentalKernelKind,
     pub precision: InferencePrecision,
     pub matrix_cores: MatrixCoreMode,
     pub fused_attention: bool,
@@ -44,6 +53,7 @@ impl InferenceOptions {
     pub const fn new(precision: InferencePrecision) -> Self {
         Self {
             codegen: CodegenKind::Default,
+            experimental_kernels: ExperimentalKernelKind::Fused,
             precision,
             matrix_cores: MatrixCoreMode::Disabled,
             fused_attention: false,
@@ -52,6 +62,11 @@ impl InferenceOptions {
 
     pub const fn with_codegen(mut self, codegen: CodegenKind) -> Self {
         self.codegen = codegen;
+        self
+    }
+
+    pub const fn with_experimental_kernels(mut self, kernels: ExperimentalKernelKind) -> Self {
+        self.experimental_kernels = kernels;
         self
     }
 

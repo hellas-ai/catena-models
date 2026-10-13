@@ -27,6 +27,7 @@ pub struct Model {
     precision: InferencePrecision,
     dialect: GpuDialect,
     multimodal: bool,
+    experimental_workspace_bytes: usize,
 }
 
 impl Model {
@@ -100,6 +101,7 @@ impl Model {
                 "experimental codegen does not yet support image inputs"
             );
         }
+        let experimental_workspace_bytes = crate::experimental::workspace_bytes(&config, options)?;
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
@@ -164,6 +166,7 @@ impl Model {
             precision,
             dialect,
             multimodal,
+            experimental_workspace_bytes,
         })
     }
 
@@ -208,6 +211,14 @@ impl Model {
         Ok(Session {
             model: self,
             cache: Some(self.allocate_cache(capacity)?),
+            workspace: if self.experimental_workspace_bytes == 0 {
+                None
+            } else {
+                Some(
+                    self.runtime
+                        .mem_f32(&vec![0.0; self.experimental_workspace_bytes / 4])?,
+                )
+            },
             position: 0,
             capacity,
             next_rope_position: None,
@@ -229,7 +240,8 @@ impl Model {
         start: usize,
         capacity: usize,
         cache: MemOwn,
-    ) -> Result<(MemOwn, MemOwn, u64)> {
+        workspace: Option<MemOwn>,
+    ) -> Result<(MemOwn, Option<MemOwn>, MemOwn, u64)> {
         self.ensure_execution_supported()?;
         ensure!(!tokens.is_empty(), "the token prefix must not be empty");
         ensure!(
@@ -248,14 +260,14 @@ impl Model {
         );
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
-        let model_input_count = 4 + self.weights.len();
+        let has_workspace = workspace.is_some();
+        let model_input_count = 4 + usize::from(has_workspace) + self.weights.len();
         let mut inputs = Vec::with_capacity(model_input_count);
-        inputs.extend([
-            token_buffer.as_ref().into(),
-            cache.into(),
-            (capacity as u64).into(),
-            (start as u64).into(),
-        ]);
+        inputs.extend([token_buffer.as_ref().into(), cache.into()]);
+        if let Some(workspace) = workspace {
+            inputs.push(workspace.into());
+        }
+        inputs.extend([(capacity as u64).into(), (start as u64).into()]);
         for weight in &self.weights {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
@@ -263,10 +275,21 @@ impl Model {
             inputs.len() == model_input_count,
             "internal model ABI mismatch"
         );
-        Self::cached_result(
-            self.artifact.exec_values("qwen3", inputs)?,
-            self.config.vocabulary_size,
-        )
+        let mut outputs = self.artifact.exec_values("qwen3", inputs)?;
+        let workspace = if has_workspace {
+            ensure!(
+                outputs.len() == 4,
+                "internal experimental output ABI mismatch"
+            );
+            let Value::MemOwn(workspace) = outputs.remove(1) else {
+                anyhow::bail!("experimental artifact returned non-memory workspace");
+            };
+            Some(workspace)
+        } else {
+            None
+        };
+        let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
+        Ok((cache, workspace, logits, token))
     }
 
     fn cached_result(
@@ -384,12 +407,22 @@ pub fn configured_gpu_dialect() -> Result<GpuDialect> {
 pub struct Session<'model> {
     model: &'model Model,
     cache: Option<MemOwn>,
+    workspace: Option<MemOwn>,
     position: usize,
     capacity: usize,
     next_rope_position: Option<u64>,
 }
 
 impl Session<'_> {
+    #[cfg(test)]
+    pub(crate) fn cache_values_for_test(&self) -> Result<Vec<u16>> {
+        Ok(self
+            .cache
+            .as_ref()
+            .context("missing test cache")?
+            .try_to_u16_vec()?)
+    }
+
     pub fn position(&self) -> usize {
         self.position
     }
@@ -576,10 +609,20 @@ impl Session<'_> {
             .cache
             .take()
             .context("the session cache is unavailable after a failed execution")?;
-        let (cache, logits, next_token) =
+        let workspace = if self.model.experimental_workspace_bytes == 0 {
+            None
+        } else {
+            Some(
+                self.workspace
+                    .take()
+                    .context("the session workspace is unavailable after a failed execution")?,
+            )
+        };
+        let (cache, workspace, logits, next_token) =
             self.model
-                .cached_outputs(tokens, self.position, self.capacity, cache)?;
+                .cached_outputs(tokens, self.position, self.capacity, cache, workspace)?;
         self.cache = Some(cache);
+        self.workspace = workspace;
         self.position += tokens.len();
         Ok((logits, next_token))
     }

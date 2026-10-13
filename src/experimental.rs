@@ -1,6 +1,6 @@
 //! BF16 dense Qwen3 programs for Catena's experimental compiler.
 use crate::{
-    catena::{InferenceOptions, InferencePrecision, MatrixCoreMode},
+    catena::{ExperimentalKernelKind, InferenceOptions, InferencePrecision, MatrixCoreMode},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 use anyhow::{Result, ensure};
@@ -9,6 +9,11 @@ use catena_lang::{
     runtime::RuntimeModule,
 };
 use std::fmt::Write;
+
+#[path = "experimental_fused.rs"]
+pub(crate) mod fused;
+#[path = "experimental_qwen35.rs"]
+mod qwen35;
 
 const SOURCES: &[&str] = &[
     include_str!("catena/experimental/memory.hex"),
@@ -33,12 +38,15 @@ pub(crate) fn validate(
     dialect: Option<GpuDialect>,
 ) -> Result<()> {
     ensure!(
-        config.architecture == ModelArchitecture::Qwen3Dense,
-        "experimental codegen currently supports dense Qwen3 only (Qwen3.5, MoE and image inputs are not yet ported)"
+        matches!(
+            config.architecture,
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+        ),
+        "experimental codegen supports dense Qwen3 and Qwen3.5 text models only"
     );
     ensure!(
         options.precision == InferencePrecision::Bf16,
-        "experimental Qwen3 currently requires BF16 (--bf16)"
+        "experimental Qwen3-family inference requires BF16 (--bf16)"
     );
     ensure!(
         options.matrix_cores == MatrixCoreMode::Disabled && !options.fused_attention,
@@ -58,11 +66,56 @@ pub(crate) fn validate(
         .all(|n| n.is_multiple_of(2)),
         "experimental packed BF16 projections require even hidden, intermediate and head dimensions"
     );
+    if config.architecture == ModelArchitecture::Qwen35Dense {
+        config.validate()?;
+        ensure!(
+            config.hidden_size.is_power_of_two() && config.head_dim.is_power_of_two(),
+            "experimental Qwen3.5 requires power-of-two hidden and attention head widths"
+        );
+        ensure!(
+            options.experimental_kernels == ExperimentalKernelKind::Fused,
+            "experimental Qwen3.5 requires --kernels fused"
+        );
+        ensure!(
+            config.linear_conv_kernel == Some(4),
+            "experimental Qwen3.5 requires four convolution taps"
+        );
+        ensure!(
+            config.linear_inner_size.unwrap().is_multiple_of(8),
+            "experimental Qwen3.5 requires the linear value size to be a multiple of eight"
+        );
+        ensure!(
+            config
+                .linear_time_step_rank
+                .unwrap()
+                .is_multiple_of(config.linear_group_count.unwrap()),
+            "experimental Qwen3.5 requires a whole number of value heads per key head"
+        );
+    }
     ensure!(
         config.rope_dimension_count.is_multiple_of(2),
         "experimental Qwen3 rotary dimension must be even"
     );
     Ok(())
+}
+
+/// Persistent experimental scratch is returned by the artifact after every call.
+pub(crate) fn workspace_bytes(config: &ModelConfig, options: InferenceOptions) -> Result<usize> {
+    if options.codegen != CodegenKind::Experimental
+        || options.experimental_kernels == ExperimentalKernelKind::Reference
+    {
+        return Ok(0);
+    }
+    if config.architecture == ModelArchitecture::Qwen3Dense {
+        return Ok(4096);
+    }
+    config
+        .num_layers
+        .checked_mul(config.linear_time_step_rank.unwrap())
+        .and_then(|n| n.checked_mul(config.linear_state_size.unwrap()))
+        .and_then(|n| n.checked_mul(config.linear_value_head_size().unwrap()))
+        .and_then(|n| n.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))
 }
 
 fn c(n: usize) -> String {
@@ -197,6 +250,16 @@ fn emit_layer_selector(s: &mut String, layers: usize, group: &str, weights: &str
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     config.validate()?;
     validate(config, options, None)?;
+    if config.architecture == ModelArchitecture::Qwen35Dense {
+        ensure!(
+            options.experimental_kernels == ExperimentalKernelKind::Fused,
+            "experimental Qwen3.5 requires --kernels fused"
+        );
+        return qwen35::source(config, options);
+    }
+    if options.experimental_kernels == ExperimentalKernelKind::Fused {
+        return fused::source(config, options);
+    }
     let mut s = SOURCES.join("\n");
     let values = [
         ("{{HIDDEN_SIZE}}", format!("{:016X}", config.hidden_size)),
@@ -534,7 +597,9 @@ pub(crate) fn compile<'a>(
 mod tests {
     use super::*;
     fn options() -> InferenceOptions {
-        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental)
+        InferenceOptions::new(InferencePrecision::Bf16)
+            .with_codegen(CodegenKind::Experimental)
+            .with_experimental_kernels(ExperimentalKernelKind::Reference)
     }
     pub(super) fn tiny_config() -> ModelConfig {
         let mut c = ModelConfig::qwen3_0_6b();

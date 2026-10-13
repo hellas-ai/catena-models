@@ -295,10 +295,10 @@ See [usage and validation](docs/mms-tts.md).
 cargo run --release --bin mms-tts -- 'Hello, world.' --output speech.wav
 ```
 
-### Experimental compiler: dense Qwen3
+### Experimental compiler: dense Qwen3 and Qwen3.5
 
 `--codegen default` preserves the existing compiler and acceleration defaults.
-The first experimental port supports BF16 **dense Qwen3** text generation on
+The experimental port supports BF16 **dense Qwen3 and Qwen3.5** text generation on
 HIP gfx11, including multi-token prefill and persistent KV-cache decode:
 
 ```bash
@@ -309,10 +309,17 @@ cargo run -r -- --codegen experimental \
 The CLI selects the experimental stdlib and the new Hex programs embedded from
 `src/catena/experimental`. It automatically disables the default compiler's
 WMMA and fused-attention options. Explicitly enabling those options or `--blas`
-returns an error. F32, CUDA, MoE, Qwen3.5, and image inputs are not supported by
-this initial port. Other model binaries continue using the default compiler.
+returns an error. F32, CUDA, MoE, and image inputs are not supported.
+Other model binaries continue using the default compiler.
 Library users select the port with
 `InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental)`.
+Experimental inference defaults to `--kernels fused`: cooperative projections,
+fused projection/residual and dual projection/SwiGLU kernels, single-launch RMS
+normalization, and a two-stage vocabulary argmax. `--kernels reference` retains
+the original Qwen3 implementation for comparisons. Qwen3.5 requires fused kernels.
+All new kernels are Hex programs using existing experimental primitives; the
+catena-lang dependency is unchanged. See [implementation and benchmark details](docs/experimental-qwen.md).
+
 Entrypoint export and benchmark mode also honor `--codegen`. Set
 `CATENA_QWEN3_EXPERIMENTAL_CPP=/path/to/module.cpp` to inspect emitted C++
 during compilation.
@@ -322,7 +329,7 @@ BF16/F32 weight mapping, tokenizer, Session API, and cache layout are shared by
 both compilers. The experimental programs use explicit allocations, guarded
 256-thread launches, native packed BF16 dots with F32 accumulation, and host
 folds over tokens and decoder layers. Prefill processes tokens sequentially;
-this initial implementation prioritizes correctness over prefill throughput.
+prefill throughput remains below the default compiler.
 Norm weights remain F32, and normalization, residual, RoPE, SwiGLU, and attention
 preserve the model's BF16 rounding boundaries. The memory/numeric adapters were
 adapted from the adjacent SmolLM2 experimental port; that repo is not needed to
@@ -344,3 +351,17 @@ grouped-query attention, padded launches, cache offsets, and argmax ties against
 independent scalar references. The second compares logits and greedy tokens
 with the default BF16 implementation, checks cached versus full-prefix
 inference, and verifies Session boundaries and independent sessions.
+
+Qwen3.5 uses typed full-attention and linear-layer weight groups. The linear path
+implements causal convolution, Q/K L2 normalization, gated DeltaNet, and gated
+RMS normalization. Recurrent state stays F32 throughout each prefill call and
+rounds to BF16 when the call ends, matching the default cache convention.
+
+```bash
+cargo run -r -- --codegen experimental \
+  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --prompt 'Gravity is'
+
+CATENA_QWEN35_EXPERIMENTAL_GGUF=/path/to/Qwen3.5-0.8B-BF16.gguf \
+  cargo test --release --lib experimental_qwen35_checkpoint_parity_on_gpu \
+  -- --nocapture
+```
