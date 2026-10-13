@@ -102,6 +102,12 @@ impl Transformer {
         for name in &self.program.weights {
             args.push(self.weights.gpu_ref(name)?.into());
         }
-        super::graph::execute(&self.ops.runtime, "flux.denoise", args, &self.program, dump)
+        super::graph::execute(
+            &self.ops.artifact,
+            "flux.denoise",
+            args,
+            &self.program,
+            dump,
+        )
     }
 }

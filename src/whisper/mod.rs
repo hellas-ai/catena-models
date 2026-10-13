@@ -6,7 +6,7 @@ use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use serde::Deserialize;
 use std::{
@@ -199,6 +199,7 @@ impl Default for Options {
 }
 pub struct Whisper {
     pub runtime: Runtime,
+    pub artifact: Artifact,
     pub config: Config,
     weights: Weights,
     tokenizer: tokenizers::Tokenizer,
@@ -241,7 +242,7 @@ impl Whisper {
             "tokenizer vocabulary does not match model"
         );
         let source = graph::source_with_debug(&config, debug)?;
-        let runtime = Runtime::from_sources(
+        let (runtime, artifact) = crate::catena::load_runtime(
             catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
                 .chain([
@@ -267,6 +268,7 @@ impl Whisper {
         }
         Ok(Self {
             runtime,
+            artifact,
             config,
             weights: checkpoint,
             tokenizer,
@@ -287,14 +289,17 @@ impl Whisper {
         );
         let mut args = vec![self.runtime.mem_u16(&bf16(features))?.into()];
         args.extend(self.weight_args(&graph::encoder_names(&self.config))?);
-        let mut output = memories(self.runtime.exec_values("whisper.encode", args)?)?;
+        let mut output = memories(self.artifact.exec_values("whisper.encode", args)?)?;
         ensure!(output.len() == 1, "wrong encoder output count");
         Ok(output.remove(0))
     }
     pub fn prepare_cross(&self, encoder: MemOwn) -> Result<Vec<MemOwn>> {
         let mut args = vec![encoder.into()];
         args.extend(self.weight_args(&graph::cross_names(&self.config))?);
-        let out = memories(self.runtime.exec_values("whisper.prepare-cross-kv", args)?)?;
+        let out = memories(
+            self.artifact
+                .exec_values("whisper.prepare-cross-kv", args)?,
+        )?;
         ensure!(
             out.len() == self.config.decoder_layers * 2,
             "wrong cross cache count"
@@ -325,7 +330,7 @@ impl Whisper {
             }
         }
         args.extend(self.weight_args(&graph::decoder_names(&self.config))?);
-        let mut out = memories(self.runtime.exec_values("whisper.decode-step", args)?)?;
+        let mut out = memories(self.artifact.exec_values("whisper.decode-step", args)?)?;
         ensure!(
             out.len() == 1 + self.config.decoder_layers * 2,
             "wrong decoder output count"
@@ -381,7 +386,7 @@ impl Whisper {
         args.extend(self.weight_args(&graph::cross_names(&self.config))?);
         args.extend(self.weight_args(&graph::decoder_names(&self.config))?);
         let start = Instant::now();
-        let outputs = self.runtime.exec_values("whisper.transcribe", args)?;
+        let outputs = self.artifact.exec_values("whisper.transcribe", args)?;
         let mut outputs = outputs.into_iter();
         let Some(Value::MemOwn(tokens)) = outputs.next() else {
             bail!("missing generated token buffer")

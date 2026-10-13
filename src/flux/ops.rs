@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, MemRef, Runtime, Value},
+    runtime::{Artifact, MemOwn, MemRef, Runtime, Value},
 };
 pub const SOURCE: &str = include_str!("../catena/flux_helpers.hex");
 pub(crate) use crate::weights::startup_timing;
@@ -13,6 +13,7 @@ pub enum Backend {
 }
 pub struct Ops {
     pub runtime: Runtime,
+    pub artifact: Artifact,
     pub zero: MemOwn,
 }
 impl Ops {
@@ -24,7 +25,7 @@ impl Ops {
             Backend::Fast => SOURCE,
             Backend::Legacy => include_str!("../catena/flux_legacy_helpers.hex"),
         };
-        let runtime = Runtime::from_sources(
+        let (runtime, artifact) = crate::catena::load_runtime(
             catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
                 .chain([
@@ -37,11 +38,15 @@ impl Ops {
         )
         .context("compiling Flux Catena kernels")?;
         let zero = runtime.mem_f32(&[0.])?;
-        Ok(Self { runtime, zero })
+        Ok(Self {
+            runtime,
+            artifact,
+            zero,
+        })
     }
     pub fn run<'a>(&self, name: &str, args: Vec<Value<'a>>) -> Result<MemOwn> {
         let mut out = self
-            .runtime
+            .artifact
             .exec_values(name, args)
             .with_context(|| format!("executing {name}"))?;
         ensure!(out.len() == 1, "{name}: wrong output arity");

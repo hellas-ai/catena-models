@@ -140,7 +140,7 @@ impl TextEncoder {
             },
         };
         let result =
-            super::graph::execute(&self.ops.runtime, "flux.encode-text", args, &program, dump)?;
+            super::graph::execute(&self.ops.artifact, "flux.encode-text", args, &program, dump)?;
         super::debug::dump(dump, "conditioning", &result, &[1, 512, 7680], true)?;
         Ok(result)
     }

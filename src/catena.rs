@@ -73,6 +73,26 @@ pub fn runtime_sources<'a>(
         .chain([helpers, model_source])
 }
 
+/// Compile Catena sources and load an executable artifact into a GPU context.
+pub(crate) fn load_runtime<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    dialect: catena_lang::runtime::GpuDialect,
+) -> Result<(
+    catena_lang::runtime::Runtime,
+    catena_lang::runtime::Artifact,
+)> {
+    use catena_lang::{
+        codegen::CodegenKind, compile::compile, report::CompileReport, runtime::Runtime,
+    };
+    use metacat::theory::RawTheorySet;
+
+    let mut report = CompileReport::new(RawTheorySet::from_texts(sources)?);
+    let module = compile(&mut report, CodegenKind::Default, dialect)?;
+    let mut runtime = Runtime::new(dialect)?;
+    let artifact = runtime.load(module)?;
+    Ok((runtime, artifact))
+}
+
 const ENTRYPOINT_MARKER: &str = "# Explicit metadata-derived Qwen3 composition.";
 
 const MOE_LAYER_WEIGHT_NAMES: [&str; 12] = [
@@ -698,10 +718,7 @@ pub(crate) fn generated_multimodal_source(
 mod tests {
     use super::*;
     use anyhow::Result;
-    use catena_lang::{
-        codegen::GpuDialect,
-        runtime::{Runtime, Value},
-    };
+    use catena_lang::{codegen::GpuDialect, runtime::Value};
 
     fn assert_qwen35_linear_bf16_temporaries_are_freed(model: &str) {
         for temporary in [
@@ -1178,14 +1195,14 @@ mod tests {
             return Ok(());
         }
         let model = generated_model_source();
-        let runtime = Runtime::from_sources(
+        let (_runtime, artifact) = load_runtime(
             runtime_sources(&model, InferencePrecision::F32),
             GpuDialect::Hip,
         )?;
         let config = ModelConfig::qwen3_30b();
         let sequence = config.max_position_embeddings;
         let [output] =
-            runtime.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;
+            artifact.exec("qwen3.rope-table", [0_u64.into(), (sequence as u64).into()])?;
         let Value::MemOwn(output) = output else {
             anyhow::bail!("qwen3.rope-table returned non-owned memory: {output:?}");
         };
@@ -1224,15 +1241,15 @@ mod tests {
             .enumerate()
         {
             let model = generated_model_source_for(&config)?;
-            let runtime = Runtime::from_sources(
+            let (_runtime, artifact) = load_runtime(
                 runtime_sources(&model, InferencePrecision::F32),
                 GpuDialect::Hip,
             )?;
             if index == 0 {
-                let [Value::F32(positive)] = runtime.exec("qwen3.exp", [100.0_f32.into()])? else {
+                let [Value::F32(positive)] = artifact.exec("qwen3.exp", [100.0_f32.into()])? else {
                     anyhow::bail!("qwen3.exp returned an unexpected value")
                 };
-                let [Value::F32(negative)] = runtime.exec("qwen3.exp", [(-100.0_f32).into()])?
+                let [Value::F32(negative)] = artifact.exec("qwen3.exp", [(-100.0_f32).into()])?
                 else {
                     anyhow::bail!("qwen3.exp returned an unexpected value")
                 };
@@ -1254,7 +1271,7 @@ mod tests {
             ModelConfig::qwen36_35b_a3b(),
         ] {
             let model = generated_model_source_for_precision(&config, InferencePrecision::Bf16)?;
-            Runtime::from_sources(
+            load_runtime(
                 runtime_sources(&model, InferencePrecision::Bf16),
                 GpuDialect::Hip,
             )?;
@@ -1263,7 +1280,7 @@ mod tests {
             InferenceOptions::new(InferencePrecision::Bf16).with_matrix_cores(MatrixCoreMode::Wmma);
         for config in [ModelConfig::qwen3_0_6b(), ModelConfig::qwen36_35b_a3b()] {
             let model = generated_model_source_for_options(&config, options)?;
-            Runtime::from_sources(
+            load_runtime(
                 runtime_sources(&model, InferencePrecision::Bf16),
                 GpuDialect::Hip,
             )?;
