@@ -1124,14 +1124,14 @@ pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Resu
 }
 
 pub(crate) fn execute<'a>(
-    runtime: &catena_lang::runtime::Runtime,
+    artifact: &catena_lang::runtime::Artifact,
     name: &str,
     args: Vec<catena_lang::runtime::Value<'a>>,
     program: &Program,
     dump: Option<&Path>,
 ) -> Result<catena_lang::runtime::MemOwn> {
     use catena_lang::runtime::Value;
-    let outputs = runtime.exec_values(name, args)?;
+    let outputs = artifact.exec_values(name, args)?;
     ensure!(
         outputs.len() == 1 + program.captures.len(),
         "wrong generated stage output count"

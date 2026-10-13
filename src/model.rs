@@ -3,7 +3,7 @@ use std::{collections::HashSet, env, path::Path};
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, Runtime, Value},
 };
 
 use crate::{
@@ -18,6 +18,7 @@ use crate::{
 /// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
 pub struct Model {
     runtime: Runtime,
+    artifact: Artifact,
     weights: Vec<TensorView>,
     checkpoint: Checkpoint,
     config: ModelConfig,
@@ -107,8 +108,9 @@ impl Model {
         } else {
             generated_model_source_for_options(&config, options)?
         };
-        let runtime = Runtime::from_sources(runtime_sources(&model_source, precision), dialect)
-            .context("failed to compile the Qwen3 Catena GPU program")?;
+        let (runtime, artifact) =
+            crate::catena::load_runtime(runtime_sources(&model_source, precision), dialect)
+                .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
@@ -143,6 +145,7 @@ impl Model {
         );
         Ok(Self {
             runtime,
+            artifact,
             weights,
             checkpoint,
             config,
@@ -204,8 +207,8 @@ impl Model {
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
         let elements = self.config.cache_elements(capacity)?;
         match self.precision {
-            InferencePrecision::F32 => self.runtime.mem_f32_zeroed(elements),
-            InferencePrecision::Bf16 => self.runtime.mem_bf16_zeroed(elements),
+            InferencePrecision::F32 => self.runtime.mem_f32(&vec![0.0; elements]),
+            InferencePrecision::Bf16 => self.runtime.mem_u16(&vec![0; elements]),
         }
         .context("failed to allocate the model cache")
     }
@@ -251,7 +254,7 @@ impl Model {
             "internal model ABI mismatch"
         );
         Self::cached_result(
-            self.runtime.exec_values("qwen3", inputs)?,
+            self.artifact.exec_values("qwen3", inputs)?,
             self.config.vocabulary_size,
         )
     }
@@ -293,7 +296,7 @@ impl Model {
 
     fn token_embedding(&self, token: u64) -> Result<MemOwn> {
         let tokens = self.runtime.mem_u64(&[token])?;
-        let mut output = self.runtime.exec_values(
+        let mut output = self.artifact.exec_values(
             "qwen3.embedding",
             vec![
                 tokens.as_ref().into(),
@@ -327,7 +330,7 @@ impl Model {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
         Self::cached_result(
-            self.runtime.exec_values("qwen3.multimodal", inputs)?,
+            self.artifact.exec_values("qwen3.multimodal", inputs)?,
             self.config.vocabulary_size,
         )
     }
@@ -489,7 +492,7 @@ impl Session<'_> {
             let hidden =
                 if image_index < prompt.spans.len() && index >= prompt.spans[image_index].start {
                     let image = &prompt.images[image_index];
-                    let mut out = self.model.runtime.exec_values(
+                    let mut out = self.model.artifact.exec_values(
                         "qwen3.mm-image-row",
                         vec![
                             image.values.as_ref().into(),

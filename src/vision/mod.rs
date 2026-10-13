@@ -12,7 +12,7 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
@@ -20,6 +20,7 @@ pub(crate) const HELPERS: &str = include_str!("../catena/vision_helpers.hex");
 
 pub struct VisionModel {
     runtime: Runtime,
+    artifact: Artifact,
     checkpoint: Checkpoint,
     weights: Vec<crate::checkpoint::TensorView>,
     converted: BTreeMap<usize, MemOwn>,
@@ -70,7 +71,7 @@ impl VisionModel {
         let mut names: Vec<_> = specs.iter().map(|s| s.gguf_name.clone()).collect();
         names.push("__zero".into());
         let source = graph::source(&config, &names);
-        let runtime = Runtime::from_sources(
+        let (runtime, artifact) = crate::catena::load_runtime(
             catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
                 .chain([
@@ -91,7 +92,7 @@ impl VisionModel {
         // keep the immutable GGUF mapping alive for native F32 tensors.
         for (i, tensor) in weights.iter().enumerate() {
             if tensor.dtype == GgufDtype::Bf16 {
-                let mem = one_memory(runtime.exec_values(
+                let mem = one_memory(artifact.exec_values(
                     "vision.widen-bf16",
                     vec![
                         checkpoint.gpu_ref(tensor)?.into(),
@@ -101,7 +102,7 @@ impl VisionModel {
                 converted.insert(i, mem);
             }
         }
-        let zero = runtime.mem_f32_zeroed(config.hidden_size)?;
+        let zero = runtime.mem_f32(&vec![0.0; config.hidden_size])?;
         let dim = config.hidden_size / config.heads;
         let inv: Vec<_> = (0..dim / 4)
             .map(|i| 10000_f32.powf(-4. * i as f32 / dim as f32))
@@ -109,6 +110,7 @@ impl VisionModel {
         let frequencies = runtime.mem_f32(&inv)?;
         Ok(Self {
             runtime,
+            artifact,
             checkpoint,
             weights,
             converted,
@@ -202,7 +204,7 @@ impl VisionModel {
         }
         args.push(self.zero.as_ref().into());
         let started = Instant::now();
-        let values = one_memory(self.runtime.exec_values("vision.encode", args)?)?;
+        let values = one_memory(self.artifact.exec_values("vision.encode", args)?)?;
         ensure!(
             values.byte_len() == (rows / 4 * self.config.output_size * 4) as u64,
             "vision embedding length mismatch"
@@ -403,13 +405,14 @@ mod tests {
                 let raw = metacat::theory::RawTheorySet::from_texts(
                     crate::catena::runtime_sources(&source, precision),
                 )?;
-                let report =
-                    catena_lang::compile::compile(raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+                let mut report = catena_lang::report::CompileReport::new(raw);
                 for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-                    let cpp = catena_lang::codegen::gpu::render_modules(
-                        report.gpu_modules.as_ref().unwrap(),
+                    let cpp = catena_lang::compile::compile(
+                        &mut report,
+                        catena_lang::codegen::CodegenKind::Default,
                         dialect,
-                    )?;
+                    )?
+                    .source;
                     ensure!(
                         cpp.contains("program_qwen3_multimodal"),
                         "missing multimodal entrypoint"
@@ -479,12 +482,14 @@ mod tests {
                     &source,
                 ]),
         )?;
-        let report = catena_lang::compile::compile(raw).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let mut report = catena_lang::report::CompileReport::new(raw);
         for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-            let cpp = catena_lang::codegen::gpu::render_modules(
-                report.gpu_modules.as_ref().unwrap(),
+            let cpp = catena_lang::compile::compile(
+                &mut report,
+                catena_lang::codegen::CodegenKind::Default,
                 dialect,
-            )?;
+            )?
+            .source;
             ensure!(
                 cpp.contains("program_vision_encode"),
                 "missing encoder entrypoint"

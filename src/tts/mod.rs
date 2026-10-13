@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use serde::Deserialize;
 use std::{
@@ -197,6 +197,7 @@ pub fn materialize(weights: &Weights, name: &str, binding: &Binding) -> Result<V
 }
 pub struct Tts {
     runtime: Runtime,
+    artifact: Artifact,
     checkpoint: Weights,
     weights: BTreeMap<String, MemOwn>,
     tokenizer: tokenizer::Tokenizer,
@@ -209,7 +210,7 @@ impl Tts {
         validate_weights(&checkpoint, &config)?;
         let tokenizer = tokenizer::Tokenizer::read(dir)?;
         let source = graph::bundle(&config)?;
-        let runtime = Runtime::from_sources(
+        let (runtime, artifact) = crate::catena::load_runtime(
             catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
                 .chain([source.as_str()]),
@@ -240,6 +241,7 @@ impl Tts {
         }
         Ok(Self {
             runtime,
+            artifact,
             checkpoint,
             weights,
             tokenizer,
@@ -267,7 +269,7 @@ impl Tts {
         }
         let start = Instant::now();
         let debug = options.dump_dir.is_some();
-        let outputs = self.runtime.exec_values(
+        let outputs = self.artifact.exec_values(
             if debug {
                 "tts.synthesize-debug"
             } else {

@@ -93,7 +93,7 @@ impl VaeDecoder {
             args.push(self.weights.gpu_ref(name)?.into());
         }
         super::graph::execute(
-            &self.ops.runtime,
+            &self.ops.artifact,
             "flux.decode-image",
             args,
             &self.program,
