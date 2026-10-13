@@ -1,0 +1,16 @@
+# Sequence releases after the buffer's last consuming kernel. The phase is a
+# non-unit erased dependency, so product unpacking preserves the ordering edge.
+(def program qwen3.free-f32-before : {((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([old after.]
+  ([.after] meta.master.complete-own [result phase.])
+  ({[.old] [.phase]} meta.master.after-own [ready.])
+  ([.ready] stdlib.qwen3.memory.free unit.elim)
+  [.result]
+ ))
+(def program qwen3.free-bf16-before : {((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([old after.]
+  ([.after] meta.master.complete-own [result phase.])
+  ({[.old] [.phase]} meta.master.after-own [ready.])
+  ([.ready] stdlib.qwen3.memory.free-bf16 unit.elim)
+  [.result]
+ ))

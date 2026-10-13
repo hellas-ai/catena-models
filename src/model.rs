@@ -9,7 +9,7 @@ use catena_lang::{
 use crate::{
     catena::{
         InferenceOptions, InferencePrecision, generated_model_source_for_options,
-        generated_multimodal_source, runtime_sources,
+        generated_multimodal_source, runtime_sources_for_options,
     },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
@@ -93,6 +93,13 @@ impl Model {
         let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
+        if options.codegen == catena_lang::codegen::CodegenKind::Experimental {
+            crate::experimental::validate(&config, options, Some(dialect))?;
+            ensure!(
+                !multimodal,
+                "experimental codegen does not yet support image inputs"
+            );
+        }
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
@@ -108,9 +115,12 @@ impl Model {
         } else {
             generated_model_source_for_options(&config, options)?
         };
-        let (runtime, artifact) =
-            crate::catena::load_runtime(runtime_sources(&model_source, precision), dialect)
-                .context("failed to compile the Qwen3 Catena GPU program")?;
+        let (runtime, artifact) = crate::catena::load_runtime_with_codegen(
+            runtime_sources_for_options(&model_source, options),
+            dialect,
+            options.codegen,
+        )
+        .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
