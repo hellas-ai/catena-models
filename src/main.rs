@@ -146,10 +146,7 @@ fn inference_options(args: &Args, matches: &clap::ArgMatches) -> Result<Inferenc
             args.bf16,
             "experimental Qwen3-family inference requires BF16 (--bf16)"
         );
-        ensure!(
-            args.image.is_empty(),
-            "experimental codegen does not yet support image inputs"
-        );
+
         ensure!(!args.blas, "experimental codegen does not support --blas");
         for (name, enabled) in [
             ("matrix_cores", args.matrix_cores),
@@ -594,7 +591,7 @@ mod tests {
                 "{option}"
             );
         }
-        assert!(options_from_cli(&["--codegen", "experimental", "--image", "image.png"]).is_err());
+        assert!(options_from_cli(&["--codegen", "experimental", "--image", "image.png"]).is_ok());
         assert!(
             options_from_cli(&[
                 "--codegen",

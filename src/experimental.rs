@@ -74,10 +74,6 @@ pub(crate) fn validate(
     ) {
         config.validate()?;
         ensure!(
-            config.hidden_size.is_power_of_two() && config.head_dim.is_power_of_two(),
-            "experimental Qwen3.5 requires power-of-two hidden and attention head widths"
-        );
-        ensure!(
             options.experimental_kernels == ExperimentalKernelKind::Fused,
             "experimental Qwen3.5 requires --kernels fused"
         );
@@ -98,6 +94,10 @@ pub(crate) fn validate(
         );
     }
     if config.architecture == ModelArchitecture::Qwen35Moe {
+        ensure!(
+            config.hidden_size.is_power_of_two(),
+            "experimental MoE router requires a power-of-two hidden width"
+        );
         ensure!(
             config.head_dim <= 256
                 && config.linear_state_size.unwrap() <= 256
@@ -128,6 +128,15 @@ pub(crate) fn validate(
         "experimental Qwen3 rotary dimension must be even"
     );
     Ok(())
+}
+
+pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    validate(config, options, None)?;
+    ensure!(
+        config.is_qwen35(),
+        "image inputs require Qwen3.5 dense or MoE"
+    );
+    qwen35::multimodal_source(config, options)
 }
 
 /// Persistent experimental scratch is returned by the artifact after every call.

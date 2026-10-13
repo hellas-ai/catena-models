@@ -25,6 +25,14 @@ cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
 
+Experimental MoE images use the same HF projector selection and image options:
+
+```bash
+cargo run -r -- --codegen experimental \
+  --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  --image photo.jpg --prompt 'Describe this image.'
+```
+
 [Image handling and precision](docs/qwen35-images.md).
 
 ## Compiler and kernel selection
@@ -47,13 +55,16 @@ MoE text inference on HIP gfx11. It uses Hex kernels under
 `src/catena/experimental`, with no new compiler primitives. Its CLI automatically
 disables legacy matrix-core, BLAS, and attention switches. `--kernels fused`
 is the default; `--kernels reference` is available for Qwen3 dense only.
-Images and older Qwen3 MoE use the default compiler.
+Qwen3.5/3.6 images use the existing native vision encoder with the selected
+language compiler. Older Qwen3 MoE uses the default compiler.
 
 Experimental Qwen3.5 MoE combines routed/shared expert gate/up activations and
 down projections, keeps routing scratch per session, and uses parallel argmax.
 Its full-attention layers use SIMT online cached attention during decode,
 including context output gating, without score/probability allocations.
 Multi-token prefill retains the validated staged BF16 attention path.
+Dense Qwen3.5 also supports non-power-of-two widths, including 4B
+with its 2,560-wide hidden state.
 Cooperative per-head L2 and gated RMS normalization preserve the existing
 scalar sum order. DeltaNet
 prediction, recurrent update, and output execute in one kernel without a delta

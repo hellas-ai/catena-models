@@ -558,8 +558,8 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
  ([scores keys.] ({[.scores] [.keys]} qwen35.softmax [output.]) {[.scores] [.output]}))
 (def program test.qwen35-context : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
  ([prob cache keys offset.] ({[.prob] [.cache] [.keys] [.offset]} qwen35.context [output.]) {[.prob] [.cache] [.output]}))
-(def program test.qwen35-normalize : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (f32 val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
- ([input weight columns cf rows stages.] ({[.input] [.weight] [.columns] [.cf] [.rows] [.stages]} qwen35.normalize [output.]) {[.input] [.output]}))
+(def program test.qwen35-normalize : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (f32 val) (u64 val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
+ ([input weight columns cf rows stages padded.] ({[.input] [.weight] [.columns] [.cf] [.rows] [.stages] [.padded]} qwen35.normalize [output.]) {[.input] [.output]}))
 "#;
     let fused_wrapper = wrapper
         .split("(def program test.qwen35-conv")
@@ -619,7 +619,7 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
             "convolution cache stores raw QKV"
         );
     }
-    for width in [16usize, 32, 1024] {
+    for width in [16usize, 32, 48, 192, 1024, 2560] {
         let input = (0..width * 2)
             .map(|i| rounded((i * 137 % 2029) as f32 / 201.0 - 4.0))
             .collect::<Vec<_>>();
@@ -636,7 +636,8 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
                 (width as u64).into(),
                 (width as f32).into(),
                 2u64.into(),
-                (width.trailing_zeros() as u64).into(),
+                (width.next_power_of_two().trailing_zeros() as u64).into(),
+                (width.next_power_of_two() as u64).into(),
             ],
         )?);
         let gold = input
@@ -1105,12 +1106,13 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
     let mut c = tiny_moe_config();
     c.num_experts = 4;
     c.experts_per_token = 2;
+    c.mrope_sections = [2, 1, 1];
     let specs = weight_specs(&c)?;
     let make = |codegen| -> Result<(Runtime, Artifact, Vec<MemOwn>)> {
         let options = InferenceOptions::new(InferencePrecision::Bf16)
             .with_codegen(codegen)
             .with_fused_attention(false);
-        let source = crate::catena::generated_model_source_for_options(&c, options)?;
+        let source = crate::catena::generated_multimodal_source(&c, options)?;
         let (rt, artifact) = crate::catena::load_runtime_with_codegen(
             crate::catena::runtime_sources_for_options(&source, options),
             GpuDialect::Hip,
@@ -1221,6 +1223,138 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
                 ec.try_to_u16_vec()?,
                 rc.try_to_u16_vec()?,
                 "hybrid cache after decode {position}"
+            );
+        }
+    }
+
+    // Image rows and token rows use the same public entrypoints as Session.
+    let image_values = (0..4 * c.hidden_size)
+        .map(|i| ((i * 17 % 59) as f32 - 29.0) / 87.0)
+        .collect::<Vec<_>>();
+    let image = rt.mem_f32(&image_values)?;
+    let reference_image = reference_rt.mem_f32(&image_values)?;
+    for row in 0..4u64 {
+        let actual = last(memories(
+            &experimental,
+            "qwen3.mm-image-row",
+            vec![image.as_ref().into(), row.into()],
+        )?);
+        let expected = last(memories(
+            &reference,
+            "qwen3.mm-image-row",
+            vec![reference_image.as_ref().into(), row.into()],
+        )?);
+        assert_eq!(
+            actual.try_to_u16_vec()?,
+            expected.try_to_u16_vec()?,
+            "image row {row}"
+        );
+    }
+    for coordinates in [[3u64, 8, 5], [5, 5, 5]] {
+        let positions = rt.mem_u64(&coordinates)?;
+        let reference_positions = reference_rt.mem_u64(&coordinates)?;
+        let actual = last(memories(
+            &experimental,
+            "qwen3.mm-rope-table",
+            vec![positions.as_ref().into()],
+        )?);
+        let expected = last(memories(
+            &reference,
+            "qwen3.mm-rope-table",
+            vec![reference_positions.as_ref().into()],
+        )?);
+        close(&actual.try_to_f32_vec()?, &expected.try_to_f32_vec()?, 1e-6);
+    }
+    for _ in 0..2 {
+        let mut ec = rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?;
+        let mut rc = reference_rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?;
+        let mut scratch = rt.mem_f32(&vec![0.0; workspace_len])?;
+        for position in 0..capacity {
+            let coordinates = match position {
+                2..=5 => [
+                    2,
+                    2 + (position as u64 - 2) / 2,
+                    2 + (position as u64 - 2) % 2,
+                ],
+                6.. => [position as u64 - 2; 3],
+                _ => [position as u64; 3],
+            };
+            let invoke_mm = |runtime: &Runtime,
+                             artifact: &Artifact,
+                             weights: &[MemOwn],
+                             image: &MemOwn,
+                             cache: MemOwn,
+                             workspace: Option<MemOwn>|
+             -> Result<Vec<MemOwn>> {
+                let hidden = if (2..=5).contains(&position) {
+                    last(memories(
+                        artifact,
+                        "qwen3.mm-image-row",
+                        vec![image.as_ref().into(), ((position - 2) as u64).into()],
+                    )?)
+                } else {
+                    let tokens = runtime.mem_u64(&[1 + (position as u64 % 7)])?;
+                    last(memories(
+                        artifact,
+                        "qwen3.embedding",
+                        vec![tokens.as_ref().into(), weights[0].as_ref().into()],
+                    )?)
+                };
+                let positions = runtime.mem_u64(&coordinates)?;
+                let experimental = workspace.is_some();
+                let mut inputs = vec![hidden.into(), positions.as_ref().into(), cache.into()];
+                if let Some(workspace) = workspace {
+                    inputs.push(workspace.into());
+                }
+                inputs.extend([(capacity as u64).into(), (position as u64).into()]);
+                if experimental {
+                    inputs.push((if position < 8 { 8u64 } else { 1u64 }).into());
+                }
+                inputs.extend(weights.iter().map(|w| w.as_ref().into()));
+                memories(artifact, "qwen3.multimodal", inputs)
+            };
+            let mut actual = invoke_mm(&rt, &experimental, &ew, &image, ec, Some(scratch))?;
+            let mut expected =
+                invoke_mm(&reference_rt, &reference, &rw, &reference_image, rc, None)?;
+            ec = actual.remove(0);
+            scratch = actual.remove(0);
+            rc = expected.remove(0);
+            assert_eq!(
+                ec.try_to_u16_vec()?,
+                rc.try_to_u16_vec()?,
+                "image cache at {position}"
+            );
+            let actual_logits = values(&actual.remove(0))?;
+            let expected_logits = values(&expected.remove(0))?;
+            close(&actual_logits, &expected_logits, 0.01);
+            let first_max = |xs: &[f32]| {
+                xs.iter()
+                    .enumerate()
+                    .max_by(|(ia, a), (ib, b)| a.total_cmp(b).then_with(|| ib.cmp(ia)))
+                    .unwrap()
+                    .0 as u64
+            };
+            let last_max = |xs: &[f32]| {
+                xs.iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                    .unwrap()
+                    .0 as u64
+            };
+            // Synthetic LM rows 0 and 31 are identical. Preserve the existing
+            // first-token experimental and last-token default tie policies.
+            assert_eq!(
+                first_max(&actual_logits),
+                first_max(&expected_logits),
+                "image greedy choice at {position}"
+            );
+            assert_eq!(
+                actual.remove(0).try_to_u64_vec()?,
+                vec![first_max(&actual_logits)]
+            );
+            assert_eq!(
+                expected.remove(0).try_to_u64_vec()?,
+                vec![last_max(&expected_logits)]
             );
         }
     }

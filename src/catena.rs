@@ -758,10 +758,9 @@ pub(crate) fn generated_multimodal_source(
         config.is_qwen35(),
         "image inputs require a Qwen3.5 dense or MoE model"
     );
-    ensure!(
-        options.codegen == CodegenKind::Default,
-        "experimental codegen does not yet support image inputs"
-    );
+    if options.codegen == CodegenKind::Experimental {
+        return crate::experimental::multimodal_source(config, options);
+    }
     let mut source = generated_model_source_for_options(config, options)?;
     source.push_str(&crate::vision::language::source(
         config,

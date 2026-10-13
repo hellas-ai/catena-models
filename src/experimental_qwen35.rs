@@ -781,16 +781,23 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ),
     ] {
         let columns = c(width);
-        let stages = c(width.trailing_zeros() as usize);
+        let padded = c(width.next_power_of_two());
+        let stages = c(width.next_power_of_two().trailing_zeros() as usize);
         let pattern = format!("{columns} {float} {} }} qwen3.fused.normalize", c(rows));
         s = s.replace(
             &pattern,
-            &format!("{columns} {float} {} {stages} }} qwen35.normalize", c(rows)),
+            &format!(
+                "{columns} {float} {} {stages} {padded} }} qwen35.normalize",
+                c(rows)
+            ),
         );
         let pattern = format!("{columns} {float} {}}} qwen3.fused.normalize", c(rows));
         s = s.replace(
             &pattern,
-            &format!("{columns} {float} {} {stages}}} qwen35.normalize", c(rows)),
+            &format!(
+                "{columns} {float} {} {stages} {padded}}} qwen35.normalize",
+                c(rows)
+            ),
         );
     }
     Ok(s)
@@ -1192,6 +1199,96 @@ fn emit_entry(
     Ok(())
 }
 
+/// Reuse the hybrid layer fold with supplied embeddings and independent MRoPE.
+pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    let half = config.rope_dimension_count / 2;
+    let sections = config.mrope_sections;
+    ensure!(
+        sections.iter().sum::<usize>() == half
+            && sections[1] * 3 <= half + 2
+            && sections[2] * 3 <= half + 2,
+        "unsupported interleaved MRoPE sections {sections:?}"
+    );
+    let mut s = source(config, options)?;
+    let mut helpers = include_str!("catena/experimental/qwen35_multimodal.hex").to_owned();
+    for (name, value) in [
+        ("HIDDEN_SIZE", config.hidden_size),
+        ("ROPE_DIM", config.rope_dimension_count),
+        ("ROPE_HALF_DIM", half),
+        ("HEIGHT_END", sections[1] * 3),
+        ("WIDTH_END", sections[2] * 3),
+    ] {
+        helpers = helpers.replace(&format!("{{{{{name}}}}}"), &format!("{value:016X}"));
+    }
+    let entry = &s[s.rfind("(def program qwen3 :").unwrap()..];
+    let body = &entry[entry.find("\n  ({").unwrap()..];
+    let allocation = body
+        .find(&format!(
+            "  ({{{} }} stdlib.qwen3.memory.alloc-bf16",
+            c(config.hidden_size)
+        ))
+        .unwrap();
+    let tail = body.find("  ({[.cache-final] [.shadow-final]").unwrap();
+    let mut mm = String::new();
+    let specs = weight_specs(config)?;
+    let ws = (0..specs.len())
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        ("hidden", OWN),
+        ("positions", REF),
+        ("cache", OWN),
+        ("workspace", OWN),
+        ("capacity", U64),
+        ("start", U64),
+        ("sequence", U64),
+    ];
+    args.extend(ws.iter().map(|w| (w.as_str(), REF)));
+    header(
+        &mut mm,
+        "qwen3.multimodal",
+        &args,
+        "{((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)}",
+    );
+    mm.push_str(&body[..allocation]);
+    call(&mut mm, &["positions"], "qwen3.mm-rope-table", "rope");
+    pack(
+        &mut mm,
+        &names(&["cache", "shadow-ready", "hidden"]),
+        "initial-state",
+    );
+    call(
+        &mut mm,
+        &[
+            "full-weights",
+            "linear-weights",
+            "rope",
+            "capacity",
+            "start",
+            "sequence",
+        ],
+        "partial.stdlib.qwen35.layer.fold.6",
+        "layer-callback",
+    );
+    writeln!(mm, "  ({{(const.u32.0x{:08X}) (unit.intro meta.master.end32)}} smolcat.value.named_at [layer-end.])", config.num_layers).unwrap();
+    mm.push_str("  ({[.layer-end] [.initial-state] [.layer-callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
+    unpack(
+        &mut mm,
+        "final-state",
+        &names(&["cache-final", "shadow-final", "decoded-hidden"]),
+    );
+    call(
+        &mut mm,
+        &["rope", "decoded-hidden"],
+        "qwen3.free-f32-before",
+        "hidden-final",
+    );
+    mm.push_str(&body[tail..]);
+    s.push_str(&helpers);
+    s.push_str(&mm);
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +1305,7 @@ mod tests {
         c.num_key_value_heads = 1;
         c.head_dim = 16;
         c.rope_dimension_count = 8;
+        c.mrope_sections = [2, 1, 1];
         c.vocabulary_size = 33;
         c.linear_state_size = Some(16);
         c.linear_group_count = Some(1);
@@ -1215,7 +1313,7 @@ mod tests {
         c.linear_inner_size = Some(32);
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
-        let source = source(&c, options)?;
+        let source = multimodal_source(&c, options)?;
         let module = compile(
             crate::catena::runtime_sources_for_options(&source, options),
             GpuDialect::Hip,
@@ -1224,7 +1322,7 @@ mod tests {
             module
                 .functions
                 .iter()
-                .find(|f| f.source_name == "qwen3")
+                .find(|f| f.source_name == "qwen3.multimodal")
                 .unwrap()
                 .outputs
                 .len(),
@@ -1235,12 +1333,12 @@ mod tests {
     #[test]
     fn qwen35_dense_compiles() -> Result<()> {
         let mut c = ModelConfig::qwen35_0_8b();
-        c.hidden_size = 32;
+        c.hidden_size = 48;
         c.intermediate_size = 64;
         c.num_layers = 4;
         c.num_attention_heads = 2;
         c.num_key_value_heads = 1;
-        c.head_dim = 16;
+        c.head_dim = 24;
         c.rope_dimension_count = 8;
         c.vocabulary_size = 33;
         c.linear_state_size = Some(16);
@@ -1249,6 +1347,7 @@ mod tests {
         c.linear_inner_size = Some(32);
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+        validate(&c, options, Some(GpuDialect::Hip))?;
         let source = source(&c, options)?;
         let module = compile(
             crate::catena::runtime_sources_for_options(&source, options),
