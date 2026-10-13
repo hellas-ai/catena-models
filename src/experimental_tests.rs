@@ -417,17 +417,19 @@ fn check_checkpoint_on_gpu(kind: ExperimentalKernelKind) -> Result<()> {
 
 #[test]
 fn experimental_qwen35_checkpoint_parity_on_gpu() -> Result<()> {
-    let Some(path) = std::env::var_os("CATENA_QWEN35_EXPERIMENTAL_GGUF") else {
+    qwen35_checkpoint_parity("CATENA_QWEN35_EXPERIMENTAL_GGUF")
+}
+#[test]
+fn experimental_qwen35_moe_checkpoint_parity_on_gpu() -> Result<()> {
+    qwen35_checkpoint_parity("CATENA_QWEN36_EXPERIMENTAL_GGUF")
+}
+fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
+    let Some(path) = std::env::var_os(variable) else {
         return Ok(());
     };
     use crate::{model::Model, tokenizer::QwenTokenizer};
     let tokenizer = QwenTokenizer::from_gguf(&path)?
         .ok_or_else(|| anyhow::anyhow!("missing GGUF tokenizer"))?;
-    let reference = Model::load_gguf_with_precision(&path, InferencePrecision::Bf16)?;
-    let experimental = Model::load_gguf_with_options(
-        &path,
-        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental),
-    )?;
     let argmax = |xs: &[f32]| {
         xs.iter()
             .enumerate()
@@ -435,17 +437,36 @@ fn experimental_qwen35_checkpoint_parity_on_gpu() -> Result<()> {
             .unwrap()
             .0 as u64
     };
-    for prompt in [
-        "Gravity is".to_owned(),
-        "The quick brown fox jumps over the lazy dog. ".repeat(12),
-    ] {
-        let tokens = tokenizer.encode(&prompt)?;
+    // Register one checkpoint at a time: two simultaneous 65-GiB HIP host
+    // registrations exceed the physical-memory pinning limit on this machine.
+    let mut golden = Vec::new();
+    {
+        let reference = Model::load_gguf_with_precision(&path, InferencePrecision::Bf16)?;
+        for prompt in [
+            "Gravity is".to_owned(),
+            "The quick brown fox jumps over the lazy dog. ".repeat(12),
+        ] {
+            let tokens = tokenizer.encode(&prompt)?;
+            let mut session = reference.session(tokens.len() + 20)?;
+            let mut logits = session.prefill_logits(&tokens)?;
+            let cache = session.cache_values_for_test()?;
+            let mut steps = Vec::new();
+            for _ in 0..20 {
+                let token = argmax(&logits);
+                steps.push((logits, token));
+                logits = session.decode_logits(token)?;
+            }
+            golden.push((tokens, cache, steps));
+        }
+    }
+    let experimental = Model::load_gguf_with_options(
+        &path,
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental),
+    )?;
+    for (tokens, expected_cache, steps) in golden {
         let capacity = tokens.len() + 20;
-        let mut expected = reference.session(capacity)?;
         let mut actual = experimental.session(capacity)?;
-        let mut e = expected.prefill_logits(&tokens)?;
-        let mut a = actual.prefill_logits(&tokens)?;
-        let expected_cache = expected.cache_values_for_test()?;
+        let mut logits = actual.prefill_logits(&tokens)?;
         let actual_cache = actual.cache_values_for_test()?;
         assert_eq!(expected_cache.len(), actual_cache.len());
         assert_eq!(
@@ -457,30 +478,40 @@ fn experimental_qwen35_checkpoint_parity_on_gpu() -> Result<()> {
             "Qwen3.5 cache after {}-token prefill",
             tokens.len()
         );
-        for step in 0..20 {
-            let error = a
+        let greedy = steps.iter().map(|(_, token)| *token).collect::<Vec<_>>();
+        for (step, (expected, token)) in steps.into_iter().enumerate() {
+            let error = logits
                 .iter()
-                .zip(&e)
+                .zip(&expected)
                 .map(|(&a, &e)| f64::from(a - e).powi(2))
                 .sum::<f64>();
-            let energy = e.iter().map(|&e| f64::from(e).powi(2)).sum::<f64>();
+            let energy = expected.iter().map(|&e| f64::from(e).powi(2)).sum::<f64>();
             assert!(
                 (error / energy.max(1e-30)).sqrt() <= 0.05,
                 "Qwen3.5 logit RMS for {} prompt tokens at step {step}: {}",
                 tokens.len(),
                 (error / energy).sqrt()
             );
-            let token = argmax(&e);
             assert_eq!(
-                argmax(&a),
+                argmax(&logits),
                 token,
                 "Qwen3.5 greedy token after {} prompt tokens at step {step}",
                 tokens.len()
             );
-            e = expected.decode_logits(token)?;
-            a = actual.decode_logits(token)?;
+            logits = actual.decode_logits(token)?;
         }
         assert_eq!(actual.position(), capacity);
+        let mut independent = experimental.session(capacity)?;
+        let mut token = independent.prefill_next_token(&tokens)?;
+        assert_eq!(token, greedy[0], "device argmax after prefill");
+        for &expected in &greedy[1..] {
+            token = independent.decode_next_token(token)?;
+            assert_eq!(token, expected, "device argmax after decode");
+        }
+        eprintln!(
+            "passed exact prefill cache and 20 greedy tokens for {} prompt tokens",
+            tokens.len()
+        );
     }
     Ok(())
 }
@@ -770,5 +801,388 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
         shadow.try_to_f32_vec()?.iter().any(|&v| v != rounded(v)),
         "active recurrent state must retain F32 precision"
     );
+    Ok(())
+}
+
+fn tiny_moe_config() -> ModelConfig {
+    let mut c = ModelConfig::qwen36_35b_a3b();
+    c.hidden_size = 32;
+    c.intermediate_size = 16;
+    c.shared_expert_intermediate_size = Some(16);
+    c.num_experts = 256;
+    c.experts_per_token = 8;
+    c.num_layers = 4;
+    c.num_attention_heads = 2;
+    c.num_key_value_heads = 1;
+    c.head_dim = 16;
+    c.rope_dimension_count = 8;
+    c.vocabulary_size = 33;
+    c.linear_state_size = Some(16);
+    c.linear_group_count = Some(1);
+    c.linear_time_step_rank = Some(2);
+    c.linear_inner_size = Some(32);
+    c
+}
+
+const MOE_ROUTING_REFERENCE: &str = r#"
+(def program test.moe.route : {(cap.own mem)} -> {(cap.own mem) (cap.own mem) (cap.own mem)} =
+ ([router.] ([.router] qwen3.router-select-experts [router-after ids.])
+  ({[.router-after] [.ids]} qwen3.routing-weights [probabilities.])
+  {[.router-after] [.ids] [.probabilities]}))
+"#;
+const MOE_WRAPPERS: &str = r#"
+(def program test.moe.router : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
+ ([input router shared scratch.] ({[.input] [.router] [.shared] [.scratch]} qwen35.moe.router [result.]) {[.input] [.result]}))
+(def program test.moe.select : {((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([scratch.] ({[.scratch]} qwen35.moe.select [result.]) [.result]))
+(def program test.moe.ffn : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
+ ([input residual scratch router gate up down shared-router shared-gate shared-up shared-down.]
+  ({[.input] [.residual] [.scratch] [.router] [.gate] [.up] [.down] [.shared-router] [.shared-gate] [.shared-up] [.shared-down]} qwen35.moe.ffn [result.])
+  ([.result] *.elim [workspace output.]) {[.workspace] [.output]}))
+"#;
+
+#[test]
+fn experimental_qwen35_moe_fused_ffn_on_gpu() -> Result<()> {
+    if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
+        return Ok(());
+    }
+    for (experts, k) in [(256, 8), (4, 3)] {
+        let mut c = tiny_moe_config();
+        c.num_experts = experts;
+        c.experts_per_token = k;
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+        let model = source(&c, options)?;
+        let module = compile(
+            crate::catena::runtime_sources_for_options(&model, options)
+                .into_iter()
+                .chain([MOE_WRAPPERS]),
+            GpuDialect::Hip,
+        )?;
+        let mut rt = Runtime::new(GpuDialect::Hip)?;
+        let artifact = rt.load(module)?;
+        let default_options = InferenceOptions::new(InferencePrecision::Bf16);
+        let default_source =
+            crate::catena::generated_model_source_for_options(&c, default_options)?;
+        let (default_rt, default_artifact) = crate::catena::load_runtime(
+            crate::catena::runtime_sources_for_options(&default_source, default_options)
+                .into_iter()
+                .chain([MOE_ROUTING_REFERENCE]),
+            GpuDialect::Hip,
+        )?;
+        let shadow = c.num_layers
+            * c.linear_time_step_rank.unwrap()
+            * c.linear_state_size.unwrap()
+            * c.linear_value_head_size().unwrap()
+            * 4;
+        let layout = qwen35::moe_workspace(&c, shadow)?;
+        let router_offset = (shadow + 7) & !7;
+        let ids_offset = (router_offset + (experts + 1) * 4 + 7) & !7;
+        let probs_offset = ids_offset + k * 8;
+        let scratch = || rt.mem_f32(&vec![0.125; layout.bytes / 4]);
+        // Ties, signed zero, negative values, and the highest expert ID.
+        let mut logits = vec![0.0f32; layout.bytes / 4];
+        for i in 0..experts {
+            logits[router_offset / 4 + i] = if i % 2 == 0 { 0.0 } else { -0.0 };
+        }
+        logits[router_offset / 4 + experts - 1] = 2.0;
+        let selected = last(memories(
+            &artifact,
+            "test.moe.select",
+            vec![rt.mem_f32(&logits)?.into()],
+        )?);
+        let ids = selected.try_to_u64_vec()?;
+        let actual = &ids[ids_offset / 8..ids_offset / 8 + k];
+        let mut expected = vec![(experts - 1) as u64];
+        expected.extend((0..k - 1).map(|i| i as u64));
+        assert_eq!(actual, expected);
+        let probabilities = selected.try_to_f32_vec()?;
+        let target = std::iter::once(2.0f32.exp())
+            .chain(std::iter::repeat_n(1.0, k - 1))
+            .collect::<Vec<_>>();
+        let denominator: f32 = target.iter().sum();
+        close(
+            &probabilities[probs_offset / 4..probs_offset / 4 + k],
+            &target.iter().map(|p| p / denominator).collect::<Vec<_>>(),
+            0.0001,
+        );
+        // Uneven selected probabilities expose left-to-right versus tree-sum
+        // differences that can cross a downstream BF16 rounding boundary.
+        let mut adversarial = vec![-20.0f32; experts];
+        for (i, value) in [0.0, -0.013, -0.19, -0.72, -1.41, -2.3, -4.7, -8.2]
+            .into_iter()
+            .take(k)
+            .enumerate()
+        {
+            adversarial[experts - 1 - i] = value;
+        }
+        let mut scratch_logits = vec![0.0; layout.bytes / 4];
+        scratch_logits[router_offset / 4..router_offset / 4 + experts]
+            .copy_from_slice(&adversarial);
+        let selected = last(memories(
+            &artifact,
+            "test.moe.select",
+            vec![rt.mem_f32(&scratch_logits)?.into()],
+        )?);
+        let mut reference = memories(
+            &default_artifact,
+            "test.moe.route",
+            vec![default_rt.mem_f32(&adversarial)?.into()],
+        )?;
+        let expected_probabilities = reference.pop().unwrap().try_to_f32_vec()?;
+        let expected_ids = reference.pop().unwrap().try_to_u64_vec()?;
+        assert_eq!(
+            &selected.try_to_u64_vec()?[ids_offset / 8..ids_offset / 8 + k],
+            expected_ids
+        );
+        assert_eq!(
+            &selected.try_to_f32_vec()?[probs_offset / 4..probs_offset / 4 + k],
+            expected_probabilities,
+            "routing accumulation order"
+        );
+        let h = c.hidden_size;
+        let inter = c.intermediate_size;
+        let shared = c.shared_expert_intermediate_size.unwrap();
+        let input = (0..h)
+            .map(|i| rounded((i as f32 - 15.0) / 16.0))
+            .collect::<Vec<_>>();
+        let residual = (0..h)
+            .map(|i| rounded((i as f32 - 16.0) / 64.0))
+            .collect::<Vec<_>>();
+        let weights = |len: usize, seed: usize| {
+            (0..len)
+                .map(|i| rounded(((i * seed + i / 17) % 23) as f32 / 32.0 - 0.34375))
+                .collect::<Vec<_>>()
+        };
+        let router = weights(experts * h, 7);
+        let sr = weights(h, 11);
+        let gate = weights(experts * inter * h, 3);
+        let up = weights(experts * inter * h, 5);
+        let down = weights(experts * h * inter, 7);
+        let sg = weights(shared * h, 9);
+        let su = weights(shared * h, 13);
+        let sd = weights(h * shared, 17);
+        let owned = [
+            rt.mem_f32(&router)?,
+            upload(&rt, &gate)?,
+            upload(&rt, &up)?,
+            upload(&rt, &down)?,
+            rt.mem_f32(&sr)?,
+            upload(&rt, &sg)?,
+            upload(&rt, &su)?,
+            upload(&rt, &sd)?,
+        ];
+        let mut args = vec![
+            upload(&rt, &input)?.into(),
+            upload(&rt, &residual)?.into(),
+            scratch()?.into(),
+        ];
+        args.extend(owned.iter().map(|w| w.as_ref().into()));
+        let mut results = memories(&artifact, "test.moe.ffn", args)?;
+        let output = values(&results.pop().unwrap())?;
+        let work = results.pop().unwrap();
+        assert!(
+            work.try_to_f32_vec()?[..shadow / 4]
+                .iter()
+                .all(|&x| x == 0.125),
+            "FFN overwrote recurrent shadow"
+        );
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(a, b)| a * b).sum::<f32>();
+        let scores = router
+            .chunks(h)
+            .map(|row| dot(&input, row))
+            .collect::<Vec<_>>();
+        close(
+            &work.try_to_f32_vec()?[router_offset / 4..router_offset / 4 + experts],
+            &scores,
+            0.00001,
+        );
+        let mut order = (0..experts).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+        order.truncate(k);
+        assert_eq!(
+            &work.try_to_u64_vec()?[ids_offset / 8..ids_offset / 8 + k],
+            &order.iter().map(|&i| i as u64).collect::<Vec<_>>()
+        );
+        let exp = order
+            .iter()
+            .map(|&e| (scores[e] - scores[order[0]]).exp())
+            .collect::<Vec<_>>();
+        let sum: f32 = exp.iter().sum();
+        let silu = |x: f32| x / (1.0 + (-x).exp());
+        let mut active = Vec::new();
+        for (slot, &expert) in order.iter().enumerate() {
+            for j in 0..inter {
+                let base = (expert * inter + j) * h;
+                let g = rounded(dot(&input, &gate[base..base + h]));
+                let u = rounded(dot(&input, &up[base..base + h]));
+                active.push(rounded(silu(g) * u * (exp[slot] / sum)));
+            }
+        }
+        let shared_scale = 1.0 / (1.0 + (-dot(&input, &sr)).exp());
+        let shared_active = (0..shared)
+            .map(|j| {
+                let g = rounded(dot(&input, &sg[j * h..(j + 1) * h]));
+                let u = rounded(dot(&input, &su[j * h..(j + 1) * h]));
+                rounded(rounded(rounded(silu(g)) * u) * shared_scale)
+            })
+            .collect::<Vec<_>>();
+        let active_offset = (probs_offset + k * 4 + 7) & !7;
+        let mut expected_active = active.clone();
+        expected_active.extend(&shared_active);
+        close(
+            &values(&work)?[active_offset / 2..active_offset / 2 + expected_active.len()],
+            &expected_active,
+            0.005,
+        );
+        let target = (0..h)
+            .map(|j| {
+                let routed = order
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &e)| {
+                        dot(
+                            &active[slot * inter..(slot + 1) * inter],
+                            &down[(e * h + j) * inter..(e * h + j + 1) * inter],
+                        )
+                    })
+                    .sum::<f32>();
+                rounded(
+                    rounded(routed + residual[j])
+                        + rounded(dot(&shared_active, &sd[j * shared..(j + 1) * shared])),
+                )
+            })
+            .collect::<Vec<_>>();
+        close(&output, &target, 0.01);
+    }
+    Ok(())
+}
+
+#[test]
+fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
+    if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
+        return Ok(());
+    }
+    use crate::spec::WeightDtype;
+    let mut c = tiny_moe_config();
+    c.num_experts = 4;
+    c.experts_per_token = 2;
+    let specs = weight_specs(&c)?;
+    let make = |codegen| -> Result<(Runtime, Artifact, Vec<MemOwn>)> {
+        let options = InferenceOptions::new(InferencePrecision::Bf16).with_codegen(codegen);
+        let source = crate::catena::generated_model_source_for_options(&c, options)?;
+        let (rt, artifact) = crate::catena::load_runtime_with_codegen(
+            crate::catena::runtime_sources_for_options(&source, options),
+            GpuDialect::Hip,
+            codegen,
+        )?;
+        let mut weights = Vec::new();
+        for (wi, spec) in specs.iter().enumerate() {
+            let xs = (0..spec.element_count())
+                .map(|i| {
+                    if spec.name.contains("norm") {
+                        1.0
+                    } else if spec.name.contains("A_log") {
+                        -0.5
+                    } else {
+                        rounded((((i * 7 + wi * 11) % 31) as f32 - 15.0) / 128.0)
+                    }
+                })
+                .collect::<Vec<_>>();
+            weights.push(match spec.dtype {
+                WeightDtype::F32 => rt.mem_f32(&xs)?,
+                WeightDtype::Bf16 => upload(&rt, &xs)?,
+            });
+        }
+        Ok((rt, artifact, weights))
+    };
+    let (reference_rt, reference, rw) = make(CodegenKind::Default)?;
+    let (rt, experimental, ew) = make(CodegenKind::Experimental)?;
+    let capacity = 16usize;
+    let workspace_len = workspace_bytes(
+        &c,
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental),
+    )? / 4;
+    let invoke = |runtime: &Runtime,
+                  artifact: &Artifact,
+                  weights: &[MemOwn],
+                  tokens: &[u64],
+                  position: usize,
+                  cache: MemOwn,
+                  scratch: Option<MemOwn>|
+     -> Result<(MemOwn, Option<MemOwn>, Vec<f32>)> {
+        let token_mem = runtime.mem_u64(tokens)?;
+        let mut args = vec![token_mem.as_ref().into(), cache.into()];
+        if let Some(scratch) = scratch {
+            args.push(scratch.into());
+        }
+        args.extend([(capacity as u64).into(), (position as u64).into()]);
+        args.extend(weights.iter().map(|w| w.as_ref().into()));
+        let mut outputs = memories(artifact, "qwen3", args)?;
+        let workspace = if outputs.len() == 4 {
+            Some(outputs.remove(1))
+        } else {
+            None
+        };
+        let cache = outputs.remove(0);
+        let logits = values(&outputs.remove(0))?;
+        Ok((cache, workspace, logits))
+    };
+    for prompt in [vec![1u64, 2], vec![1, 2, 3, 4, 5, 6, 7]] {
+        let cache = || rt.mem_u16(&vec![0; c.cache_elements(capacity).unwrap()]);
+        let (mut ec, mut scratch, mut actual) = invoke(
+            &rt,
+            &experimental,
+            &ew,
+            &prompt,
+            0,
+            cache()?,
+            Some(rt.mem_f32(&vec![0.0; workspace_len])?),
+        )?;
+        let (mut rc, _, mut expected) = invoke(
+            &reference_rt,
+            &reference,
+            &rw,
+            &prompt,
+            0,
+            reference_rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?,
+            None,
+        )?;
+        let snapshot = ec.try_to_u16_vec()?;
+        assert_eq!(snapshot, rc.try_to_u16_vec()?, "hybrid cache after prefill");
+        // A new session must reproduce prefill after another session has run.
+        let (independent, _, repeated) = invoke(
+            &rt,
+            &experimental,
+            &ew,
+            &prompt,
+            0,
+            cache()?,
+            Some(rt.mem_f32(&vec![0.0; workspace_len])?),
+        )?;
+        assert_eq!(independent.try_to_u16_vec()?, snapshot);
+        assert_eq!(repeated, actual);
+        for position in prompt.len()..capacity {
+            close(&actual, &expected, 0.01);
+            let argmax = |xs: &[f32]| {
+                xs.iter()
+                    .enumerate()
+                    .max_by(|(ia, a), (ib, b)| a.total_cmp(b).then_with(|| ib.cmp(ia)))
+                    .unwrap()
+                    .0 as u64
+            };
+            let token = argmax(&expected);
+            assert_eq!(argmax(&actual), token);
+            (ec, scratch, actual) =
+                invoke(&rt, &experimental, &ew, &[token], position, ec, scratch)?;
+            (rc, _, expected) =
+                invoke(&reference_rt, &reference, &rw, &[token], position, rc, None)?;
+            assert_eq!(
+                ec.try_to_u16_vec()?,
+                rc.try_to_u16_vec()?,
+                "hybrid cache after decode {position}"
+            );
+        }
+    }
     Ok(())
 }

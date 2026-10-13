@@ -295,10 +295,10 @@ See [usage and validation](docs/mms-tts.md).
 cargo run --release --bin mms-tts -- 'Hello, world.' --output speech.wav
 ```
 
-### Experimental compiler: dense Qwen3 and Qwen3.5
+### Experimental compiler: Qwen3 dense and Qwen3.5/3.6 dense or MoE
 
 `--codegen default` preserves the existing compiler and acceleration defaults.
-The experimental port supports BF16 **dense Qwen3 and Qwen3.5** text generation on
+The experimental port supports BF16 **Qwen3 dense and Qwen3.5/3.6 dense or MoE** text generation on
 HIP gfx11, including multi-token prefill and persistent KV-cache decode:
 
 ```bash
@@ -309,7 +309,7 @@ cargo run -r -- --codegen experimental \
 The CLI selects the experimental stdlib and the new Hex programs embedded from
 `src/catena/experimental`. It automatically disables the default compiler's
 WMMA and fused-attention options. Explicitly enabling those options or `--blas`
-returns an error. F32, CUDA, MoE, and image inputs are not supported.
+returns an error. F32, CUDA, older Qwen3 MoE, and image inputs are not supported.
 Other model binaries continue using the default compiler.
 Library users select the port with
 `InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental)`.
@@ -365,3 +365,26 @@ CATENA_QWEN35_EXPERIMENTAL_GGUF=/path/to/Qwen3.5-0.8B-BF16.gguf \
   cargo test --release --lib experimental_qwen35_checkpoint_parity_on_gpu \
   -- --nocapture
 ```
+
+Qwen3.5/3.6 MoE reuses the hybrid attention and DeltaNet path, with four fused
+FFN launches for F32 routers, stable top-k routing, routed/shared gate/up
+activation, and routed/shared down projection. Routing and activation scratch
+is reused across layers in each session. The default routing sum order and
+BF16 rounding boundaries are preserved. Expert weights remain mapped in their
+native GGUF layout; only selected experts are read. The MoE entrypoint also
+uses the existing parallel vocabulary argmax.
+
+```bash
+cargo run -r -- --codegen experimental \
+  --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
+
+CATENA_QWEN36_EXPERIMENTAL_GGUF=/path/to/BF16/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf \
+  cargo test --release --lib experimental_qwen35_moe_checkpoint_parity_on_gpu \
+  -- --nocapture
+CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS=1 cargo test --release --lib \
+  experimental_qwen35_moe -- --nocapture --test-threads=1
+```
+
+The MoE checkpoint comparison loads one compiler path at a time to avoid
+pinning two copies of this 64.61 GiB model. Both GGUF shards must be present.
+See [kernel details and measurements](docs/experimental-qwen.md).

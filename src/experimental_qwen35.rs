@@ -1,4 +1,4 @@
-//! Dense Qwen3.5 hybrid graph for the experimental compiler.
+//! Dense and MoE Qwen3.5/3.6 hybrid graphs for the experimental compiler.
 use super::*;
 use crate::spec::LayerType;
 const TRIPLE: &str = "({((cap.own mem) val) ({((cap.own mem) val) ((cap.own mem) val)} *)} *)";
@@ -41,6 +41,206 @@ fn selector(s: &mut String, layers: &[usize], group: &str, tree: &str, kind: &st
     s.push_str(&selector);
 }
 
+/// Byte offsets; all regions start on an eight-byte boundary. The shadow
+/// remains at offset zero so dense DeltaNet import/persist kernels are unchanged.
+pub(super) struct MoeWorkspace {
+    pub bytes: usize,
+    router: usize,
+    ids: usize,
+    probs: usize,
+    active: usize,
+}
+pub(super) fn moe_workspace(c: &ModelConfig, shadow_bytes: usize) -> Result<MoeWorkspace> {
+    let add = |a: usize, b: usize| {
+        a.checked_add(b)
+            .ok_or_else(|| anyhow::anyhow!("experimental MoE workspace overflow"))
+    };
+    let mul = |a: usize, b: usize| {
+        a.checked_mul(b)
+            .ok_or_else(|| anyhow::anyhow!("experimental MoE workspace overflow"))
+    };
+    let align = |a: usize| add(a, 7).map(|v| v & !7);
+    let router = align(shadow_bytes)?;
+    let ids = align(add(router, mul(add(c.num_experts, 1)?, 4)?)?)?;
+    let probs = add(ids, mul(c.experts_per_token, 8)?)?;
+    let active = align(add(probs, mul(c.experts_per_token, 4)?)?)?;
+    let width = add(
+        mul(c.experts_per_token, c.intermediate_size)?,
+        c.shared_expert_intermediate_size.unwrap(),
+    )?;
+    Ok(MoeWorkspace {
+        bytes: align(add(active, mul(width, 2)?)?)?,
+        router,
+        ids,
+        probs,
+        active,
+    })
+}
+
+fn emit_moe(s: &mut String, c0: &ModelConfig, shadow_bytes: usize) -> Result<()> {
+    let layout = moe_workspace(c0, shadow_bytes)?;
+    let active = c0.experts_per_token * c0.intermediate_size;
+    let shared = c0.shared_expert_intermediate_size.unwrap();
+    let mut hex = include_str!("catena/experimental/qwen35_moe.hex").to_owned();
+    for (key, value) in [
+        ("EXPERT_COUNT", c0.num_experts),
+        ("TOP_K", c0.experts_per_token),
+        ("HIDDEN_SIZE", c0.hidden_size),
+        ("HIDDEN_PAIRS", c0.hidden_size / 2),
+        ("HIDDEN_STAGES", c0.hidden_size.trailing_zeros() as usize),
+        ("INTERMEDIATE_SIZE", c0.intermediate_size),
+        ("INTERMEDIATE_PAIRS", c0.intermediate_size / 2),
+        ("ACTIVE_SIZE", active),
+        ("ACTIVE_WIDTH_PAIRS", active / 2),
+        ("TOTAL_ACTIVE_SIZE", active + shared),
+        ("SHARED_PAIRS", shared / 2),
+        ("ROUTER_ROWS", c0.num_experts + 1),
+        ("ROUTER_F32", layout.router / 4),
+        ("SHARED_ROUTER_F32", layout.router / 4 + c0.num_experts),
+        ("IDS_U64", layout.ids / 8),
+        ("PROBS_F32", layout.probs / 4),
+        ("ACTIVE_BF16", layout.active / 2),
+        ("ACTIVE_PAIRS", layout.active / 4),
+        ("SHARED_ACTIVE_PAIRS", layout.active / 4 + active / 2),
+    ] {
+        hex = hex.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+    }
+    ensure!(!hex.contains("{{"), "unresolved MoE kernel constant");
+    s.push_str(&hex);
+    let weights = [
+        "router",
+        "gate",
+        "up",
+        "down",
+        "shared-router",
+        "shared-gate",
+        "shared-up",
+        "shared-down",
+    ];
+    let mut args = vec![("input", OWN), ("residual", OWN), ("scratch", OWN)];
+    args.extend(weights.iter().map(|w| (*w, REF)));
+    header(s, "qwen35.moe.ffn", &args, &format!("({{{OWN} {OWN}}} *)"));
+    call(
+        s,
+        &["input", "router", "shared-router", "scratch"],
+        "qwen35.moe.router",
+        "routed",
+    );
+    call(s, &["routed"], "qwen35.moe.select", "selected");
+    call(
+        s,
+        &[
+            "input",
+            "gate",
+            "up",
+            "shared-gate",
+            "shared-up",
+            "selected",
+        ],
+        "qwen35.moe.gate",
+        "activated",
+    );
+    call(
+        s,
+        &["activated", "down", "shared-down", "residual"],
+        "qwen35.moe.down",
+        "output",
+    );
+    free(s, "input", "output", "output-after-input");
+    free(s, "residual", "output-after-input", "result");
+    s.push_str("  ([.result] meta.master.complete-own [completed phase.])\n  ({[.activated] [.phase]} meta.master.after-own [scratch-ready.])\n  ({[.scratch-ready] [.completed]} *.intro)");
+    finish(s);
+    Ok(())
+}
+
+fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
+    let start = s.find(&format!("(def program {name} :")).unwrap();
+    let end = start + s[start..].find("\n ))").unwrap() + 5;
+    let old = &s[start..end];
+    let body_start = old.find("\n  (").unwrap() + 1;
+    let gate = old.find("} qwen3.fused.gate [").unwrap();
+    let ffn = old[..gate].rfind("\n").unwrap() + 1;
+    let mut new = String::new();
+    let full_ws = [
+        "input-norm",
+        "q-weight",
+        "k-weight",
+        "v-weight",
+        "o-weight",
+        "q-norm",
+        "k-norm",
+        "post-norm",
+    ];
+    let linear_ws = [
+        "input-norm",
+        "qkv-weight",
+        "z-weight",
+        "alpha-weight",
+        "beta-weight",
+        "dt",
+        "a",
+        "linear-norm",
+        "out-weight",
+        "conv-weight",
+        "post-norm",
+    ];
+    let moe_ws = [
+        "router",
+        "gate",
+        "up",
+        "down",
+        "shared-router",
+        "shared-gate",
+        "shared-up",
+        "shared-down",
+    ];
+    let mut args = vec![
+        ("hidden", OWN),
+        ("cache", OWN),
+        ("rope", OWN),
+        ("capacity", U64),
+        ("position", U64),
+        ("layer", U64),
+        ("shadow", OWN),
+    ];
+    args.extend(
+        if linear {
+            linear_ws.as_slice()
+        } else {
+            full_ws.as_slice()
+        }
+        .iter()
+        .map(|w| (*w, REF)),
+    );
+    args.extend(moe_ws.iter().map(|w| (*w, REF)));
+    header(&mut new, name, &args, TRIPLE);
+    new.push_str(&old[body_start..ffn]);
+    let residual = if linear {
+        "attention-ready"
+    } else {
+        "attention-result"
+    };
+    let mut ffn_args = vec!["ffn-input", residual, "shadow"];
+    ffn_args.extend(moe_ws);
+    call(&mut new, &ffn_args, "qwen35.moe.ffn", "ffn-result");
+    new.push_str("  ([.ffn-result] *.elim [shadow-result hidden-result.])\n  ([.hidden-result] meta.master.complete-own [completed phase.])\n");
+    call(
+        &mut new,
+        &[if linear { "cache" } else { "cache-ready" }, "phase"],
+        "meta.master.after-own",
+        "cache-result",
+    );
+    pack(
+        &mut new,
+        &names(&["cache-result", "shadow-result", "completed"]),
+        "result",
+    );
+    new.push_str("  [.result]");
+    finish(&mut new);
+    s.replace_range(start..end, &new);
+    Ok(())
+}
+
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     let full = (0..config.num_layers)
         .filter(|&l| config.layer_type(l) == LayerType::FullAttention)
@@ -58,6 +258,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     );
     let mut base = config.clone();
     base.architecture = ModelArchitecture::Qwen3Dense;
+    base.num_experts = 0;
+    base.experts_per_token = 0;
+    base.shared_expert_intermediate_size = None;
     let mut s = super::fused::source(&base, options)?;
     let cut = s
         .find("(def program stdlib.qwen3.select-layer.yes")
@@ -255,8 +458,20 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     let scores = s[scores_start..scores_end].replace(&old_bound, &new_bound);
     s.replace_range(scores_start..scores_end, &scores);
     emit_linear_decoder(&mut s, config, recurrent, conv);
-    let full_group = nested_product(&vec![REF.to_owned(); 11]);
-    let linear_group = nested_product(&vec![REF.to_owned(); 14]);
+    let moe = config.architecture == ModelArchitecture::Qwen35Moe;
+    if moe {
+        let shadow_bytes = recurrent
+            .checked_mul(config.num_layers)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))?;
+        emit_moe(&mut s, config, shadow_bytes)?;
+        replace_moe_decoder(&mut s, "qwen3.decoder-layer", false)?;
+        replace_moe_decoder(&mut s, "qwen35.linear-decoder", true)?;
+    }
+    let full_count = if moe { 16 } else { 11 };
+    let linear_count = if moe { 19 } else { 14 };
+    let full_group = nested_product(&vec![REF.to_owned(); full_count]);
+    let linear_group = nested_product(&vec![REF.to_owned(); linear_count]);
     let full_tree = nested_product(&vec![full_group.clone(); full.len()]);
     let linear_tree = nested_product(&vec![linear_group.clone(); linear.len()]);
     selector(&mut s, &full, &full_group, &full_tree, "full");
@@ -290,12 +505,16 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         );
         s.push_str("  ([.pair] *.elim [state proofs.])\n  ([.proofs] *.elim [proof unit.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.unit] unit.elim)\n");
         unpack(&mut s, "state", &names(&["cache", "shadow", "hidden"]));
-        let ws = (0..if kind == "full" { 11 } else { 14 })
+        let ws = (0..if kind == "full" {
+            full_count
+        } else {
+            linear_count
+        })
             .map(|i| format!("w{i}"))
             .collect::<Vec<_>>();
         unpack(&mut s, "weights", &ws);
         let mut args = vec!["hidden", "cache", "rope", "capacity", "position", "layer"];
-        if kind == "linear" {
+        if kind == "linear" || moe {
             args.push("shadow");
         }
         args.extend(ws.iter().map(String::as_str));
@@ -309,7 +528,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             },
             "decoded",
         );
-        if kind == "full" {
+        if kind == "full" && !moe {
             s.push_str("  ([.decoded] *.elim [next-cache next-hidden.])\n  ([.next-hidden] meta.master.complete-own [ready-hidden phase.])\n  ({[.shadow] [.phase]} meta.master.after-own [ready-shadow.])\n");
             pack(
                 &mut s,
@@ -725,7 +944,15 @@ fn emit_entry(
     );
     let mut cursor = 1;
     for layer in 0..config.num_layers {
-        let count = if full.contains(&layer) { 11 } else { 14 };
+        let count = match (
+            config.architecture == ModelArchitecture::Qwen35Moe,
+            full.contains(&layer),
+        ) {
+            (true, true) => 16,
+            (true, false) => 19,
+            (false, true) => 11,
+            (false, false) => 14,
+        };
         pack(s, &ws[cursor..cursor + count], &format!("group{layer}"));
         cursor += count;
     }
@@ -808,7 +1035,16 @@ fn emit_entry(
         "logits",
     );
     free(s, "normalized-final", "logits", "logits-final");
-    call(s, &["logits-final"], "qwen3.argmax", "token");
+    call(
+        s,
+        &["logits-final"],
+        if config.architecture == ModelArchitecture::Qwen35Moe {
+            "qwen3.fused.argmax"
+        } else {
+            "qwen3.argmax"
+        },
+        "token",
+    );
     s.push_str("  {[.cache-result] [.shadow-final] [.logits-final] [.token]}");
     finish(s);
     Ok(())
@@ -817,6 +1053,43 @@ fn emit_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn qwen35_moe_compiles() -> Result<()> {
+        let mut c = ModelConfig::qwen36_35b_a3b();
+        c.hidden_size = 32;
+        c.intermediate_size = 16;
+        c.shared_expert_intermediate_size = Some(16);
+        c.num_experts = 4;
+        c.experts_per_token = 2;
+        c.num_layers = 4;
+        c.num_attention_heads = 2;
+        c.num_key_value_heads = 1;
+        c.head_dim = 16;
+        c.rope_dimension_count = 8;
+        c.vocabulary_size = 33;
+        c.linear_state_size = Some(16);
+        c.linear_group_count = Some(1);
+        c.linear_time_step_rank = Some(2);
+        c.linear_inner_size = Some(32);
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+        let source = source(&c, options)?;
+        let module = compile(
+            crate::catena::runtime_sources_for_options(&source, options),
+            GpuDialect::Hip,
+        )?;
+        assert_eq!(
+            module
+                .functions
+                .iter()
+                .find(|f| f.source_name == "qwen3")
+                .unwrap()
+                .outputs
+                .len(),
+            4
+        );
+        Ok(())
+    }
     #[test]
     fn qwen35_dense_compiles() -> Result<()> {
         let mut c = ModelConfig::qwen35_0_8b();

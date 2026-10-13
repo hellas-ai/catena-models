@@ -1,4 +1,4 @@
-//! BF16 dense Qwen3 programs for Catena's experimental compiler.
+//! BF16 Qwen3-family text programs for Catena's experimental compiler.
 use crate::{
     catena::{ExperimentalKernelKind, InferenceOptions, InferencePrecision, MatrixCoreMode},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
@@ -40,9 +40,11 @@ pub(crate) fn validate(
     ensure!(
         matches!(
             config.architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
+                | ModelArchitecture::Qwen35Moe
         ),
-        "experimental codegen supports dense Qwen3 and Qwen3.5 text models only"
+        "experimental codegen supports dense Qwen3 and dense/MoE Qwen3.5 text models only"
     );
     ensure!(
         options.precision == InferencePrecision::Bf16,
@@ -66,7 +68,10 @@ pub(crate) fn validate(
         .all(|n| n.is_multiple_of(2)),
         "experimental packed BF16 projections require even hidden, intermediate and head dimensions"
     );
-    if config.architecture == ModelArchitecture::Qwen35Dense {
+    if matches!(
+        config.architecture,
+        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
+    ) {
         config.validate()?;
         ensure!(
             config.hidden_size.is_power_of_two() && config.head_dim.is_power_of_two(),
@@ -92,6 +97,26 @@ pub(crate) fn validate(
             "experimental Qwen3.5 requires a whole number of value heads per key head"
         );
     }
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        ensure!(
+            config.num_experts <= 256 && config.experts_per_token <= 8,
+            "experimental MoE supports at most 256 experts and eight active experts"
+        );
+        let shared = config
+            .shared_expert_intermediate_size
+            .ok_or_else(|| anyhow::anyhow!("experimental Qwen3.5 MoE requires a shared expert"))?;
+        ensure!(
+            shared > 0 && shared.is_multiple_of(2),
+            "experimental shared expert width must be positive and even"
+        );
+        ensure!(
+            config
+                .experts_per_token
+                .checked_mul(config.intermediate_size)
+                .is_some_and(|width| shared <= width),
+            "experimental shared expert width exceeds routed activation width"
+        );
+    }
     ensure!(
         config.rope_dimension_count.is_multiple_of(2),
         "experimental Qwen3 rotary dimension must be even"
@@ -109,13 +134,18 @@ pub(crate) fn workspace_bytes(config: &ModelConfig, options: InferenceOptions) -
     if config.architecture == ModelArchitecture::Qwen3Dense {
         return Ok(4096);
     }
-    config
+    let recurrent = config
         .num_layers
         .checked_mul(config.linear_time_step_rank.unwrap())
         .and_then(|n| n.checked_mul(config.linear_state_size.unwrap()))
         .and_then(|n| n.checked_mul(config.linear_value_head_size().unwrap()))
         .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))
+        .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))?;
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        Ok(qwen35::moe_workspace(config, recurrent)?.bytes)
+    } else {
+        Ok(recurrent)
+    }
 }
 
 fn c(n: usize) -> String {
@@ -250,7 +280,10 @@ fn emit_layer_selector(s: &mut String, layers: usize, group: &str, weights: &str
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     config.validate()?;
     validate(config, options, None)?;
-    if config.architecture == ModelArchitecture::Qwen35Dense {
+    if matches!(
+        config.architecture,
+        ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
+    ) {
         ensure!(
             options.experimental_kernels == ExperimentalKernelKind::Fused,
             "experimental Qwen3.5 requires --kernels fused"
@@ -664,6 +697,40 @@ mod tests {
                 "inverse RMS buffer must remain live until normalization completes"
             );
         }
+        Ok(())
+    }
+    #[test]
+    fn qwen35_moe_validates_routing_and_workspace() -> Result<()> {
+        let options =
+            InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+        let config = ModelConfig::qwen36_35b_a3b();
+        validate(&config, options, Some(GpuDialect::Hip))?;
+        let bytes = workspace_bytes(&config, options)?;
+        assert_eq!(bytes, 83_896_424);
+        for (experts, selected, shared) in [
+            (257, 8, Some(512)),
+            (256, 9, Some(512)),
+            (256, 8, None),
+            (256, 8, Some(513)),
+            (256, 8, Some(8192)),
+        ] {
+            let mut bad = config.clone();
+            bad.num_experts = experts;
+            bad.experts_per_token = selected;
+            bad.shared_expert_intermediate_size = shared;
+            assert!(validate(&bad, options, None).is_err());
+        }
+        assert!(
+            validate(
+                &config,
+                options.with_experimental_kernels(ExperimentalKernelKind::Reference),
+                None
+            )
+            .is_err()
+        );
+        let mut huge = config;
+        huge.num_layers = usize::MAX;
+        assert!(workspace_bytes(&huge, options).is_err());
         Ok(())
     }
     #[test]

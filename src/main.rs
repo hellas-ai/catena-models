@@ -37,7 +37,7 @@ impl From<CodegenArg> for CodegenKind {
 #[derive(Debug, Parser)]
 #[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
 struct Args {
-    /// Compiler backend (experimental supports BF16 dense Qwen3/Qwen3.5 on HIP gfx11).
+    /// Compiler backend (experimental supports BF16 dense Qwen3 and dense/MoE Qwen3.5 on HIP gfx11).
     #[arg(long, value_enum, default_value_t = CodegenArg::Default)]
     codegen: CodegenArg,
 
