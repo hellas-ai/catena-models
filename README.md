@@ -1,390 +1,115 @@
-# Qwen3-30B-A3B-Base reference runners
+# Catena Qwen inference
 
-Local BF16 inference for the base (non-instruct) `Qwen3-30B-A3B-Base`
-checkpoint through Transformers, llama.cpp, and an exploratory Catena GPU
-implementation. The Catena path executes all 48 layers, uses a persistent KV
-cache, and performs greedy generation directly from a GPU-registered BF16
-GGUF mapping.
+Native Catena GPU inference for Qwen3 dense, Qwen3 MoE, and Qwen3.5/3.6 dense
+and MoE text models, with a Qwen3.5 image path. Model dimensions and tensor
+layouts come from GGUF metadata. BF16/F32 weights retain their native storage.
 
-The Rust/Catena runner also accepts metadata-compatible dense Qwen3 GGUFs,
-including the tied-embedding 0.6B and 1.7B layouts, dense hybrid Qwen3.5 GGUFs
-such as `unsloth/Qwen3.5-0.8B-GGUF:BF16`, and hybrid MoE checkpoints such as
-`unsloth/Qwen3.6-35B-A3B-GGUF:BF16`. Qwen3.5/3.6 selects full-attention or
-Gated DeltaNet per layer from GGUF metadata and uses partial RoPE, gated
-attention, depthwise causal convolution, and recurrent DeltaNet state. MoE
-layers combine normalized top-k routed experts with their sigmoid-gated shared
-expert. The conversion and measured performance notes below remain specific
-to Qwen3-30B-A3B.
-
-Reduction and softmax launch limits are owned by the selected Catena compiler
-and target GPU. The runner does not duplicate those limits or reject model
-shapes before compilation.
-
-The scripts assume the Nix development environment; invoke them with
-`nix develop --command` as shown below.
-
-## Setup
-
-The local compiler supports a shared [GPU artifact cache](docs/gpu-artifact-cache.md)
-for Qwen, Flux, Whisper and MMS TTS. Warm runs reuse compiled libraries while still
-lowering Hex to C++.
-
-The Catena compiler dependency is pinned to the private
-`hellas-ai/exploratory-catena` repository. Configure an SSH key with access to
-that GitHub repository before fetching or building dependencies:
+All model selection uses Hugging Face names on the command line. `hf_hub`
+resolves repositories, caches files, and downloads every selected GGUF shard.
+`HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain their normal meanings. Cache
+paths and snapshot revisions are managed by the Hub client. The removed
+`--model-dir`, `--gguf`, and `--tokenizer` options have no replacement local-path
+mode. Qwen tokenizers come from the selected GGUF metadata.
 
 ```bash
-nix develop --command cargo fetch
+cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 ```
 
-Cargo fetches the compiler automatically; the local `smollm2-catena-fork`
-symlink used during development is not required.
-
-Download the original BF16 Hugging Face checkpoint (about 61 GB):
+The `:variant` suffix selects an unambiguous checkpoint, including split BF16
+checkpoints. Companion vision projectors are resolved from the same repository,
+or from an explicit HF name using `--mmproj-model`:
 
 ```bash
-mkdir -p models/Qwen3-30B-A3B-Base
-nix develop --command hf download Qwen/Qwen3-30B-A3B-Base \
-  --local-dir models/Qwen3-30B-A3B-Base
-```
-
-Convert it to an unquantized BF16 GGUF used by both llama.cpp and Catena
-(about another 61 GB):
-
-```bash
-nix develop --command ./setup-llama-cpp.sh
-```
-
-## How to run
-
-### Transformers
-
-```bash
-nix develop --command ./run-transformers.py "The capital of France is" -n 20
-```
-
-Transformers uses BF16 on the CPU by default. A ROCm-enabled PyTorch build can
-instead use `--device cuda` (PyTorch calls the ROCm device `cuda`).
-
-### llama.cpp
-
-```bash
-nix develop --command env QWEN3_TOKENS=20 \
-  ./run-llama-cpp.sh "The capital of France is"
-```
-
-The llama.cpp runner offloads every layer to ROCm. This machine is configured
-with a 104 GiB AMDGPU GTT aperture so the 61 GB model and compute buffers fit in
-unified GPU memory. Set `QWEN3_GPU_LAYERS` to override the layer count. Both
-runners use raw text completion because this is a base model, not an
-instruction-tuned model.
-
-## Numbers comparison
-
-BF16, greedy decoding, eight tokens from `"The capital of France is"` on the
-Ryzen AI Max+ Pro 395 / Radeon 8060S:
-
-| Implementation | Device | Load time | Prompt evaluation | Cached token evaluation |
-| --- | --- | ---: | ---: | ---: |
-| llama.cpp 9190 | Radeon 8060S, all layers | 4.59 s | 31.83 tok/s | 20.32 tok/s |
-| Transformers 5.5.4 | CPU | 74.15 s | 10.03 tok/s | 4.21 tok/s |
-
-Both produced the same continuation:
-
-```text
-The capital of France is Paris. Which of the following options correctly
-```
-
-Transformers reported generated token IDs
-`[12095, 13, 15920, 315, 279, 2701, 2606, 12440]`. Its first, colder model
-load took 125.41 seconds; the table records the repeated run used for the split
-prompt/cached timings. The llama.cpp run used full ROCm offload with
-`amdgpu.gttsize=98304`; Transformers used the flake's CPU-only PyTorch 2.11.0.
-
-### Catena
-
-```bash
-nix develop --command cargo run --release -- \
-  --prompt "The capital of France is" --max-new-tokens 20
-```
-
-HIP is the default backend. Select CUDA for compilation, runtime allocation,
-and GGUF registration with `CATENA_GPU_DIALECT=cuda`, for example:
-
-```bash
-CATENA_GPU_DIALECT=cuda cargo run --release -- \
-  --bf16 --blas --bench --pp 512 --tg 128
-```
-
-Catena validates and privately maps `model-bf16.gguf`, registers that single
-mapping with the selected GPU runtime, and passes every tensor subrange
-directly to the generated kernels in its native GGUF representation. The 338
-large tensors remain BF16;
-the 241 norms/router tensors emitted by llama.cpp's converter remain F32. The
-loader validates this dtype contract and performs no weight repacking,
-conversion, upload, or per-tensor allocation. Measured warm loads reached
-weight readiness in 2.72--2.84 seconds.
-
-Use a GGUF outside the model directory with `--gguf /path/to/model.gguf`.
-For split checkpoints, `--gguf` can also name a shard directory or any one
-standard `-00001-of-00002.gguf` shard. By default the tokenizer is reconstructed
-from the GGUF's `tokenizer.ggml.*` metadata. Use
-`--tokenizer /path/to/tokenizer.json` as an explicit override; when the GGUF has
-no embedded tokenizer, `<model-dir>/tokenizer.json` remains the fallback.
-
-Alternatively, let the runner list and cache a checkpoint from Hugging Face:
-
-```bash
-nix develop --command cargo run --release -- \
-  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --prompt "The capital of France is"
-```
-
-Qwen3 dense and Qwen3.5/3.6 dense or MoE models have an opt-in native-BF16
-execution graph. It keeps activations, attention probabilities, logits, and
-persistent caches in BF16. Dense and routed expert projections use packed BF16
-dot instructions with F32 register accumulation on gfx11. Router selection and
-probability normalization, RMSNorm, softmax, RoPE, and the internal Gated
-DeltaNet recurrence retain F32 calculations; DeltaNet inputs and recurrent
-state are stored as BF16 between calls. The original F32-activation graph
-remains the default so the two paths can be compared directly. Both graphs
-update the persistent KV cache in place and use a tiled, coalesced cached-value
-kernel for the exact attention context sum; global attention still scans the
-existing history for each decoded token:
-
-```bash
-nix develop --command cargo run --release -- \
-  --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
-  --prompt "The capital of France is"
-
-nix develop --command cargo run --release -- \
-  --bf16 --model unsloth/Qwen3-0.6B-GGUF:BF16 \
-  --bench --pp 512 --tg 128 --bench-runs 5
-
-nix develop --command cargo run --release -- \
-  --bf16 --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
-  --bench --pp 512 --tg 128 --bench-runs 5
-
-nix develop --command cargo run --release -- \
-  --bf16 --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
-  --bench --pp 512 --tg 128 --bench-runs 5
-```
-
-For prefill experiments, add `--matrix-cores` or `--blas` alongside
-`--bf16`. Both modes accelerate ordinary dense projections for Qwen3 dense,
-Qwen3.5 dense, and Qwen3.5/3.6 MoE. In MoE models they also accelerate the
-large shared-expert gate/up pair; dynamically routed experts and the narrow
-F32 routers retain their native SIMT paths. Projections below 64 input rows
-fall back to packed-BF16 SIMT, leaving token-at-a-time decode unchanged. The
-BLAS mode uses hipBLAS on HIP and cuBLAS on CUDA. `--matrix-cores` and
-`--blas` are mutually exclusive.
-
-The BF16 graph currently rejects the older Qwen3 MoE architecture, which
-continues to use the existing F32-activation graph.
-
-The optional suffix after `:` selects a quantization or variant by directory
-or filename. It is required when a repository contains more than one GGUF
-checkpoint and selection would otherwise be ambiguous. Every member of a
-standard sharded checkpoint is downloaded; `--model` and `--gguf` are mutually
-exclusive. Normal Hugging Face environment variables such as `HF_TOKEN`,
-`HF_HOME`, and `HF_HUB_CACHE` are honored.
-
-Run llama.cpp-style prompt-processing and token-generation measurements with:
-
-```bash
-nix develop --command cargo run --release -- \
-  --gguf /path/to/model.gguf --bench --pp 512 --tg 128
-```
-
-`--pp` and `--tg` default to 512 and 128; set either one to zero to skip that
-row. `--bench-runs N` reports the mean throughput across `N` measured runs
-(default 1). Benchmark mode ignores `--prompt` and uses deterministic
-token IDs directly, so it does not load or require a tokenizer.
-
-RoPE is also part of the Catena program rather than a model-specific Rust
-input. Each invocation materializes only its current absolute-position range,
-using exact F32 inverse-frequency constants and deterministic range-reduced
-sine/cosine polynomials, then reuses that owned table across all 48 layers.
-The generated table differs from the previous host `sinf`/`cosf` values by at
-most `4.92e-7` across the complete 32,768-position context.
-
-Normal inference compiles the dimension-free helpers in
-`src/catena/qwen3_helpers.hex` together with model-specific Hex rendered from
-`src/catena/qwen3_model.hex` and, for Qwen3.5, the hybrid layer definitions in
-`src/catena/qwen35_model.hex`. Rust fills its embedding, normalization,
-projection, RoPE, cache, attention, DeltaNet, and dense/MoE feed-forward
-dimensions from GGUF metadata and appends a linear-use entrypoint with the
-metadata-derived layer types and tensor counts. Qwen3.5 prompt processing is
-currently deliberately sequential, one token per graph invocation, so the
-first implementation favors a directly testable recurrent transition over a
-parallel scan. To inspect the exact generated model source for the selected
-GGUF, write it under
-`target/catena/generated-qwen3.hex` with:
-
-```bash
-nix develop --command cargo run --release -- --generate-entrypoint
-```
-
-For a fixed-length performance run that continues through EOS:
-
-```bash
-nix develop --command cargo run --release -- \
-  --prompt "The capital of France is" --max-new-tokens 1000 --ignore-eos
-```
-
-The current exploratory compiler fork produces the known continuation. The
-registered-GGUF path reached 10.92 tok/s over 99 cached tokens, versus the
-previous safetensors loader's 10.95 tok/s sample, and a 999-cached-token GGUF
-validation run reached 9.83 tok/s. Three earlier
-999-cached-token safetensors runs reached
-9.90, 9.81, and 9.88 tok/s, a 9.88 tok/s median. That is 51.9% of the recorded
-matched llama.cpp 19.03 tok/s baseline. A later llama.cpp sample reached 20.74
-tok/s. The retained techniques are summarized in
-[`PERFORMANCE_SUMMARY.md`](PERFORMANCE_SUMMARY.md); detailed measurements,
-rejected experiments, and the EOS protocol caveat are documented in
-[`EXPERIMENT_LOG.md`](EXPERIMENT_LOG.md).
-
-## Qwen3.5 image inputs
-
-The experimental native Catena image path accepts multiple PNG/JPEG images
-with a matching BF16/F32 vision/projector GGUF:
-
-```bash
-cargo run --release -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
-  --mmproj /path/to/mmproj-BF16.gguf \
+cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
 
-See [setup, precision limits and validation](docs/qwen35-images.md). Image runs
-use a single Qwen3.5 user message; text-only runs retain raw completion.
+[Image handling and precision](docs/qwen35-images.md).
 
-## FLUX.2-klein text to image
+## Compiler and kernel selection
 
-The separate `flux2-klein` app loads the cached FLUX.2-klein-4B safetensors
-checkpoint and writes one PNG. Missing model files are downloaded through the
-shared Rust `hf-hub` loader. See
-[setup, component review order and validation](docs/flux2-klein.md).
-Use `--backend legacy` to run the separate implementation with existing compiler
-primitives; see [comparison and benchmarks](docs/flux2-klein-legacy.md).
+The default compiler enables BF16 matrix cores and fused attention. Use
+`--matrix-cores=false` to select SIMT projections. Fused cached attention has a
+SIMT implementation and continues working without WMMA. The older Qwen3 MoE
+architecture uses the F32 activation graph (`--bf16=false`, with matrix cores
+and fused attention disabled).
 
 ```bash
-cargo run --offline --bin flux2-klein -- --prompt 'A fox in a snowy forest' --output fox.png
-```
-
-## Whisper ASR
-
-The separate `whisper-asr` binary transcribes 16 kHz WAV clips up to 30 seconds
-with `openai/whisper-small`, using the current local compiler without new
-primitives. Model execution is composed in Hex, with persistent decoder caches.
-The Rust `hf-hub` API downloads missing files to the standard Hugging Face cache
-and reuses cached files on subsequent runs. Model resolution uses the Hub default
-branch without a pinned revision. See
-[setup, compiler alternatives and validation](docs/whisper-asr.md).
-
-```bash
-cargo run --release --bin whisper-asr -- recording.wav
-```
-
-## MMS English text to speech
-
-The `mms-tts` app synthesizes a mono 16 kHz WAV with `facebook/mms-tts-eng`.
-It shares unpinned Hub file resolution and safetensors loading with Whisper and
-Flux, and composes inference and seeded sampling in one Catena/Hex entrypoint.
-See [usage and validation](docs/mms-tts.md).
-
-```bash
-cargo run --release --bin mms-tts -- 'Hello, world.' --output speech.wav
-```
-
-### Experimental compiler: Qwen3 dense and Qwen3.5/3.6 dense or MoE
-
-`--codegen default` preserves the existing compiler and acceleration defaults.
-The experimental port supports BF16 **Qwen3 dense and Qwen3.5/3.6 dense or MoE** text generation on
-HIP gfx11, including multi-token prefill and persistent KV-cache decode:
-
-```bash
-cargo run -r -- --codegen experimental \
-  --model unsloth/Qwen3-0.6B-GGUF:BF16 --prompt 'Gravity is'
-```
-
-The CLI selects the experimental stdlib and the new Hex programs embedded from
-`src/catena/experimental`. It automatically disables the default compiler's
-WMMA and fused-attention options. Explicitly enabling those options or `--blas`
-returns an error. F32, CUDA, older Qwen3 MoE, and image inputs are not supported.
-Other model binaries continue using the default compiler.
-Library users select the port with
-`InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental)`.
-Experimental inference defaults to `--kernels fused`: cooperative projections,
-fused projection/residual and dual projection/SwiGLU kernels, single-launch RMS
-normalization, and a two-stage vocabulary argmax. `--kernels reference` retains
-the original Qwen3 implementation for comparisons. Qwen3.5 requires fused kernels.
-All new kernels are Hex programs using existing experimental primitives; the
-catena-lang dependency is unchanged. See [implementation and benchmark details](docs/experimental-qwen.md).
-
-Entrypoint export and benchmark mode also honor `--codegen`. Set
-`CATENA_QWEN3_EXPERIMENTAL_CPP=/path/to/module.cpp` to inspect emitted C++
-during compilation.
-
-Model dimensions come from GGUF metadata. The Rust checkpoint loader, native
-BF16/F32 weight mapping, tokenizer, Session API, and cache layout are shared by
-both compilers. The experimental programs use explicit allocations, guarded
-256-thread launches, native packed BF16 dots with F32 accumulation, and host
-folds over tokens and decoder layers. Prefill processes tokens sequentially;
-prefill throughput remains below the default compiler.
-Norm weights remain F32, and normalization, residual, RoPE, SwiGLU, and attention
-preserve the model's BF16 rounding boundaries. The memory/numeric adapters were
-adapted from the adjacent SmolLM2 experimental port; that repo is not needed to
-build or run this program.
-
-Compilation/ABI and CLI checks run in the normal library/binary test suite.
-Device checks are opt-in:
-
-```bash
-CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS=1 cargo test --release --lib \
-  experimental_kernels_match_independent_references_on_gpu -- --nocapture
-CATENA_QWEN3_EXPERIMENTAL_GGUF=/path/to/Qwen3-0.6B-BF16.gguf \
-  cargo test --release --lib experimental_checkpoint_parity_and_cache_sessions_on_gpu \
-  -- --nocapture
-```
-
-The first checks projections, F32 norm weights, per-head normalization, RoPE,
-grouped-query attention, padded launches, cache offsets, and argmax ties against
-independent scalar references. The second compares logits and greedy tokens
-with the default BF16 implementation, checks cached versus full-prefix
-inference, and verifies Session boundaries and independent sessions.
-
-Qwen3.5 uses typed full-attention and linear-layer weight groups. The linear path
-implements causal convolution, Q/K L2 normalization, gated DeltaNet, and gated
-RMS normalization. Recurrent state stays F32 throughout each prefill call and
-rounds to BF16 when the call ends, matching the default cache convention.
-
-```bash
-cargo run -r -- --codegen experimental \
-  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --prompt 'Gravity is'
-
-CATENA_QWEN35_EXPERIMENTAL_GGUF=/path/to/Qwen3.5-0.8B-BF16.gguf \
-  cargo test --release --lib experimental_qwen35_checkpoint_parity_on_gpu \
-  -- --nocapture
-```
-
-Qwen3.5/3.6 MoE reuses the hybrid attention and DeltaNet path, with four fused
-FFN launches for F32 routers, stable top-k routing, routed/shared gate/up
-activation, and routed/shared down projection. Routing and activation scratch
-is reused across layers in each session. The default routing sum order and
-BF16 rounding boundaries are preserved. Expert weights remain mapped in their
-native GGUF layout; only selected experts are read. The MoE entrypoint also
-uses the existing parallel vocabulary argmax.
-
-```bash
+cargo run -r -- --codegen default --matrix-cores=false \
+  --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --codegen experimental \
   --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
-
-CATENA_QWEN36_EXPERIMENTAL_GGUF=/path/to/BF16/Qwen3.6-35B-A3B-BF16-00001-of-00002.gguf \
-  cargo test --release --lib experimental_qwen35_moe_checkpoint_parity_on_gpu \
-  -- --nocapture
-CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS=1 cargo test --release --lib \
-  experimental_qwen35_moe -- --nocapture --test-threads=1
 ```
 
-The MoE checkpoint comparison loads one compiler path at a time to avoid
-pinning two copies of this 64.61 GiB model. Both GGUF shards must be present.
-See [kernel details and measurements](docs/experimental-qwen.md).
+The experimental compiler supports BF16 Qwen3 dense and Qwen3.5/3.6 dense or
+MoE text inference on HIP gfx11. It uses Hex kernels under
+`src/catena/experimental`, with no new compiler primitives. Its CLI automatically
+disables legacy matrix-core, BLAS, and attention switches. `--kernels fused`
+is the default; `--kernels reference` is available for Qwen3 dense only.
+Images and older Qwen3 MoE use the default compiler.
+
+Experimental Qwen3.5 MoE combines routed/shared expert gate/up activations and
+down projections, keeps routing scratch per session, and uses parallel argmax.
+Its full-attention layers use SIMT online cached attention during decode,
+including context output gating, without score/probability allocations.
+Multi-token prefill retains the validated staged BF16 attention path.
+Cooperative per-head L2 and gated RMS normalization preserve the existing
+scalar sum order. DeltaNet
+prediction, recurrent update, and output execute in one kernel without a delta
+allocation. Prefill keeps recurrent state F32 until the call boundary, then
+persists BF16 cache state. Prefill currently processes tokens sequentially.
+
+[Kernel details, validation, and measurements](docs/experimental-qwen.md).
+
+## Benchmarks and validation
+
+```bash
+cargo run -r -- --codegen experimental \
+  --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  --bench --pp 0 --tg 128 --tg-context 32 --bench-runs 5
+cargo run -r -- --matrix-cores=false --fused-attention=true \
+  --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  --bench --pp 0 --tg 128 --tg-context 32 --bench-runs 5
+cargo test -r --lib --bins
+CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS=1 cargo test -r --lib \
+  experimental_qwen35 -- --nocapture --test-threads=1
+CATENA_QWEN36_EXPERIMENTAL_MODEL=unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
+  cargo test -r --lib experimental_qwen35_moe_checkpoint_parity_on_gpu -- --nocapture
+```
+
+Repeat warmed decode with `--tg-context 256`. Measurements exclude model
+loading, compilation, prefill, and two warmup decode calls. Each checkpoint
+comparison loads compiler paths sequentially to avoid pinning two copies of a
+large checkpoint. Optional real-checkpoint tests accept HF selectors through
+`CATENA_QWEN3_EXPERIMENTAL_MODEL`, `CATENA_QWEN35_EXPERIMENTAL_MODEL`, and
+`CATENA_QWEN36_EXPERIMENTAL_MODEL`.
+
+`--generate-entrypoint` exports the selected model's Hex under `target/catena`.
+`CATENA_QWEN3_EXPERIMENTAL_CPP` optionally exports experimental generated C++.
+Library callers can use `Model::load_hf_with_options(model_name, options)`;
+Session APIs and internal cache layouts are shared by both compilers.
+
+## Other model applications
+
+Their model selection also uses HF names, with compatible architecture/config
+validation before execution:
+
+```bash
+cargo run -r --bin whisper-asr -- --model openai/whisper-small speech.wav
+cargo run -r --bin mms-tts -- --model facebook/mms-tts-eng 'Hello, world.'
+cargo run -r --bin flux2-klein -- --model black-forest-labs/FLUX.2-klein-4B \
+  --prompt 'A red fox sitting in a snowy forest' --output image.png
+```
+
+[Whisper](docs/whisper-asr.md), [MMS TTS](docs/mms-tts.md),
+[Flux2 Klein](docs/flux2-klein.md).
+
+The Transformers comparison runner takes `--model owner/repo`.
+`setup-llama-cpp.sh owner/repo output.gguf` resolves its source on the Hub before
+converting it. `evict-gguf-cache.sh owner/repo:variant` operates on resolved Hub
+cache files rather than a fixed model directory.
+
+`run-llama-cpp.sh owner/repository:variant 'Gravity is'` delegates HF model
+resolution to llama.cpp. `profile-qwen3.sh owner/repository:variant` resolves
+its checkpoint through the same Hub loader as the Qwen runner.

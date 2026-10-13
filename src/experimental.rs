@@ -99,6 +99,12 @@ pub(crate) fn validate(
     }
     if config.architecture == ModelArchitecture::Qwen35Moe {
         ensure!(
+            config.head_dim <= 256
+                && config.linear_state_size.unwrap() <= 256
+                && config.linear_value_head_size().unwrap() <= 256,
+            "experimental MoE attention and normalization support head widths up to 256"
+        );
+        ensure!(
             config.num_experts <= 256 && config.experts_per_token <= 8,
             "experimental MoE supports at most 256 experts and eight active experts"
         );
@@ -718,6 +724,14 @@ mod tests {
             bad.num_experts = experts;
             bad.experts_per_token = selected;
             bad.shared_expert_intermediate_size = shared;
+            assert!(validate(&bad, options, None).is_err());
+        }
+        for head in [512, 1024] {
+            let mut bad = config.clone();
+            bad.head_dim = head;
+            assert!(validate(&bad, options, None).is_err());
+            let mut bad = config.clone();
+            bad.linear_state_size = Some(head);
             assert!(validate(&bad, options, None).is_err());
         }
         assert!(

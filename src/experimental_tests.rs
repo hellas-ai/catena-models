@@ -357,9 +357,10 @@ fn experimental_fused_checkpoint_parity_and_cache_sessions_on_gpu() -> Result<()
 }
 
 fn check_checkpoint_on_gpu(kind: ExperimentalKernelKind) -> Result<()> {
-    let Some(path) = std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GGUF") else {
+    let Some(selector) = std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_MODEL") else {
         return Ok(());
     };
+    let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
     use crate::{model::Model, tokenizer::QwenTokenizer};
     let tokenizer = QwenTokenizer::from_gguf(&path)?
         .ok_or_else(|| anyhow::anyhow!("missing GGUF tokenizer"))?;
@@ -417,16 +418,17 @@ fn check_checkpoint_on_gpu(kind: ExperimentalKernelKind) -> Result<()> {
 
 #[test]
 fn experimental_qwen35_checkpoint_parity_on_gpu() -> Result<()> {
-    qwen35_checkpoint_parity("CATENA_QWEN35_EXPERIMENTAL_GGUF")
+    qwen35_checkpoint_parity("CATENA_QWEN35_EXPERIMENTAL_MODEL")
 }
 #[test]
 fn experimental_qwen35_moe_checkpoint_parity_on_gpu() -> Result<()> {
-    qwen35_checkpoint_parity("CATENA_QWEN36_EXPERIMENTAL_GGUF")
+    qwen35_checkpoint_parity("CATENA_QWEN36_EXPERIMENTAL_MODEL")
 }
 fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
-    let Some(path) = std::env::var_os(variable) else {
+    let Some(selector) = std::env::var_os(variable) else {
         return Ok(());
     };
+    let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
     use crate::{model::Model, tokenizer::QwenTokenizer};
     let tokenizer = QwenTokenizer::from_gguf(&path)?
         .ok_or_else(|| anyhow::anyhow!("missing GGUF tokenizer"))?;
@@ -439,7 +441,7 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
     };
     // Register one checkpoint at a time: two simultaneous 65-GiB HIP host
     // registrations exceed the physical-memory pinning limit on this machine.
-    let mut golden = Vec::new();
+    let mut prefills = Vec::new();
     {
         let reference = Model::load_gguf_with_precision(&path, InferencePrecision::Bf16)?;
         for prompt in [
@@ -448,8 +450,24 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
         ] {
             let tokens = tokenizer.encode(&prompt)?;
             let mut session = reference.session(tokens.len() + 20)?;
-            let mut logits = session.prefill_logits(&tokens)?;
-            let cache = session.cache_values_for_test()?;
+            let logits = session.prefill_logits(&tokens)?;
+            prefills.push((tokens, session.cache_values_for_test()?, logits));
+        }
+    }
+    let mut golden = Vec::new();
+    {
+        // Both compilers decode from the same validated staged-prefill cache.
+        // The default fused SIMT vector kernel is the appropriate reference
+        // for online decode; its tiled multi-token prefill has a different
+        // accumulation order and is not part of this decode-only optimization.
+        let reference = Model::load_gguf_with_options(
+            &path,
+            InferenceOptions::new(InferencePrecision::Bf16)
+                .with_fused_attention(variable == "CATENA_QWEN36_EXPERIMENTAL_MODEL"),
+        )?;
+        for (tokens, cache, mut logits) in prefills {
+            let mut session =
+                reference.session_from_cache_for_test(tokens.len() + 20, tokens.len(), &cache)?;
             let mut steps = Vec::new();
             for _ in 0..20 {
                 let token = argmax(&logits);
@@ -469,15 +487,7 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
         let mut logits = actual.prefill_logits(&tokens)?;
         let actual_cache = actual.cache_values_for_test()?;
         assert_eq!(expected_cache.len(), actual_cache.len());
-        assert_eq!(
-            expected_cache
-                .iter()
-                .zip(&actual_cache)
-                .position(|(e, a)| e != a),
-            None,
-            "Qwen3.5 cache after {}-token prefill",
-            tokens.len()
-        );
+        assert_eq!(expected_cache, actual_cache, "prefill cache");
         let greedy = steps.iter().map(|(_, token)| *token).collect::<Vec<_>>();
         for (step, (expected, token)) in steps.into_iter().enumerate() {
             let error = logits
@@ -509,7 +519,7 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
             assert_eq!(token, expected, "device argmax after decode");
         }
         eprintln!(
-            "passed exact prefill cache and 20 greedy tokens for {} prompt tokens",
+            "passed prefill cache comparison and 20 greedy tokens for {} prompt tokens",
             tokens.len()
         );
     }
@@ -551,10 +561,16 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
 (def program test.qwen35-normalize : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (f32 val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
  ([input weight columns cf rows stages.] ({[.input] [.weight] [.columns] [.cf] [.rows] [.stages]} qwen35.normalize [output.]) {[.input] [.output]}))
 "#;
+    let fused_wrapper = wrapper
+        .split("(def program test.qwen35-conv")
+        .next()
+        .unwrap()
+        .replace("test.delta", "test.fused-delta")
+        .replace("qwen35.delta [", "qwen35.fused-delta [");
     let module = compile(
         crate::catena::runtime_sources_for_options(&source, options)
             .into_iter()
-            .chain([wrapper]),
+            .chain([wrapper, fused_wrapper.as_str()]),
         GpuDialect::Hip,
     )?;
     let mut rt = Runtime::new(GpuDialect::Hip)?;
@@ -778,6 +794,22 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
             }
             expected[col] = rounded(output / 4.0);
         }
+        let mut fused = memories(
+            &artifact,
+            "test.fused-delta",
+            vec![
+                upload(&rt, &conv)?.into(),
+                upload(&rt, &q)?.into(),
+                upload(&rt, &k)?.into(),
+                upload(&rt, &alpha)?.into(),
+                upload(&rt, &beta)?.into(),
+                d.as_ref().into(),
+                a.as_ref().into(),
+                rt.mem_f32(&shadow.try_to_f32_vec()?)?.into(),
+            ],
+        )?;
+        let fused_output = values(&fused.pop().unwrap())?;
+        let fused_state = fused.pop().unwrap().try_to_f32_vec()?;
         let mut out = memories(
             &artifact,
             "test.delta",
@@ -794,6 +826,12 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
         )?;
         let result = out.pop().unwrap();
         shadow = out.pop().unwrap();
+        assert_eq!(values(&result)?, fused_output, "fused DeltaNet output");
+        assert_eq!(
+            shadow.try_to_f32_vec()?,
+            fused_state,
+            "fused DeltaNet F32 state"
+        );
         close(&values(&result)?, &expected, 0.01);
         close(&shadow.try_to_f32_vec()?, &state, 0.002);
     }
@@ -1069,7 +1107,9 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
     c.experts_per_token = 2;
     let specs = weight_specs(&c)?;
     let make = |codegen| -> Result<(Runtime, Artifact, Vec<MemOwn>)> {
-        let options = InferenceOptions::new(InferencePrecision::Bf16).with_codegen(codegen);
+        let options = InferenceOptions::new(InferencePrecision::Bf16)
+            .with_codegen(codegen)
+            .with_fused_attention(false);
         let source = crate::catena::generated_model_source_for_options(&c, options)?;
         let (rt, artifact) = crate::catena::load_runtime_with_codegen(
             crate::catena::runtime_sources_for_options(&source, options),
@@ -1184,5 +1224,107 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             );
         }
     }
+    Ok(())
+}
+
+#[test]
+fn experimental_qwen35_online_and_cooperative_norm_on_gpu() -> Result<()> {
+    if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
+        return Ok(());
+    }
+    let mut c = tiny_moe_config();
+    c.architecture = ModelArchitecture::Qwen35Dense;
+    c.num_experts = 0;
+    c.experts_per_token = 0;
+    c.shared_expert_intermediate_size = None;
+    let options =
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+    let source = source(&c, options)?;
+    let wrappers = r#"
+(def program test.online : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([q cache qg keys.]
+  ({[.keys] (const.u64.0x0000000000000010)} stdlib.qwen3.memory.u64.mul [vb.])
+  ({[.q] [.cache] [.qg] [.keys] (const.u64.0x0000000000000000) [.vb]} qwen35.online [output.])
+  {[.q] [.cache] [.qg] [.output]}))
+(def program test.coop-l2 : {((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input.] ({[.input] (const.u64.0x0000000000000000) (const.u64.0x0000000000000010)} qwen35.l2 [legacy.])
+  ({[.input] (const.u64.0x0000000000000000) (const.u64.0x0000000000000010)} qwen35.coop-l2 [cooperative.]) {[.input] [.legacy] [.cooperative]}))
+(def program test.coop-gated : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input z w.] ({[.input] [.z] [.w]} qwen35.gated-norm [legacy.]) ({[.input] [.z] [.w]} qwen35.coop-gated [cooperative.]) {[.input] [.z] [.legacy] [.cooperative]}))
+"#;
+    let module = compile(
+        crate::catena::runtime_sources_for_options(&source, options)
+            .into_iter()
+            .chain([wrappers]),
+        GpuDialect::Hip,
+    )?;
+    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let a = rt.load(module)?;
+    let q = (0..32)
+        .map(|i| rounded(((i * 7 % 19) as f32 - 9.0) / 16.0))
+        .collect::<Vec<_>>();
+    let qg = (0..64)
+        .map(|i| rounded(((i * 11 % 29) as f32 - 14.0) / 8.0))
+        .collect::<Vec<_>>();
+    for keys in [1usize, 3, 8, 9, 33, 257, 4097] {
+        let cache = (0..keys * 32)
+            .map(|i| rounded(((i * 13 % 31) as f32 - 15.0) / 16.0))
+            .collect::<Vec<_>>();
+        let output = last(memories(
+            &a,
+            "test.online",
+            vec![
+                upload(&rt, &q)?.into(),
+                upload(&rt, &cache)?.into(),
+                upload(&rt, &qg)?.into(),
+                (keys as u64).into(),
+            ],
+        )?);
+        let expected = (0..32)
+            .map(|ix| {
+                let head = ix / 16;
+                let ch = ix % 16;
+                let scores = (0..keys)
+                    .map(|k| {
+                        (0..16)
+                            .map(|j| q[head * 16 + j] * cache[k * 16 + j])
+                            .sum::<f32>()
+                            / 4.0
+                    })
+                    .collect::<Vec<_>>();
+                let maximum = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let weights = scores
+                    .iter()
+                    .map(|s| (s - maximum).exp())
+                    .collect::<Vec<_>>();
+                let den = weights.iter().sum::<f32>();
+                let value = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| p * cache[keys * 16 + k * 16 + ch])
+                    .sum::<f32>()
+                    / den;
+                let gate = qg[head * 32 + 16 + ch];
+                rounded(rounded(value) / (1.0 + (-gate).exp()))
+            })
+            .collect::<Vec<_>>();
+        eprintln!("online attention history {keys}");
+        close(&values(&output)?, &expected, 0.008);
+    }
+    let mut out = memories(&a, "test.coop-l2", vec![upload(&rt, &q)?.into()])?;
+    let coop = values(&out.pop().unwrap())?;
+    assert_eq!(coop, values(&out.pop().unwrap())?);
+    let w = rt.mem_f32(&vec![0.75; 16])?;
+    let mut out = memories(
+        &a,
+        "test.coop-gated",
+        vec![
+            upload(&rt, &q)?.into(),
+            upload(&rt, &q)?.into(),
+            w.as_ref().into(),
+        ],
+    )?;
+    let coop = values(&out.pop().unwrap())?;
+    assert_eq!(coop, values(&out.pop().unwrap())?);
     Ok(())
 }

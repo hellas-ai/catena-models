@@ -1,7 +1,6 @@
 //! Model-owned files, resolved by the common Hub loader.
 use anyhow::Result;
-use std::path::{Path, PathBuf};
-pub const MODEL_ID: &str = "openai/whisper-small";
+use std::path::PathBuf;
 const FILES: &[&str] = &[
     "config.json",
     "generation_config.json",
@@ -9,6 +8,6 @@ const FILES: &[&str] = &[
     "tokenizer.json",
     "model.safetensors",
 ];
-pub fn snapshot(explicit: Option<&Path>) -> Result<PathBuf> {
-    crate::hfhub::resolve_model_files(MODEL_ID, FILES, explicit)
+pub fn snapshot(model: &str) -> Result<PathBuf> {
+    crate::hfhub::resolve_model_files(model, FILES)
 }

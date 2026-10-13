@@ -95,7 +95,7 @@ fn is_mmproj_gguf(path: &str) -> bool {
 fn select_mmproj(paths: &[String]) -> Result<String> {
     ensure!(
         !paths.is_empty(),
-        "repository has no mmproj GGUF; provide --mmproj PATH"
+        "repository has no mmproj GGUF; provide --mmproj-model owner/repository"
     );
     let bf16: Vec<_> = paths
         .iter()
@@ -114,7 +114,7 @@ fn select_mmproj(paths: &[String]) -> Result<String> {
     };
     ensure!(
         candidates.len() == 1,
-        "projector selection is ambiguous: {}; provide --mmproj PATH",
+        "projector selection is ambiguous: {}; provide --mmproj-model owner/repository",
         candidates
             .iter()
             .map(|s| s.as_str())
@@ -124,12 +124,29 @@ fn select_mmproj(paths: &[String]) -> Result<String> {
     Ok(candidates[0].clone())
 }
 
+fn validate_model_name(model: &str) -> Result<()> {
+    let parts = model.split('/').collect::<Vec<_>>();
+    ensure!(
+        parts.len() == 2
+            && parts.iter().all(|part| {
+                !part.is_empty()
+                    && *part != "."
+                    && *part != ".."
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+            }),
+        "model must be an HF name owner/repository, not a filesystem path"
+    );
+    Ok(())
+}
+
 fn parse_model_selector(value: &str) -> Result<(&str, Option<&str>)> {
     let (repo, variant) = match value.rsplit_once(':') {
         Some((repo, variant)) => (repo, Some(variant)),
         None => (value, None),
     };
-    ensure!(!repo.is_empty(), "Hugging Face model name is empty");
+    validate_model_name(repo)?;
     if let Some(variant) = variant {
         ensure!(!variant.is_empty(), "Hugging Face GGUF variant is empty");
     }
@@ -269,6 +286,16 @@ mod tests {
             ("unsloth/Qwen3.5-0.8B-GGUF", Some("BF16"))
         );
         assert_eq!(parse_model_selector("owner/model")?, ("owner/model", None));
+        for path in [
+            "/tmp/model.gguf",
+            "../model",
+            "./model",
+            "~/model",
+            "model.gguf",
+            "owner/repo/nested",
+        ] {
+            assert!(parse_model_selector(path).is_err(), "accepted {path}");
+        }
         Ok(())
     }
 
@@ -345,25 +372,27 @@ fn relative_path(name: &str) -> Result<&std::path::Path> {
     Ok(path)
 }
 
-/// Resolve model-owned filenames on the Hub's default branch, or in an explicit
-/// local directory. Hub caching, authentication and offline fallback remain
-/// owned by hf-hub. Index files automatically bring their referenced shards.
-pub fn resolve_model_files(
-    model: &str,
-    filenames: &[&str],
-    model_dir: Option<&std::path::Path>,
-) -> Result<PathBuf> {
-    if let Some(dir) = model_dir {
-        return resolve_files(filenames, |name| {
-            let path = dir.join(name);
-            ensure!(path.is_file(), "missing model file {}", path.display());
-            Ok(path)
-        });
-    }
+/// Resolve model-owned filenames using an HF name. Cache paths and revisions
+/// are owned by hf-hub; safetensors indices bring their referenced shards.
+pub fn resolve_model_files(model: &str, filenames: &[&str]) -> Result<PathBuf> {
     let client = HFClientSync::new().context("initializing Hugging Face Hub client")?;
     resolve_hub_files(&client, model, filenames)
 }
+#[cfg(test)]
+fn resolve_local_files(
+    _model: &str,
+    filenames: &[&str],
+    directory: Option<&std::path::Path>,
+) -> Result<PathBuf> {
+    let directory = directory.ok_or_else(|| anyhow::anyhow!("missing test directory"))?;
+    resolve_files(filenames, |name| {
+        let path = directory.join(name);
+        ensure!(path.is_file(), "missing fixture {}", path.display());
+        Ok(path)
+    })
+}
 fn resolve_hub_files(client: &HFClientSync, model: &str, filenames: &[&str]) -> Result<PathBuf> {
+    validate_model_name(model)?;
     let (owner, name) = split_id(model);
     ensure!(
         !owner.is_empty() && !name.is_empty(),
@@ -460,7 +489,7 @@ mod model_files_tests {
         fs::write(t.0.join("encoder/one.safetensors"), b"one")?;
         fs::write(t.0.join("encoder/two.safetensors"), b"two")?;
         assert_eq!(
-            resolve_model_files(
+            resolve_local_files(
                 "unused/model",
                 &["encoder/model.safetensors.index.json"],
                 Some(&t.0)
@@ -469,15 +498,15 @@ mod model_files_tests {
         );
         fs::remove_file(t.0.join("encoder/two.safetensors"))?;
         assert!(
-            resolve_model_files(
+            resolve_local_files(
                 "unused/model",
                 &["encoder/model.safetensors.index.json"],
                 Some(&t.0)
             )
             .is_err()
         );
-        assert!(resolve_model_files("unused/model", &["../secret"], Some(&t.0)).is_err());
-        assert!(resolve_model_files("unused/model", &[], Some(&t.0)).is_err());
+        assert!(resolve_local_files("unused/model", &["../secret"], Some(&t.0)).is_err());
+        assert!(resolve_local_files("unused/model", &[], Some(&t.0)).is_err());
         Ok(())
     }
     #[test]
@@ -573,7 +602,7 @@ mod model_files_tests {
         ] {
             fs::write(t.0.join("model.safetensors.index.json"), text)?;
             assert!(
-                resolve_model_files("owner/model", &["model.safetensors.index.json"], Some(&t.0))
+                resolve_local_files("owner/model", &["model.safetensors.index.json"], Some(&t.0))
                     .is_err()
             );
         }

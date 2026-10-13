@@ -1,8 +1,7 @@
 use crate::spec::{ModelArchitecture, ModelConfig};
 use anyhow::{Result, ensure};
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
-pub const MODEL_ID: &str = "black-forest-labs/FLUX.2-klein-4B";
+use std::path::PathBuf;
 const FILES: &[&str] = &[
     "model_index.json",
     "scheduler/scheduler_config.json",
@@ -14,8 +13,8 @@ const FILES: &[&str] = &[
     "vae/config.json",
     "vae/diffusion_pytorch_model.safetensors",
 ];
-pub fn snapshot(explicit: Option<&Path>) -> Result<PathBuf> {
-    crate::hfhub::resolve_model_files(MODEL_ID, FILES, explicit)
+pub fn snapshot(model: &str) -> Result<PathBuf> {
+    crate::hfhub::resolve_model_files(model, FILES)
 }
 pub use crate::hfhub::read_json as read;
 #[derive(Deserialize, Debug)]

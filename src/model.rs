@@ -31,8 +31,13 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::load_gguf(model_dir.as_ref().join("model-bf16.gguf"))
+    pub fn load(model: &str) -> Result<Self> {
+        Self::load_hf_with_options(model, InferenceOptions::new(InferencePrecision::Bf16))
+    }
+
+    /// Resolve an HF name through hf-hub, including every GGUF shard.
+    pub fn load_hf_with_options(model: &str, options: InferenceOptions) -> Result<Self> {
+        Self::load_gguf_with_options(crate::hfhub::download_gguf(model)?.primary, options)
     }
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
@@ -223,6 +228,25 @@ impl Model {
             capacity,
             next_rope_position: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_from_cache_for_test(
+        &self,
+        capacity: usize,
+        position: usize,
+        cache: &[u16],
+    ) -> Result<Session<'_>> {
+        ensure!(
+            self.precision == InferencePrecision::Bf16
+                && cache.len() == self.config.cache_elements(capacity)?
+                && position <= capacity,
+            "invalid test cache"
+        );
+        let mut session = self.session(capacity)?;
+        session.cache = Some(self.runtime.mem_u16(cache)?);
+        session.position = position;
+        Ok(session)
     }
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {

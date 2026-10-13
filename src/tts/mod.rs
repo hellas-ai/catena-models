@@ -17,7 +17,6 @@ use std::{
     time::Instant,
 };
 
-pub const MODEL_ID: &str = "facebook/mms-tts-eng";
 const FILES: &[&str] = &[
     "config.json",
     "vocab.json",
@@ -28,8 +27,8 @@ const FILES: &[&str] = &[
 pub const SAMPLE_RATE: u32 = 16000;
 pub const MAX_TOKENS: usize = 512;
 pub const MAX_SAMPLES: usize = 480000;
-pub fn snapshot(explicit: Option<&Path>) -> Result<PathBuf> {
-    hfhub::resolve_model_files(MODEL_ID, FILES, explicit)
+pub fn snapshot(model: &str) -> Result<PathBuf> {
+    hfhub::resolve_model_files(model, FILES)
 }
 #[derive(Debug)]
 pub struct Config(serde_json::Value);

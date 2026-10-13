@@ -73,29 +73,17 @@ struct Args {
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
     bench_runs: usize,
 
-    /// Fallback directory for tokenizer.json and model-bf16.gguf.
-    #[arg(long, default_value = "unsloth/Qwen3-30B-A3B-Base")]
-    model_dir: PathBuf,
-
-    /// Tokenizer JSON override (defaults to GGUF metadata, then <model-dir>/tokenizer.json).
-    #[arg(long, value_name = "PATH")]
-    tokenizer: Option<PathBuf>,
-
-    /// GGUF file, shard, or shard directory (defaults to <model-dir>/model-bf16.gguf).
-    #[arg(long, conflicts_with = "model")]
-    gguf: Option<PathBuf>,
-
-    /// Hugging Face model as owner/repo[:variant], e.g. unsloth/Qwen3.5-0.8B-GGUF:BF16.
-    #[arg(long, value_name = "MODEL", conflicts_with = "gguf")]
-    model: Option<String>,
+    /// Hugging Face model as owner/repo[:variant].
+    #[arg(long, value_name = "MODEL", required = true)]
+    model: String,
 
     /// Still images, in order, preceding the text in one Qwen3.5 user message.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["bench", "generate_entrypoint"])]
     image: Vec<PathBuf>,
 
-    /// BF16/F32 companion vision/projector GGUF (required with local --gguf images).
-    #[arg(long, value_name = "PATH", requires = "image")]
-    mmproj: Option<PathBuf>,
+    /// Optional HF repository for the companion projector (defaults to --model).
+    #[arg(long, value_name = "MODEL", requires = "image")]
+    mmproj_model: Option<String>,
 
     /// Override the projector's maximum resized image pixel area.
     #[arg(long, value_parser = parse_positive_usize, requires = "image")]
@@ -188,23 +176,12 @@ fn main() -> Result<()> {
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches)?;
     let options = inference_options(&args, &matches)?;
-    ensure!(
-        args.image.is_empty() || args.mmproj.is_some() || args.model.is_some(),
-        "local image runs require --mmproj PATH"
+    let checkpoint = download_gguf(&args.model)?;
+    eprintln!(
+        "selected {} GGUF file(s) from the Hugging Face cache",
+        checkpoint.files.len()
     );
-    let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
-    let selected_gguf = match (&args.gguf, &hub_gguf) {
-        (Some(path), None) => path.clone(),
-        (None, Some(checkpoint)) => {
-            eprintln!(
-                "selected {} GGUF file(s) from the Hugging Face cache",
-                checkpoint.files.len()
-            );
-            checkpoint.primary.clone()
-        }
-        (None, None) => args.model_dir.join("model-bf16.gguf"),
-        (Some(_), Some(_)) => unreachable!("clap rejects --gguf with --model"),
-    };
+    let selected_gguf = checkpoint.primary;
     if args.generate_entrypoint {
         let config = read_gguf_model_config(&selected_gguf)?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
@@ -230,14 +207,8 @@ fn main() -> Result<()> {
 
     let prompt = args.prompt.as_deref().unwrap_or_default();
     let gguf_path = selected_gguf;
-    let tokenizer = if let Some(tokenizer_path) = args.tokenizer {
-        QwenTokenizer::open(tokenizer_path)?
-    } else if let Some(tokenizer) = QwenTokenizer::from_gguf(&gguf_path)? {
-        eprintln!("loaded tokenizer from GGUF metadata");
-        tokenizer
-    } else {
-        QwenTokenizer::open(args.model_dir.join("tokenizer.json"))?
-    };
+    let tokenizer = QwenTokenizer::from_gguf(&gguf_path)?
+        .ok_or_else(|| anyhow::anyhow!("HF checkpoint has no embedded tokenizer"))?;
     let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
         !tokens.is_empty() || !args.image.is_empty(),
@@ -250,15 +221,7 @@ fn main() -> Result<()> {
             config.is_qwen35(),
             "image inputs require a Qwen3.5 dense or MoE model"
         );
-        let path = if let Some(path) = &args.mmproj {
-            path.clone()
-        } else {
-            download_mmproj(
-                args.model
-                    .as_deref()
-                    .expect("validated image model selector"),
-            )?
-        };
+        let path = download_mmproj(args.mmproj_model.as_deref().unwrap_or(&args.model))?;
         let vision_config = catena_qwen3::vision::VisionConfig::from_gguf(&path)?;
         ensure!(
             vision_config.output_size == config.hidden_size,
@@ -574,7 +537,13 @@ mod tests {
     use catena_lang::codegen::CodegenKind;
 
     fn options_from_cli(extra: &[&str]) -> Result<InferenceOptions> {
-        let mut argv = vec!["catena-qwen3", "--prompt", "Gravity is"];
+        let mut argv = vec![
+            "catena-qwen3",
+            "--model",
+            "unsloth/Qwen3.5-0.8B-GGUF:BF16",
+            "--prompt",
+            "Gravity is",
+        ];
         argv.extend_from_slice(extra);
         let matches = Args::command().try_get_matches_from(argv)?;
         inference_options(&Args::from_arg_matches(&matches)?, &matches)
@@ -608,7 +577,7 @@ mod tests {
         );
         assert!(options_from_cli(&["--kernels", "fused"]).is_err());
         assert!(options_from_cli(&["--codegen", "experimental", "--kernels", "unknown"]).is_err());
-        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--tg-context", "0"]).is_err());
+        assert!(parse_args(["catena-qwen3", "--bench", "--tg-context", "0"]).is_err());
         Ok(())
     }
 
@@ -639,7 +608,7 @@ mod tests {
 
     #[test]
     fn benchmark_cli_defaults_do_not_require_a_prompt() {
-        let args = Args::try_parse_from(["catena-qwen3", "--bench"]).unwrap();
+        let args = parse_args(["catena-qwen3", "--bench"]).unwrap();
         assert!(args.bench);
         assert_eq!(args.pp, 512);
         assert_eq!(args.tg, 128);
@@ -652,7 +621,7 @@ mod tests {
 
     #[test]
     fn bf16_graph_is_explicitly_selected() {
-        let args = Args::try_parse_from([
+        let args = parse_args([
             "catena-qwen3",
             "--bf16",
             "--model",
@@ -666,15 +635,15 @@ mod tests {
 
     #[test]
     fn acceleration_defaults_do_not_require_explicit_bf16() {
-        let args = Args::try_parse_from(["catena-qwen3", "--prompt", "hello"]).unwrap();
+        let args = parse_args(["catena-qwen3", "--prompt", "hello"]).unwrap();
         assert_eq!(args.prompt.as_deref(), Some("hello"));
-        assert!(Args::try_parse_from(["catena-qwen3", "hello"]).is_err());
-        assert!(Args::try_parse_from(["catena-qwen3"]).is_err());
+        assert!(parse_args(["catena-qwen3", "hello"]).is_err());
+        assert!(parse_args(["catena-qwen3"]).is_err());
         assert!(args.bf16);
         assert!(args.matrix_cores);
         assert!(args.fused_attention);
 
-        let explicit = Args::try_parse_from([
+        let explicit = parse_args([
             "catena-qwen3",
             "--matrix-cores",
             "--fused-attention",
@@ -687,10 +656,10 @@ mod tests {
 
     #[test]
     fn blas_overrides_the_default_and_conflicts_with_explicit_matrix_cores() {
-        let args = Args::try_parse_from(["catena-qwen3", "--blas", "--prompt", "hello"]).unwrap();
+        let args = parse_args(["catena-qwen3", "--blas", "--prompt", "hello"]).unwrap();
         assert!(args.blas);
         assert!(
-            Args::try_parse_from([
+            parse_args([
                 "catena-qwen3",
                 "--bf16",
                 "--matrix-cores",
@@ -704,7 +673,7 @@ mod tests {
 
     #[test]
     fn benchmark_prompt_is_accepted_and_ignored_by_the_mode() {
-        let args = Args::try_parse_from([
+        let args = parse_args([
             "catena-qwen3",
             "--bench",
             "--pp",
@@ -719,20 +688,19 @@ mod tests {
 
     #[test]
     fn benchmark_runs_must_be_positive() {
-        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--bench-runs", "0"]).is_err());
+        assert!(parse_args(["catena-qwen3", "--bench", "--bench-runs", "0"]).is_err());
     }
 
     #[test]
     fn benchmark_and_entrypoint_generation_conflict() {
-        assert!(
-            Args::try_parse_from(["catena-qwen3", "--bench", "--generate-entrypoint"]).is_err()
-        );
+        assert!(parse_args(["catena-qwen3", "--bench", "--generate-entrypoint"]).is_err());
     }
 
     #[test]
-    fn hub_model_and_local_gguf_conflict() {
+    fn hf_model_is_required_and_local_model_flags_are_rejected() {
+        assert!(Args::try_parse_from(["catena-qwen3", "--prompt", "hello"]).is_err());
         assert!(
-            Args::try_parse_from([
+            parse_args([
                 "catena-qwen3",
                 "--model",
                 "unsloth/Qwen3.5-0.8B-GGUF:BF16",
@@ -763,14 +731,14 @@ mod image_cli_tests {
     use super::*;
     #[test]
     fn repeated_images_and_boolean_overrides_parse() {
-        let args = Args::try_parse_from([
+        let args = parse_args([
             "catena-qwen3",
             "--image",
             "one.png",
             "--image",
             "two.jpg",
-            "--mmproj",
-            "vision.gguf",
+            "--mmproj-model",
+            "owner/vision",
             "--bf16=false",
             "--matrix-cores=false",
             "--fused-attention=false",
@@ -780,14 +748,14 @@ mod image_cli_tests {
         .unwrap();
         assert_eq!(args.image.len(), 2);
         assert!(!args.bf16 && !args.matrix_cores && !args.fused_attention);
-        let image_only = Args::try_parse_from(["catena-qwen3", "--image", "one.png"]).unwrap();
+        let image_only = parse_args(["catena-qwen3", "--image", "one.png"]).unwrap();
         assert!(image_only.prompt.is_none());
     }
     #[test]
     fn images_conflict_with_bench_and_require_companion_options() {
-        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--image", "one.png"]).is_err());
+        assert!(parse_args(["catena-qwen3", "--bench", "--image", "one.png"]).is_err());
         assert!(
-            Args::try_parse_from([
+            parse_args([
                 "catena-qwen3",
                 "--generate-entrypoint",
                 "--image",
@@ -796,17 +764,17 @@ mod image_cli_tests {
             .is_err()
         );
         assert!(
-            Args::try_parse_from([
+            parse_args([
                 "catena-qwen3",
-                "--mmproj",
-                "vision.gguf",
+                "--mmproj-model",
+                "owner/vision",
                 "--prompt",
                 "Describe."
             ])
             .is_err()
         );
         assert!(
-            Args::try_parse_from([
+            parse_args([
                 "catena-qwen3",
                 "--image-max-pixels",
                 "0",
@@ -816,4 +784,20 @@ mod image_cli_tests {
             .is_err()
         );
     }
+}
+
+#[cfg(test)]
+fn parse_args<I, T>(args: I) -> std::result::Result<Args, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let mut args = args
+        .into_iter()
+        .map(Into::into)
+        .collect::<Vec<std::ffi::OsString>>();
+    if !args.iter().any(|a| a == "--model") {
+        args.extend(["--model".into(), "unsloth/Qwen3.5-0.8B-GGUF:BF16".into()]);
+    }
+    Args::try_parse_from(args)
 }

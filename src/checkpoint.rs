@@ -316,7 +316,7 @@ pub(crate) fn read_gguf_tokenizer_metadata(
 
 /// Read selected small metadata without materializing the tokenizer vocabulary.
 pub(crate) fn read_metadata(path: &Path) -> Result<HashMap<String, serde_json::Value>> {
-    let file = GgufFile::open(path)?;
+    let file = GgufFile::open(&path)?;
     let mut c = Cursor::new(&file.bytes);
     c.take(16)?;
     let count = c.usize_u64("metadata count")?;
@@ -337,7 +337,7 @@ pub(crate) fn read_metadata(path: &Path) -> Result<HashMap<String, serde_json::V
 }
 
 pub(crate) fn tensor_inventory(path: &Path) -> Result<HashMap<String, (Vec<usize>, GgufDtype)>> {
-    let file = GgufFile::open(path)?;
+    let file = GgufFile::open(&path)?;
     Ok(file
         .tensors
         .iter()
@@ -1374,8 +1374,6 @@ mod tests {
 
     use super::*;
 
-    const GGUF_PATH: &str = "models/Qwen3-30B-A3B-Base/model-bf16.gguf";
-
     #[test]
     fn signed_metadata_arrays_preserve_mrope_sections() -> Result<()> {
         let mut bytes = Vec::new();
@@ -1441,13 +1439,13 @@ mod tests {
 
     #[test]
     fn resolves_every_file_from_any_standard_shard() -> Result<()> {
-        let paths = resolve_gguf_paths(Path::new("models/Qwen3-30B-A3B-BF16-00002-of-00003.gguf"))?;
+        let paths = resolve_gguf_paths(Path::new("fixture/checkpoint-BF16-00002-of-00003.gguf"))?;
         assert_eq!(
             paths,
             [
-                "models/Qwen3-30B-A3B-BF16-00001-of-00003.gguf",
-                "models/Qwen3-30B-A3B-BF16-00002-of-00003.gguf",
-                "models/Qwen3-30B-A3B-BF16-00003-of-00003.gguf",
+                "fixture/checkpoint-BF16-00001-of-00003.gguf",
+                "fixture/checkpoint-BF16-00002-of-00003.gguf",
+                "fixture/checkpoint-BF16-00003-of-00003.gguf",
             ]
             .map(PathBuf::from)
         );
@@ -1456,7 +1454,7 @@ mod tests {
 
     #[test]
     fn leaves_an_unsharded_name_alone() -> Result<()> {
-        let path = Path::new("models/model-bf16.gguf");
+        let path = Path::new("fixture/checkpoint.gguf");
         assert_eq!(resolve_gguf_paths(path)?, [path]);
         Ok(())
     }
@@ -1553,9 +1551,9 @@ mod tests {
 
     #[test]
     fn validates_downloaded_gguf_when_present() -> Result<()> {
-        let path = Path::new(GGUF_PATH);
-        if path.exists() {
-            let file = GgufFile::open(path)?;
+        if let Ok(selector) = std::env::var("CATENA_QWEN3_MODEL") {
+            let path = crate::hfhub::download_gguf(&selector)?.primary;
+            let file = GgufFile::open(&path)?;
             assert_eq!(file.tensors.len(), 579);
             assert_eq!(file.data_start, 5_969_472);
             let specs = weight_specs(&ModelConfig::qwen3_30b())?;
@@ -1574,9 +1572,10 @@ mod tests {
 
     #[test]
     fn reads_qwen36_hybrid_configuration_when_present() -> Result<()> {
-        let Some(path) = std::env::var_os("CATENA_QWEN36_GGUF").map(PathBuf::from) else {
+        let Some(selector) = std::env::var_os("CATENA_QWEN36_MODEL") else {
             return Ok(());
         };
+        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
         let config = read_gguf_model_config(&path)?;
         assert_eq!(config.architecture, ModelArchitecture::Qwen35Moe);
         assert_eq!(config.vocabulary_size, 248_320);
@@ -1593,9 +1592,10 @@ mod tests {
 
     #[test]
     fn reads_qwen35_dense_configuration_when_present() -> Result<()> {
-        let Some(path) = std::env::var_os("CATENA_QWEN35_GGUF").map(PathBuf::from) else {
+        let Some(selector) = std::env::var_os("CATENA_QWEN35_MODEL") else {
             return Ok(());
         };
+        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
         let config = read_gguf_model_config(&path)?;
         assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
         assert_eq!(config.vocabulary_size, 248_320);
@@ -1614,9 +1614,10 @@ mod tests {
 
     #[test]
     fn reads_qwen38_dense_configuration_with_auxiliary_nextn_block_when_present() -> Result<()> {
-        let Some(path) = std::env::var_os("CATENA_QWEN38_GGUF").map(PathBuf::from) else {
+        let Some(selector) = std::env::var_os("CATENA_QWEN38_MODEL") else {
             return Ok(());
         };
+        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
         let config = read_gguf_model_config(&path)?;
         assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
         assert_eq!(config.num_layers, 64);
