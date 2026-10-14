@@ -1,0 +1,110 @@
+# RMS reduction and learned BF16 normalization in one cooperative launch.
+(def program stdlib.qwen3.fused.norm.square : {((cap.own mem) val) (u64 val) (u64 val) ({(u64 val) (f32 val)} *)} -> (f32 val) =
+ ([input base tid pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.i] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.mul [stride.])
+  ({[.stride] [.tid]} stdlib.qwen3.memory.u64.add [channel.])
+  ({[.base] [.channel]} stdlib.qwen3.memory.u64.add [offset.])
+  ({[.input] [.offset]} stdlib.qwen3.memory.own-read-bf16 [bf.])
+  ([.bf] bf16.to-f32 [f.])
+  ({[.f] [.f]} stdlib.qwen3.memory.f32.mul [squared.])
+  ({[.acc] [.squared]} stdlib.qwen3.memory.f32.add [sum.])
+  [.sum]
+ ))
+(def program stdlib.qwen3.fused.norm.square.fold : {((cap.own mem) val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([input base tid pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.input] [.base] [.tid] [.arguments]} stdlib.qwen3.fused.norm.square [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.norm.write : {((cap.own mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val) (f32 val) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([input weight out base tid inverse pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.i] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.mul [stride.])
+  ({[.stride] [.tid]} stdlib.qwen3.memory.u64.add [channel.])
+  ({[.base] [.channel]} stdlib.qwen3.memory.u64.add [offset.])
+  ({[.input] [.offset]} stdlib.qwen3.memory.own-read-bf16 [bf.])
+  ([.bf] bf16.to-f32 [value.])
+  ({[.value] [.inverse]} stdlib.qwen3.memory.f32.mul [scaled.])
+  ([.scaled] f32.to-bf16 [rounded.])
+  ({[.weight] [.channel]} stdlib.qwen3.memory.ref-read-f32 [learned.])
+  ([.learned] f32.to-bf16 [learned-bf.])
+  ({[.rounded] [.learned-bf]} stdlib.qwen3.memory.bf16.mul [result.])
+  ({[.out] [.offset] [.result]} stdlib.qwen3.memory.write-bf16)
+  (unit.elim)
+  [.acc]
+ ))
+(def program stdlib.qwen3.fused.norm.write.fold : {((cap.own mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val) (f32 val) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input weight out base tid inverse pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.input] [.weight] [.out] [.base] [.tid] [.inverse] [.arguments]} stdlib.qwen3.fused.norm.write [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.norm.kernel : {((cap.own mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (f32 val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input weight out columns columns-f32 memory thread.]
+  ([.thread] stdlib.qwen3.perf.indices [indices.])
+  ([.indices] *.elim [row tid.])
+  ({[.row] [.columns]} stdlib.qwen3.memory.u64.mul [base.])
+  ({[.columns] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] [.tid]} stdlib.qwen3.memory.u64.sub [remaining.])
+  ({[.remaining] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [count.])
+  ({[.input] [.base] [.tid]} partial.stdlib.qwen3.fused.norm.square.fold.3 [callback.])
+  ({[.count] (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] (const.u32.0x00000000 u32.bitcast-f32) [.callback] core.truth} core.fold.bounded_u64 [ sum proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ({[.memory] (const.u64.0x0000000000000100) [.thread]} stdlib.qwen3.perf.slot [shared.])
+  ({[.shared] [.tid] [.sum]} stdlib.qwen3.perf.write [written.])
+  ([.written] stdlib.qwen3.perf.sync [synced.])
+  ({[.shared] [.synced]} meta.perf.after-shared [ready.])
+  ({[.ready] [.tid] (const.u64.0x0000000000000000) (const.u64.0x0000000000000100)} stdlib.qwen3.perf.reduce-add [total.])
+  ({[.total] [.columns-f32]} stdlib.qwen3.memory.f32.div [mean.])
+  ({[.mean] (const.u32.0x{{RMS_EPSILON_BITS}} u32.bitcast-f32)} stdlib.qwen3.memory.f32.add [variance.])
+  ([.variance] qwen3.sqrt [root.])
+  ({(const.u32.0x3F800000 u32.bitcast-f32) [.root]} stdlib.qwen3.memory.f32.div [inverse.])
+  ({[.input] [.weight] [.out] [.base] [.tid] [.inverse]} partial.stdlib.qwen3.fused.norm.write.fold.6 [write-callback.])
+  ({[.count] (unit.intro meta.master.end)} smolcat.value.named_at [write-end.])
+  ({[.write-end] [.out] [.write-callback] core.truth} core.fold.bounded_u64 [complete write-proof.])
+  ([.write-proof] unsafe.discard unit.elim)
+  (unit.intro)
+ ))
+(def program stdlib.qwen3.fused.norm.host : {((cap.own mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (f32 val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([input weight out columns columns-f32 grid memory pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.input] [.weight] [.out] [.columns] [.columns-f32] [.memory]} partial.stdlib.qwen3.fused.norm.kernel.6 [kernel.])
+  ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
+  [.acc]
+ ))
+(def program stdlib.qwen3.fused.norm.host.fold : {((cap.own mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (f32 val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input weight out columns columns-f32 grid memory pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.input] [.weight] [.out] [.columns] [.columns-f32] [.grid] [.memory] [.arguments]} stdlib.qwen3.fused.norm.host [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program qwen3.fused.normalize : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (f32 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight columns columns-f32 rows.]
+  ({[.columns] [.rows]} stdlib.qwen3.memory.u64.mul [count.])
+  ([.count] stdlib.qwen3.memory.alloc-bf16 [out.])
+  ({[.rows] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
+  ({(const.u64.0x0000000000000100) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
+  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
+  ({[.input] [.weight] [.out] [.columns] [.columns-f32] [.grid] [.memory]} partial.stdlib.qwen3.fused.norm.host.fold.7 [callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] [.out] [.callback] core.truth} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))

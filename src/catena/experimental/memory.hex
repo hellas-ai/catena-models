@@ -1,0 +1,1081 @@
+# Master-compatible scalar and memory adapters, composed only in Hex.
+# Index bounds are checked by native typed accesses. GlobalOwn is trusted: linear
+# launches give each output element one writer, and owners outlive their uses.
+(theory type nat {
+ (arr bf16numeric.left : 0 -> 1) (arr bf16numeric.right : 0 -> 1) (arr bf16numeric.value : 0 -> 1)
+(arr master.left : 0 -> 1)
+(arr master.right : 0 -> 1)
+(arr master.value : 0 -> 1)
+(arr master.count : 0 -> 1)
+(arr master.memory : 0 -> 1)
+(arr master.index : 0 -> 1)
+(arr master.end : 0 -> 1)
+(arr master.end32 : 0 -> 1)
+(arr master.index32 : 0 -> 1)
+(arr master.predicate : 0 -> 1)
+(arr master.blocks : 0 -> 1)
+(arr master.threads : 0 -> 1)
+(arr master.one : 0 -> 1)
+(arr master.grid : 0 -> 1)
+(arr master.block : 0 -> 1)
+(arr master.thread : 0 -> 1)
+(arr master.phase : 0 -> 1)
+})
+(theory program type {
+ (arr meta.bf16numeric.left : 1 -> bf16numeric.left) (arr meta.bf16numeric.right : 1 -> bf16numeric.right) (arr meta.bf16numeric.value : 1 -> bf16numeric.value)
+(arr meta.master.left : 1 -> master.left)
+(arr meta.master.right : 1 -> master.right)
+(arr meta.master.value : 1 -> master.value)
+(arr meta.master.count : 1 -> master.count)
+(arr meta.master.memory : 1 -> master.memory)
+(arr meta.master.index : 1 -> master.index)
+(arr meta.master.end : 1 -> master.end)
+(arr meta.master.end32 : 1 -> master.end32)
+(arr meta.master.index32 : 1 -> master.index32)
+(arr meta.master.predicate : 1 -> master.predicate)
+(arr meta.master.blocks : 1 -> master.blocks)
+(arr meta.master.threads : 1 -> master.threads)
+(arr meta.master.one : 1 -> master.one)
+(arr meta.master.grid : 1 -> master.grid)
+(arr meta.master.block : 1 -> master.block)
+(arr meta.master.thread : 1 -> master.thread)
+(arr meta.master.phase : 1 -> master.phase)
+(arr meta.master.instantiate.0 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.instantiate.1 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.instantiate.2 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.instantiate.3 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.instantiate.4 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.instantiate.5 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.instantiate.6 : {((cap.ref mem) val) ({master.count u64} :)} -> {({((cap.ref mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.instantiate.7 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.instantiate.8 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.instantiate.9 : {((cap.ref mem) val) ({master.count u64} :)} -> {({((cap.ref mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.instantiate.10 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.instantiate.11 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.instantiate.12 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.instantiate.13 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.instantiate.14 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.instantiate.15 : {1} -> {1 ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count f32 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn)})
+(arr meta.master.instantiate.16 : {({master.memory ({master.count f32} stdlib.gpu.memory.type.Global)} :) ({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) (f32 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count f32 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} -> {({({master.memory ({master.count f32} stdlib.gpu.memory.type.Global)} :) ({({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) ({(f32 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count f32 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} *)} *)} *) f32 ({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.thread master.count master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)})
+(arr meta.master.instantiate.17 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.0 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.1 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.bf16-instantiate.2 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.bf16-instantiate.3 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.4 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.bf16-instantiate.5 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.bf16-instantiate.6 : {((cap.ref mem) val) ({master.count u64} :)} -> {({((cap.ref mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.7 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.bf16-instantiate.8 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.bf16-instantiate.9 : {((cap.ref mem) val) ({master.count u64} :)} -> {({((cap.ref mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.10 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.bf16-instantiate.11 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.bf16-instantiate.12 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.bf16-instantiate.13 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.bf16-instantiate.14 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.bf16-instantiate.15 : {1} -> {1 ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count bf16 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn)})
+(arr meta.master.bf16-instantiate.16 : {({master.memory ({master.count bf16} stdlib.gpu.memory.type.Global)} :) ({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) (bf16 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count bf16 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} -> {({({master.memory ({master.count bf16} stdlib.gpu.memory.type.Global)} :) ({({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) ({(bf16 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count bf16 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} *)} *)} *) bf16 ({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.thread master.count master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)})
+(arr meta.master.u64-write.0 : {((cap.own mem) val) ({master.count u64} :)} -> {({((cap.own mem) val) ({master.count u64} :)} *) master.count master.memory})
+(arr meta.master.u64-write.1 : {1} -> {1 ({master.index master.count} prop.Less)})
+(arr meta.master.u64-write.2 : {({master.index u64} :) (({master.index master.count} prop.Less) |-)} -> {({({master.index u64} :) (({master.index master.count} prop.Less) |-)} *) master.count master.index})
+(arr meta.master.u64-write.3 : {1} -> {1 ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count u64 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn)})
+(arr meta.master.u64-write.4 : {({master.memory ({master.count u64} stdlib.gpu.memory.type.Global)} :) ({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) (u64 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count u64 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} -> {({({master.memory ({master.count u64} stdlib.gpu.memory.type.Global)} :) ({({({master.count master.index} stdlib.gpu.memory.sort.At) ({master.count} stdlib.gpu.memory.type.Ix)} :) ({(u64 val) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.count u64 master.thread master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)} stdlib.gpu.memory.prop.GlobalOwn) |-)} *)} *)} *) u64 ({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block master.thread master.count master.memory ({master.count master.index} stdlib.gpu.memory.sort.At)})
+(arr meta.master.complete-own : ((cap.own mem) val) -> {((cap.own mem) val) master.phase})
+(arr meta.master.after-own : {((cap.own mem) val) master.phase} -> ((cap.own mem) val))
+
+})
+(def program stdlib.qwen3.memory.u32.add : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.+ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.sub : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.- :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.mul : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.* :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.div : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric./ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.rem : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.escaped.25 :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.max : {(u32 val) (u32 val)} -> (u32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.max :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u32.less : {(u32 val) (u32 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.a b x0] stdlib.numeric.less [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.u32.less_equal : {(u32 val) (u32 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u32 [x0.])
+  ([.a b x0] stdlib.numeric.less_equal [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.u64.add : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.+ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.sub : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.- :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.mul : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.* :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.div : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric./ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.rem : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.escaped.25 :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.max : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.max :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.u64.less : {(u64 val) (u64 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.a b x0] stdlib.numeric.less [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.u64.less_equal : {(u64 val) (u64 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.u64 [x0.])
+  ([.a b x0] stdlib.numeric.less_equal [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.f32.add : {(f32 val) (f32 val)} -> (f32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.+ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.f32.sub : {(f32 val) (f32 val)} -> (f32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.- :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.f32.mul : {(f32 val) (f32 val)} -> (f32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.* :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.f32.div : {(f32 val) (f32 val)} -> (f32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric./ :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.f32.max : {(f32 val) (f32 val)} -> (f32 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.] unit.intro meta.master.left [x1.])
+  ([.a x1] smolcat.value.named_at [x2.])
+  ([.] unit.intro meta.master.right [x3.])
+  ([.b x3] smolcat.value.named_at [x4.])
+  ([.x2 x4 x0] stdlib.numeric.max :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.f32.less : {(f32 val) (f32 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.a b x0] stdlib.numeric.less [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.f32.less_equal : {(f32 val) (f32 val)} -> (bool val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.f32 [x0.])
+  ([.a b x0] stdlib.numeric.less_equal [x1.])
+  [. x1]
+ ))
+
+(def program stdlib.qwen3.memory.f32.negate : {(f32 val)} -> (f32 val) =
+ ([a.]
+  ([.] unit.intro meta.master.value [x0.])
+  ([.a x0] smolcat.value.named_at [x1.])
+  ([.] stdlib.numeric.signed.f32 [x2.])
+  ([.x1 x2] stdlib.numeric.negate :.forget [x3.])
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.u32.to-f32 : {(u32 val)} -> (f32 val) =
+ ([a.]
+  ([.] unit.intro meta.master.value [x0.])
+  ([.a x0] smolcat.value.named_at [x1.])
+  ([.x1] stdlib.numeric.u32_to_f32 :.forget [x2.])
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.u32.to-u64 : {(u32 val)} -> (u64 val) =
+ ([a.]
+  ([.] unit.intro meta.master.value [x0.])
+  ([.a x0] smolcat.value.named_at [x1.])
+  ([.x1] stdlib.numeric.to_u64 :.forget [x2.])
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.u64.checked-mul : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.]
+  ([.] const.u64.0x0000000000000001 [x0.])
+  ([.a x0] stdlib.qwen3.memory.u64.max [x1.])
+  ([.] const.u64.0xFFFFFFFFFFFFFFFF [x2.])
+  ([.x2 x1] stdlib.qwen3.memory.u64.div [x3.])
+  ([.b x3] stdlib.qwen3.memory.u64.less_equal [x4.])
+  ([.] unit.intro meta.master.predicate [x5.])
+  ([.x4 x5] smolcat.value.named_at [x6.])
+  ([.x6] stdlib.assert.assert_true [x7 x8.])
+  ([.x7] unit.elim)
+  ([.x8] unsafe.discard unit.elim)
+  ([.a b] stdlib.qwen3.memory.u64.mul [x9.])
+  [. x9]
+ ))
+
+(def program stdlib.qwen3.memory.select-f32.yes : {({({(f32 val) (f32 val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> (f32 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.select-f32.no : {({({(f32 val) (f32 val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> (f32 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.select-f32 : {(bool val) (f32 val) (f32 val)} -> (f32 val) =
+ ([condition yes no.]
+  ([.] unit.intro meta.master.predicate [x0.])
+  ([.condition x0] smolcat.value.named_at [x1.])
+  ([.yes no] *.intro [x2.])
+  ([.] name.stdlib.qwen3.memory.select-f32.yes lift [x3.])
+  ([.] name.stdlib.qwen3.memory.select-f32.no lift [x4.])
+  ([.x1] :.forget [x5.])
+  ([.] unit.intro [x6.])
+  ([.x5 x2 x3 x4 x6] core.if [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.select-u64.yes : {({({(u64 val) (u64 val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> (u64 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.select-u64.no : {({({(u64 val) (u64 val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> (u64 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.select-u64 : {(bool val) (u64 val) (u64 val)} -> (u64 val) =
+ ([condition yes no.]
+  ([.] unit.intro meta.master.predicate [x0.])
+  ([.condition x0] smolcat.value.named_at [x1.])
+  ([.yes no] *.intro [x2.])
+  ([.] name.stdlib.qwen3.memory.select-u64.yes lift [x3.])
+  ([.] name.stdlib.qwen3.memory.select-u64.no lift [x4.])
+  ([.x1] :.forget [x5.])
+  ([.] unit.intro [x6.])
+  ([.x5 x2 x3 x4 x6] core.if [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.select-u32.yes : {({({(u32 val) (u32 val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> (u32 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.select-u32.no : {({({(u32 val) (u32 val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> (u32 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.select-u32 : {(bool val) (u32 val) (u32 val)} -> (u32 val) =
+ ([condition yes no.]
+  ([.] unit.intro meta.master.predicate [x0.])
+  ([.condition x0] smolcat.value.named_at [x1.])
+  ([.yes no] *.intro [x2.])
+  ([.] name.stdlib.qwen3.memory.select-u32.yes lift [x3.])
+  ([.] name.stdlib.qwen3.memory.select-u32.no lift [x4.])
+  ([.x1] :.forget [x5.])
+  ([.] unit.intro [x6.])
+  ([.x5 x2 x3 x4 x6] core.if [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.select-own.yes : {({({((cap.own mem) val) ((cap.own mem) val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> ((cap.own mem) val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.select-own.no : {({({((cap.own mem) val) ((cap.own mem) val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> ((cap.own mem) val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.select-own : {(bool val) ((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([condition yes no.]
+  ([.] unit.intro meta.master.predicate [x0.])
+  ([.condition x0] smolcat.value.named_at [x1.])
+  ([.yes no] *.intro [x2.])
+  ([.] name.stdlib.qwen3.memory.select-own.yes lift [x3.])
+  ([.] name.stdlib.qwen3.memory.select-own.no lift [x4.])
+  ([.x1] :.forget [x5.])
+  ([.] unit.intro [x6.])
+  ([.x5 x2 x3 x4 x6] core.if [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.select-unit.yes : {({({1 1} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.select-unit.no : {({({1 1} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x0] *.elim [x2 x3.])
+  ([.x1] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x5] unit.elim)
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.select-unit : {(bool val) 1 1} -> 1 =
+ ([condition yes no.]
+  ([.] unit.intro meta.master.predicate [x0.])
+  ([.condition x0] smolcat.value.named_at [x1.])
+  ([.yes no] *.intro [x2.])
+  ([.] name.stdlib.qwen3.memory.select-unit.yes lift [x3.])
+  ([.] name.stdlib.qwen3.memory.select-unit.no lift [x4.])
+  ([.x1] :.forget [x5.])
+  ([.] unit.intro [x6.])
+  ([.x5 x2 x3 x4 x6] core.if [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.own-count-f32 : {((cap.own mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_own_f32 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] *.elim [x5 x6.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.x6] unsafe.discard unit.elim)
+  ([.x1] :.forget [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.own-count-u64 : {((cap.own mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_own_u64 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] *.elim [x5 x6.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.x6] unsafe.discard unit.elim)
+  ([.x1] :.forget [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.ref-count-f32 : {((cap.ref mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_ref_f32 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x1] :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.ref-count-u64 : {((cap.ref mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_ref_u64 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x1] :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.own-read-f32 : {((cap.own mem) val) (u64 val)} -> (f32 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.own-count-f32 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.0 {{_} (name.stdlib.gpu.memory.global_own_f32 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.instantiate.1 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.instantiate.2 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.x4] :.forget [x13.])
+  ([.x12] :.forget [x14.])
+  ([.x13 x14] stdlib.gpu.memory.global_read_unsafe [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.own-read-u64 : {((cap.own mem) val) (u64 val)} -> (u64 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.own-count-u64 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.3 {{_} (name.stdlib.gpu.memory.global_own_u64 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.instantiate.4 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.instantiate.5 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.x4] :.forget [x13.])
+  ([.x12] :.forget [x14.])
+  ([.x13 x14] stdlib.gpu.memory.global_read_unsafe [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.ref-read-f32 : {((cap.ref mem) val) (u64 val)} -> (f32 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.ref-count-f32 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.6 {{_} (name.stdlib.gpu.memory.global_ref_f32 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x6.])
+  ([.index x6] smolcat.value.named_at [x7.])
+  ([.] unit.intro [x8.])
+  ([.x8] (meta.master.instantiate.7 {{_} (name.unsafe.assume lift)} evaluate {_}) [x9.])
+  ([.x7 x9] (meta.master.instantiate.8 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x10.])
+  ([.x4] :.forget [x11.])
+  ([.x10] :.forget [x12.])
+  ([.x11 x12] stdlib.gpu.memory.global_read_unsafe [x13.])
+  [. x13]
+ ))
+
+(def program stdlib.qwen3.memory.ref-read-u64 : {((cap.ref mem) val) (u64 val)} -> (u64 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.ref-count-u64 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.9 {{_} (name.stdlib.gpu.memory.global_ref_u64 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x6.])
+  ([.index x6] smolcat.value.named_at [x7.])
+  ([.] unit.intro [x8.])
+  ([.x8] (meta.master.instantiate.10 {{_} (name.unsafe.assume lift)} evaluate {_}) [x9.])
+  ([.x7 x9] (meta.master.instantiate.11 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x10.])
+  ([.x4] :.forget [x11.])
+  ([.x10] :.forget [x12.])
+  ([.x11 x12] stdlib.gpu.memory.global_read_unsafe [x13.])
+  [. x13]
+ ))
+
+(def program stdlib.qwen3.memory.write-f32 : {((cap.own mem) val) (u64 val) (f32 val)} -> 1 =
+ ([memory index value.]
+  ([.memory] stdlib.qwen3.memory.own-count-f32 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.12 {{_} (name.stdlib.gpu.memory.global_own_f32 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.instantiate.13 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.instantiate.14 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.] unit.intro [x13.])
+  ([.x13] (meta.master.instantiate.15 {{_} (name.unsafe.assume lift)} evaluate {_}) [x14.])
+  ([.x4 x12 value x14] (meta.master.instantiate.16 {{_} (name.stdlib.gpu.memory.global_write lift)} evaluate {_}) [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.alloc-f32 : {(u64 val)} -> ((cap.own mem) val) =
+ ([count.]
+  ([.] const.u64.0x3FFFFFFFFFFFFFFF [x0.])
+  ([.count x0] stdlib.qwen3.memory.u64.less_equal [x1.])
+  ([.] unit.intro meta.master.predicate [x2.])
+  ([.x1 x2] smolcat.value.named_at [x3.])
+  ([.x3] stdlib.assert.assert_true [x4 x5.])
+  ([.x4] unit.elim)
+  ([.x5] unsafe.discard unit.elim)
+  ([.] const.u64.0x0000000000000004 [x6.])
+  ([.count x6] stdlib.qwen3.memory.u64.mul [x7.])
+  ([.] stdlib.gpu.memory.memoryelement.f32 [x8.])
+  ([.x7 x8] stdlib.gpu.memory.allocate [x9.])
+  [. x9]
+ ))
+
+(def program stdlib.qwen3.memory.free : {((cap.own mem) val)} -> 1 =
+ ([memory.]
+  ([.memory] stdlib.qwen3.memory.own-count-f32 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.instantiate.17 {{_} (name.stdlib.gpu.memory.global_own_f32 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x7] unsafe.discard unit.elim)
+  ([.x4 x6] stdlib.gpu.memory.free [x8.])
+  [. x8]
+ ))
+
+(def program stdlib.qwen3.memory.grid : {(u64 val)} -> ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) =
+ ([blocks.]
+  ([.] unit.intro meta.master.blocks [x0.])
+  ([.blocks x0] smolcat.value.named_at [x1.])
+  ([.] const.u64.0x0000000000000001 [x2.])
+  ([.] unit.intro meta.master.one [x3.])
+  ([.x2 x3] smolcat.value.named_at [x4.])
+  ([.] const.u64.0x0000000000000100 [x5.])
+  ([.] unit.intro meta.master.threads [x6.])
+  ([.x5 x6] smolcat.value.named_at [x7.])
+  ([.] const.u64.0x0000000000000001 [x8.])
+  ([.] unit.intro meta.master.one [x9.])
+  ([.x8 x9] smolcat.value.named_at [x10.])
+  ([.x1 x4 x7 x10] stdlib.gpu.geometry.make_grid [x11 x12.])
+  ([.x12] unsafe.discard unit.elim)
+  ([.x11] :.forget [x13.])
+  ([.] unit.intro meta.master.grid [x14.])
+  ([.x13 x14] smolcat.value.named_at [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.thread-index : {({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> (u64 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.] unit.intro meta.master.thread [x2.])
+  ([.x1 x2] smolcat.value.named_at [x3.])
+  ([.x3] stdlib.gpu.geometry.in_grid_index stdlib.gpu.geometry.x :.forget [x4.])
+  [. x4]
+ ))
+
+(def program stdlib.qwen3.memory.own-count-bf16 : {((cap.own mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_own_bf16 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] *.elim [x5 x6.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.x6] unsafe.discard unit.elim)
+  ([.x1] :.forget [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.own-read-bf16 : {((cap.own mem) val) (u64 val)} -> (bf16 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.own-count-bf16 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.bf16-instantiate.0 {{_} (name.stdlib.gpu.memory.global_own_bf16 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.bf16-instantiate.1 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.bf16-instantiate.2 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.x4] :.forget [x13.])
+  ([.x12] :.forget [x14.])
+  ([.x13 x14] stdlib.gpu.memory.global_read_unsafe [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.own-count-bf16x2 : {((cap.own mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_own_bf16x2 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] *.elim [x5 x6.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.x6] unsafe.discard unit.elim)
+  ([.x1] :.forget [x7.])
+  [. x7]
+ ))
+
+(def program stdlib.qwen3.memory.own-read-bf16x2 : {((cap.own mem) val) (u64 val)} -> (bf16x2 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.own-count-bf16x2 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.bf16-instantiate.3 {{_} (name.stdlib.gpu.memory.global_own_bf16x2 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.bf16-instantiate.4 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.bf16-instantiate.5 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.x4] :.forget [x13.])
+  ([.x12] :.forget [x14.])
+  ([.x13 x14] stdlib.gpu.memory.global_read_unsafe [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.ref-count-bf16 : {((cap.ref mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_ref_bf16 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x1] :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.ref-read-bf16 : {((cap.ref mem) val) (u64 val)} -> (bf16 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.ref-count-bf16 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.bf16-instantiate.6 {{_} (name.stdlib.gpu.memory.global_ref_bf16 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x6.])
+  ([.index x6] smolcat.value.named_at [x7.])
+  ([.] unit.intro [x8.])
+  ([.x8] (meta.master.bf16-instantiate.7 {{_} (name.unsafe.assume lift)} evaluate {_}) [x9.])
+  ([.x7 x9] (meta.master.bf16-instantiate.8 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x10.])
+  ([.x4] :.forget [x11.])
+  ([.x10] :.forget [x12.])
+  ([.x11 x12] stdlib.gpu.memory.global_read_unsafe [x13.])
+  [. x13]
+ ))
+
+(def program stdlib.qwen3.memory.ref-count-bf16x2 : {((cap.ref mem) val)} -> (u64 val) =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_ref_bf16x2 [x0.])
+  ([.x0] *.elim [x1 x2.])
+  ([.x2] *.elim [x3 x4.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x1] :.forget [x5.])
+  [. x5]
+ ))
+
+(def program stdlib.qwen3.memory.ref-read-bf16x2 : {((cap.ref mem) val) (u64 val)} -> (bf16x2 val) =
+ ([memory index.]
+  ([.memory] stdlib.qwen3.memory.ref-count-bf16x2 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.bf16-instantiate.9 {{_} (name.stdlib.gpu.memory.global_ref_bf16x2 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x6.])
+  ([.index x6] smolcat.value.named_at [x7.])
+  ([.] unit.intro [x8.])
+  ([.x8] (meta.master.bf16-instantiate.10 {{_} (name.unsafe.assume lift)} evaluate {_}) [x9.])
+  ([.x7 x9] (meta.master.bf16-instantiate.11 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x10.])
+  ([.x4] :.forget [x11.])
+  ([.x10] :.forget [x12.])
+  ([.x11 x12] stdlib.gpu.memory.global_read_unsafe [x13.])
+  [. x13]
+ ))
+
+(def program stdlib.qwen3.memory.write-bf16 : {((cap.own mem) val) (u64 val) (bf16 val)} -> 1 =
+ ([memory index value.]
+  ([.memory] stdlib.qwen3.memory.own-count-bf16 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.bf16-instantiate.12 {{_} (name.stdlib.gpu.memory.global_own_bf16 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.bf16-instantiate.13 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.bf16-instantiate.14 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.] unit.intro [x13.])
+  ([.x13] (meta.master.bf16-instantiate.15 {{_} (name.unsafe.assume lift)} evaluate {_}) [x14.])
+  ([.x4 x12 value x14] (meta.master.bf16-instantiate.16 {{_} (name.stdlib.gpu.memory.global_write lift)} evaluate {_}) [x15.])
+  [. x15]
+ ))
+
+(def program stdlib.qwen3.memory.alloc-bf16 : {(u64 val)} -> ((cap.own mem) val) =
+ ([count.]
+  ([.] const.u64.0x7FFFFFFFFFFFFFFF [x0.])
+  ([.count x0] stdlib.qwen3.memory.u64.less_equal [x1.])
+  ([.] unit.intro meta.master.predicate [x2.])
+  ([.x1 x2] smolcat.value.named_at [x3.])
+  ([.x3] stdlib.assert.assert_true [x4 x5.])
+  ([.x4] unit.elim)
+  ([.x5] unsafe.discard unit.elim)
+  ([.] const.u64.0x0000000000000002 [x6.])
+  ([.count x6] stdlib.qwen3.memory.u64.mul [x7.])
+  ([.] stdlib.gpu.memory.memoryelement.bf16 [x8.])
+  ([.x7 x8] stdlib.gpu.memory.allocate [x9.])
+  [. x9]
+ ))
+
+(def program stdlib.qwen3.memory.u64.equal : {(u64 val) (u64 val)} -> (bool val) =
+ ([a b.]
+  ([.a b] stdlib.qwen3.memory.u64.less_equal [x0.])
+  ([.b a] stdlib.qwen3.memory.u64.less_equal [x1.])
+  ([.x0 x1] stdlib.boolean.and [x2.])
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.halve-step : {({(u64 val) (u64 val)} *)} -> (u64 val) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.] const.u64.0x0000000000000002 [x2.])
+  ([.x1 x2] stdlib.qwen3.memory.u64.div [x3.])
+  [. x3]
+ ))
+
+(def program stdlib.qwen3.memory.halve-step.master-fold-u64 : {({({master.index u64} :) ({(u64 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(u64 val) (prop.Truth |-)} *) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x1] *.elim [x2 x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x0] :.forget [x6.])
+  ([.x6 x2] *.intro [x7.])
+  ([.x7] stdlib.qwen3.memory.halve-step [x8.])
+  ([.x8 x5] *.intro [x9.])
+  [. x9]
+ ))
+
+(def program stdlib.qwen3.memory.u64.shr : {(u64 val) (u64 val)} -> (u64 val) =
+ ([value bits.]
+  ([.] name.stdlib.qwen3.memory.halve-step.master-fold-u64 lift [x0.])
+  ([.] unit.intro meta.master.end [x1.])
+  ([.bits x1] smolcat.value.named_at [x2.])
+  ([.] core.truth [x3.])
+  ([.x2 value x0 x3] core.fold.bounded_u64 [x4 x5.])
+  ([.x5] unsafe.discard unit.elim)
+  [. x4]
+ ))
+
+(def program stdlib.qwen3.memory.fold-count-step : {({(u32 val) ({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *)} *)} -> ({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x1] *.elim [x2 x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x4 x2] stdlib.qwen3.memory.u64.less_equal [x8.])
+  ([.x2 x4] stdlib.qwen3.memory.u64.sub [x9.])
+  ([.x8 x9 x2] stdlib.qwen3.memory.select-u64 [x10.])
+  ([.] const.u32.0x00000000 [x11.])
+  ([.x8 x6 x11] stdlib.qwen3.memory.select-u32 [x12.])
+  ([.x7 x12] stdlib.qwen3.memory.u32.add [x13.])
+  ([.] const.u64.0x0000000000000002 [x14.])
+  ([.x4 x14] stdlib.qwen3.memory.u64.div [x15.])
+  ([.] const.u32.0x00000002 [x16.])
+  ([.x6 x16] stdlib.qwen3.memory.u32.div [x17.])
+  ([.x17 x13] *.intro [x18.])
+  ([.x15 x18] *.intro [x19.])
+  ([.x10 x19] *.intro [x20.])
+  [. x20]
+ ))
+
+(def program stdlib.qwen3.memory.fold-count-step.master-fold-u32 : {({({master.index u32} :) ({({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) (prop.Truth |-)} *) =
+ ([pair.]
+  ([.pair] *.elim [x0 x1.])
+  ([.x1] *.elim [x2 x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x4] unsafe.discard unit.elim)
+  ([.x0] :.forget [x6.])
+  ([.x6 x2] *.intro [x7.])
+  ([.x7] stdlib.qwen3.memory.fold-count-step [x8.])
+  ([.x8 x5] *.intro [x9.])
+  [. x9]
+ ))
+
+# Checked U64-to-U32 conversion expressed as a 32-step fold.
+# Vocabulary sizes and cache positions can exceed the original 8-bit helper.
+(def program stdlib.qwen3.memory.fold-count-u32 : {(u64 val)} -> (u32 val) =
+ ([count.]
+  ([.] const.u64.0x00000000FFFFFFFF [x0.])
+  ([.count x0] stdlib.qwen3.memory.u64.less_equal [x1.])
+  ([.] unit.intro meta.master.predicate [x2.])
+  ([.x1 x2] smolcat.value.named_at [x3.])
+  ([.x3] stdlib.assert.assert_true [x4 x5.])
+  ([.x4] unit.elim)
+  ([.x5] unsafe.discard unit.elim)
+  ([.] const.u64.0x0000000080000000 [x6.])
+  ([.] const.u32.0x80000000 [x7.])
+  ([.] const.u32.0x00000000 [x8.])
+  ([.x7 x8] *.intro [x9.])
+  ([.x6 x9] *.intro [x10.])
+  ([.count x10] *.intro [x11.])
+  ([.] name.stdlib.qwen3.memory.fold-count-step.master-fold-u32 lift [x12.])
+  ([.] const.u32.0x00000020 [x13.])
+  ([.] unit.intro meta.master.end [x14.])
+  ([.x13 x14] smolcat.value.named_at [x15.])
+  ([.] core.truth [x16.])
+  ([.x15 x11 x12 x16] core.fold.bounded [x17 x18.])
+  ([.x18] unsafe.discard unit.elim)
+  ([.x17] *.elim [x19 x20.])
+  ([.x20] *.elim [x21 x22.])
+  ([.x22] *.elim [x23 x24.])
+  [. x24]
+ ))
+
+(def program stdlib.qwen3.memory.bf16.add : {(bf16 val) (bf16 val)} -> (bf16 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.left [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.] unit.intro meta.bf16numeric.right [rid.])
+  ([.b rid] smolcat.value.named_at [y.])
+  ([.x y e] stdlib.numeric.+ :.forget)))
+(def program stdlib.qwen3.memory.bf16.sub : {(bf16 val) (bf16 val)} -> (bf16 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.left [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.] unit.intro meta.bf16numeric.right [rid.])
+  ([.b rid] smolcat.value.named_at [y.])
+  ([.x y e] stdlib.numeric.- :.forget)))
+(def program stdlib.qwen3.memory.bf16.mul : {(bf16 val) (bf16 val)} -> (bf16 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.left [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.] unit.intro meta.bf16numeric.right [rid.])
+  ([.b rid] smolcat.value.named_at [y.])
+  ([.x y e] stdlib.numeric.* :.forget)))
+(def program stdlib.qwen3.memory.bf16.div : {(bf16 val) (bf16 val)} -> (bf16 val) =
+ ([a b.]
+  ([.] stdlib.numeric.numeric.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.left [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.] unit.intro meta.bf16numeric.right [rid.])
+  ([.b rid] smolcat.value.named_at [y.])
+  ([.x y e] stdlib.numeric./ :.forget)))
+(def program stdlib.qwen3.memory.bf16.neg : (bf16 val) -> (bf16 val) =
+ ([a.]
+  ([.] stdlib.numeric.signed.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.value [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.x e] stdlib.numeric.negate :.forget)))
+(def program stdlib.qwen3.memory.bf16.exp : (bf16 val) -> (bf16 val) =
+ ([a.]
+  ([.] stdlib.numeric.floating.bf16 [e.])
+  ([.] unit.intro meta.bf16numeric.value [id.])
+  ([.a id] smolcat.value.named_at [x.])
+  ([.x e] stdlib.numeric.exp :.forget)))
+(def program stdlib.qwen3.memory.u32.equal : {(u32 val) (u32 val)} -> (bool val) =
+ ([a b.]
+  ([.a b] stdlib.qwen3.memory.u32.less_equal [x0.])
+  ([.b a] stdlib.qwen3.memory.u32.less_equal [x1.])
+  ([.x0 x1] stdlib.boolean.and [x2.])
+  [. x2]
+ ))
+
+(def program stdlib.qwen3.memory.f32.greater : {(f32 val) (f32 val)} -> (bool val) =
+ ([a b.] ({[.b] [.a]} stdlib.qwen3.memory.f32.less)))
+
+(def program stdlib.qwen3.memory.free-bf16 : ((cap.own mem) val) -> 1 =
+ ([memory.]
+  ([.memory] stdlib.gpu.memory.mem_cast_own_bf16 *.elim [count rest.])
+  ([.rest] *.elim [view proofs.])
+  ([.proofs] *.elim [allocated readable.])
+  ([.readable] unsafe.discard unit.elim)
+  ([.view allocated] stdlib.gpu.memory.free)
+ ))
+(def program stdlib.qwen3.memory.alloc-u64 : (u64 val) -> ((cap.own mem) val) =
+ ([count.]
+  ({[.count] (const.u64.0x0000000000000008)} stdlib.qwen3.memory.u64.checked-mul [bytes.])
+  ({[.bytes] stdlib.gpu.memory.memoryelement.u64} stdlib.gpu.memory.allocate)
+ ))
+(def program stdlib.qwen3.memory.write-u64 : {((cap.own mem) val) (u64 val) (u64 val)} -> 1 =
+ ([memory index value.]
+  ([.memory] stdlib.qwen3.memory.own-count-u64 [x0.])
+  ([.] unit.intro meta.master.count [x1.])
+  ([.x0 x1] smolcat.value.named_at [x2.])
+  ([.memory x2] (meta.master.u64-write.0 {{_} (name.stdlib.gpu.memory.global_own_u64 lift)} evaluate {_}) [x3.])
+  ([.x3] *.elim [x4 x5.])
+  ([.x5] *.elim [x6 x7.])
+  ([.x6] unsafe.discard unit.elim)
+  ([.x7] unsafe.discard unit.elim)
+  ([.] unit.intro meta.master.index [x8.])
+  ([.index x8] smolcat.value.named_at [x9.])
+  ([.] unit.intro [x10.])
+  ([.x10] (meta.master.u64-write.1 {{_} (name.unsafe.assume lift)} evaluate {_}) [x11.])
+  ([.x9 x11] (meta.master.u64-write.2 {{_} (name.stdlib.gpu.memory.ix lift)} evaluate {_}) [x12.])
+  ([.] unit.intro [x13.])
+  ([.x13] (meta.master.u64-write.3 {{_} (name.unsafe.assume lift)} evaluate {_}) [x14.])
+  ([.x4 x12 value x14] (meta.master.u64-write.4 {{_} (name.stdlib.gpu.memory.global_write lift)} evaluate {_}) [x15.])
+  [. x15]
+ ))
+
+

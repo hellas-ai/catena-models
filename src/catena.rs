@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use catena_lang::stdlib;
+use catena_lang::{codegen::CodegenKind, stdlib};
 
 use crate::spec::{LayerType, ModelArchitecture, ModelConfig, weight_specs};
 
@@ -32,8 +32,18 @@ pub enum MatrixCoreMode {
     Blas,
 }
 
+/// Experimental Hex kernel implementation; the default compiler ignores this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum ExperimentalKernelKind {
+    Reference,
+    #[default]
+    Fused,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InferenceOptions {
+    pub codegen: CodegenKind,
+    pub experimental_kernels: ExperimentalKernelKind,
     pub precision: InferencePrecision,
     pub matrix_cores: MatrixCoreMode,
     pub fused_attention: bool,
@@ -42,10 +52,22 @@ pub struct InferenceOptions {
 impl InferenceOptions {
     pub const fn new(precision: InferencePrecision) -> Self {
         Self {
+            codegen: CodegenKind::Default,
+            experimental_kernels: ExperimentalKernelKind::Fused,
             precision,
             matrix_cores: MatrixCoreMode::Disabled,
             fused_attention: false,
         }
+    }
+
+    pub const fn with_codegen(mut self, codegen: CodegenKind) -> Self {
+        self.codegen = codegen;
+        self
+    }
+
+    pub const fn with_experimental_kernels(mut self, kernels: ExperimentalKernelKind) -> Self {
+        self.experimental_kernels = kernels;
+        self
     }
 
     pub const fn with_matrix_cores(mut self, matrix_cores: MatrixCoreMode) -> Self {
@@ -73,6 +95,17 @@ pub fn runtime_sources<'a>(
         .chain([helpers, model_source])
 }
 
+/// Select the matching language library and model helpers for a compiler backend.
+pub fn runtime_sources_for_options<'a>(model: &'a str, options: InferenceOptions) -> Vec<&'a str> {
+    match options.codegen {
+        CodegenKind::Default => runtime_sources(model, options.precision).collect(),
+        CodegenKind::Experimental => stdlib::experimental_core_sources()
+            .map(|s| -> &'a str { s })
+            .chain([model])
+            .collect(),
+    }
+}
+
 /// Compile Catena sources and load an executable artifact into a GPU context.
 pub(crate) fn load_runtime<'a>(
     sources: impl IntoIterator<Item = &'a str>,
@@ -89,6 +122,23 @@ pub(crate) fn load_runtime<'a>(
     let mut report = CompileReport::new(RawTheorySet::from_texts(sources)?);
     let module = compile(&mut report, CodegenKind::Default, dialect)?;
     let mut runtime = Runtime::new(dialect)?;
+    let artifact = runtime.load(module)?;
+    Ok((runtime, artifact))
+}
+
+pub(crate) fn load_runtime_with_codegen<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    dialect: catena_lang::runtime::GpuDialect,
+    codegen: CodegenKind,
+) -> Result<(
+    catena_lang::runtime::Runtime,
+    catena_lang::runtime::Artifact,
+)> {
+    if codegen == CodegenKind::Default {
+        return load_runtime(sources, dialect);
+    }
+    let module = crate::experimental::compile(sources, dialect)?;
+    let mut runtime = catena_lang::runtime::Runtime::new(dialect)?;
     let artifact = runtime.load(module)?;
     Ok((runtime, artifact))
 }
@@ -310,7 +360,7 @@ fn generated_entrypoint(config: &ModelConfig, precision: InferencePrecision) -> 
     Ok(source)
 }
 
-fn rope_frequency_program(config: &ModelConfig) -> String {
+pub(crate) fn rope_frequency_program(config: &ModelConfig) -> String {
     let half_dim = config.rope_dimension_count / 2;
     let mut source = String::new();
     writeln!(
@@ -626,6 +676,9 @@ pub fn generated_model_source_for_options(
     config: &ModelConfig,
     options: InferenceOptions,
 ) -> Result<String> {
+    if options.codegen == CodegenKind::Experimental {
+        return crate::experimental::source(config, options);
+    }
     let precision = options.precision;
     config.validate()?;
     ensure!(
@@ -704,6 +757,10 @@ pub(crate) fn generated_multimodal_source(
     ensure!(
         config.is_qwen35(),
         "image inputs require a Qwen3.5 dense or MoE model"
+    );
+    ensure!(
+        options.codegen == CodegenKind::Default,
+        "experimental codegen does not yet support image inputs"
     );
     let mut source = generated_model_source_for_options(config, options)?;
     source.push_str(&crate::vision::language::source(

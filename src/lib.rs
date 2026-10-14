@@ -1,5 +1,6 @@
 pub mod catena;
 pub mod checkpoint;
+mod experimental;
 pub mod flux;
 pub mod hfhub;
 pub mod model;

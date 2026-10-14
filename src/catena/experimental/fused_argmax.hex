@@ -1,0 +1,205 @@
+# Two-stage vocabulary argmax. Contiguous partitions preserve first-token ties.
+(def program stdlib.qwen3.fused.argmax.scan : {((cap.own mem) val) (u64 val) ({(u64 val) ({(u64 val) (f32 val)} *)} *)} -> ({(u64 val) (f32 val)} *) =
+ ([logits base pair.]
+  ([.pair] *.elim [i acc.])
+  ([.acc] *.elim [token maximum.])
+  ({[.base] [.i]} stdlib.qwen3.memory.u64.add [offset.])
+  ({[.logits] [.offset]} stdlib.qwen3.memory.own-read-bf16 [bf.])
+  ([.bf] bf16.to-f32 [v.])
+  ({[.v] [.maximum]} stdlib.qwen3.memory.f32.greater [larger.])
+  ({[.larger] [.offset] [.token]} stdlib.qwen3.memory.select-u64 [next-token.])
+  ({[.larger] [.v] [.maximum]} stdlib.qwen3.memory.select-f32 [next-max.])
+  ({[.next-token] [.next-max]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.scan.fold : {((cap.own mem) val) (u64 val) ({({master.index32 u32} :) ({({(u64 val) (f32 val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(u64 val) (f32 val)} *) (prop.Truth |-)} *) =
+ ([logits base pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.qwen3.memory.u32.to-u64 [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.logits] [.base] [.arguments]} stdlib.qwen3.fused.argmax.scan [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.reduce : {((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({(u64 val) (f32 val)} *)} *)} -> ({(u64 val) (f32 val)} *) =
+ ([tokens maxima pair.]
+  ([.pair] *.elim [i acc.])
+  ([.acc] *.elim [token maximum.])
+  ({[.tokens] [.i]} stdlib.qwen3.memory.own-read-u64 [candidate.])
+  ({[.i] (const.u64.0x0000000000000200)} stdlib.qwen3.memory.u64.add [mi.])
+  ({[.maxima] [.mi]} stdlib.qwen3.memory.own-read-f32 [v.])
+  ({[.v] [.maximum]} stdlib.qwen3.memory.f32.greater [larger.])
+  ({[.larger] [.candidate] [.token]} stdlib.qwen3.memory.select-u64 [next-token.])
+  ({[.larger] [.v] [.maximum]} stdlib.qwen3.memory.select-f32 [next-max.])
+  ({[.next-token] [.next-max]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.reduce.fold : {((cap.own mem) val) ((cap.own mem) val) ({({master.index32 u32} :) ({({(u64 val) (f32 val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(u64 val) (f32 val)} *) (prop.Truth |-)} *) =
+ ([tokens maxima pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.qwen3.memory.u32.to-u64 [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.tokens] [.maxima] [.arguments]} stdlib.qwen3.fused.argmax.reduce [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.partials : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> 1 =
+ ([logits tokens maxima vocabulary chunk index.]
+  ({[.index] [.chunk]} stdlib.qwen3.memory.u64.mul [base.])
+  ({[.base] [.vocabulary]} stdlib.qwen3.memory.u64.less [active.])
+  ({[.active] [.base] [.vocabulary]} stdlib.qwen3.memory.select-u64 [safe-base.])
+  ({[.vocabulary] [.safe-base]} stdlib.qwen3.memory.u64.sub [remaining.])
+  ({[.remaining] [.chunk]} stdlib.qwen3.memory.u64.less [tail.])
+  ({[.tail] [.remaining] [.chunk]} stdlib.qwen3.memory.select-u64 [count.])
+  ({[.logits] [.base]} partial.stdlib.qwen3.fused.argmax.scan.fold.2 [callback.])
+  ({([.count] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] ({(const.u64.0x0000000000000000) (const.u32.0xFF800000 u32.bitcast-f32)} *.intro) [.callback] core.truth} core.fold.bounded [best proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.best] *.elim [token maximum.])
+  ({[.tokens] [.index] [.token]} stdlib.qwen3.memory.write-u64)
+  (unit.elim)
+  ({[.index] (const.u64.0x0000000000000200)} stdlib.qwen3.memory.u64.add [mi.])
+  ({[.maxima] [.mi] [.maximum]} stdlib.qwen3.memory.write-f32)
+  (unit.elim)
+  (unit.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.yes : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([logits tokens maxima vocabulary chunk pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk] [.index]} stdlib.qwen3.fused.argmax.partials)
+
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.no : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([logits tokens maxima vocabulary chunk pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  [.unit]
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.launch : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([logits tokens maxima vocabulary chunk count pair.]
+  ([.pair] stdlib.qwen3.memory.thread-index [index.])
+  ({[.index] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+  ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk]} partial.stdlib.qwen3.fused.argmax.partials.yes.5 [yes.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk]} partial.stdlib.qwen3.fused.argmax.partials.no.5 [no.])
+  ({[.condition] [.index] [.yes] [.no] unit.intro} core.if)
+ ))
+(def program stdlib.qwen3.fused.argmax.final : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([tokens maxima out index.]
+  ((const.u64.0x0000000000000100) [count.])
+  ({[.tokens] [.maxima]} partial.stdlib.qwen3.fused.argmax.reduce.fold.2 [callback.])
+  ({([.count] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] ({(const.u64.0x0000000000000000) (const.u32.0xFF800000 u32.bitcast-f32)} *.intro) [.callback] core.truth} core.fold.bounded [best proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.best] *.elim [token maximum.])
+  ({[.out] (const.u64.0x0000000000000000) [.token]} stdlib.qwen3.memory.write-u64)
+  (unit.elim)
+  (unit.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.final.yes : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([tokens maxima out pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.tokens] [.maxima] [.out] [.index]} stdlib.qwen3.fused.argmax.final)
+
+ ))
+(def program stdlib.qwen3.fused.argmax.final.no : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([tokens maxima out pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  [.unit]
+ ))
+(def program stdlib.qwen3.fused.argmax.final.launch : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([tokens maxima out count pair.]
+  ([.pair] stdlib.qwen3.memory.thread-index [index.])
+  ({[.index] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+  ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.tokens] [.maxima] [.out]} partial.stdlib.qwen3.fused.argmax.final.yes.3 [yes.])
+  ({[.tokens] [.maxima] [.out]} partial.stdlib.qwen3.fused.argmax.final.no.3 [no.])
+  ({[.condition] [.index] [.yes] [.no] unit.intro} core.if)
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.host : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([logits tokens maxima vocabulary chunk grid pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk] (const.u64.0x0000000000000100)} partial.stdlib.qwen3.fused.argmax.partials.launch.6 [kernel.])
+  ({[.grid] [.kernel]} unsafe.launch unit.elim)
+  [.acc]
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.host.fold : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([logits tokens maxima vocabulary chunk grid pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk] [.grid] [.arguments]} stdlib.qwen3.fused.argmax.partials.host [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.partials.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([logits tokens maxima vocabulary chunk.]
+  ({(const.u64.0x0000000000000001)} stdlib.qwen3.memory.grid [grid.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk] [.grid]} partial.stdlib.qwen3.fused.argmax.partials.host.fold.6 [callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] [.maxima] [.callback] core.truth} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+(def program stdlib.qwen3.fused.argmax.final.host : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([tokens maxima out grid pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.tokens] [.maxima] [.out] (const.u64.0x0000000000000001)} partial.stdlib.qwen3.fused.argmax.final.launch.4 [kernel.])
+  ({[.grid] [.kernel]} unsafe.launch unit.elim)
+  [.acc]
+ ))
+(def program stdlib.qwen3.fused.argmax.final.host.fold : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([tokens maxima out grid pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.tokens] [.maxima] [.out] [.grid] [.arguments]} stdlib.qwen3.fused.argmax.final.host [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen3.fused.argmax.final.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([tokens maxima out.]
+  ({(const.u64.0x0000000000000001)} stdlib.qwen3.memory.grid [grid.])
+  ({[.tokens] [.maxima] [.out] [.grid]} partial.stdlib.qwen3.fused.argmax.final.host.fold.4 [callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] [.out] [.callback] core.truth} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+(def program qwen3.fused.argmax-with-workspace : {((cap.own mem) val) ((cap.own mem) val)} -> ({((cap.own mem) val) ((cap.own mem) val)} *) =
+ ([workspace logits.]
+  ([.logits] stdlib.qwen3.memory.own-count-bf16 [vocabulary.])
+  ({[.vocabulary] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [chunk.])
+  ([.workspace] [tokens.])
+  ([.workspace] [maxima.])
+  ({(const.u64.0x0000000000000001)} stdlib.qwen3.memory.alloc-u64 [out.])
+  ({[.logits] [.tokens] [.maxima] [.vocabulary] [.chunk]} stdlib.qwen3.fused.argmax.partials.into [maxima-ready.])
+  ({[.tokens] [.maxima-ready] [.out]} stdlib.qwen3.fused.argmax.final.into [token.])
+  ([.token] meta.master.complete-own [result phase.])
+  ({[.workspace] [.phase]} meta.master.after-own [workspace-ready.])
+  ({[.workspace-ready] [.result]} *.intro)
+ ))
+(def program qwen3.fused.argmax : {((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([logits.]
+  ({(const.u64.0x0000000000000200)} stdlib.qwen3.memory.alloc-u64 [workspace.])
+  ({[.workspace] [.logits]} qwen3.fused.argmax-with-workspace [result.])
+  ([.result] *.elim [workspace-ready token.])
+  ({[.workspace-ready] [.token]} qwen3.free-f32-before [complete.])
+  [.complete]
+ ))

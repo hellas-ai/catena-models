@@ -6,9 +6,11 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
+use catena_lang::codegen::CodegenKind;
 use catena_qwen3::{
     catena::{
-        InferenceOptions, InferencePrecision, MatrixCoreMode, generated_model_source_for_options,
+        ExperimentalKernelKind, InferenceOptions, InferencePrecision, MatrixCoreMode,
+        generated_model_source_for_options,
     },
     checkpoint::read_gguf_model_config,
     hfhub::{download_gguf, download_mmproj},
@@ -16,11 +18,33 @@ use catena_qwen3::{
     tokenizer::QwenTokenizer,
     vision::{PreparedMultimodalPrompt, VisionModel},
 };
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum CodegenArg {
+    Default,
+    Experimental,
+}
+impl From<CodegenArg> for CodegenKind {
+    fn from(arg: CodegenArg) -> Self {
+        match arg {
+            CodegenArg::Default => Self::Default,
+            CodegenArg::Experimental => Self::Experimental,
+        }
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
 struct Args {
+    /// Compiler backend (experimental supports BF16 dense Qwen3 and dense/MoE Qwen3.5 on HIP gfx11).
+    #[arg(long, value_enum, default_value_t = CodegenArg::Default)]
+    codegen: CodegenArg,
+
+    /// Experimental Hex kernels (reference retains the original scalar implementation).
+    #[arg(long, value_enum, default_value_t = ExperimentalKernelKind::Fused)]
+    kernels: ExperimentalKernelKind,
+
     /// Text prefix, or user-message text when images are supplied.
     #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image"])]
     prompt: Option<String>,
@@ -40,6 +64,10 @@ struct Args {
     /// Token-generation count used by --bench; zero skips this test.
     #[arg(long, default_value_t = 128)]
     tg: usize,
+
+    /// Prompt context used for warmed decode benchmarking.
+    #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
+    tg_context: usize,
 
     /// Number of measured runs per enabled benchmark test.
     #[arg(long, default_value_t = 1, value_parser = parse_positive_usize)]
@@ -101,12 +129,7 @@ struct Args {
     fused_attention: bool,
 }
 
-fn main() -> Result<()> {
-    let args = Args::parse();
-    ensure!(
-        args.image.is_empty() || args.mmproj.is_some() || args.model.is_some(),
-        "local image runs require --mmproj PATH"
-    );
+fn inference_options(args: &Args, matches: &clap::ArgMatches) -> Result<InferenceOptions> {
     let precision = if args.bf16 {
         InferencePrecision::Bf16
     } else {
@@ -122,6 +145,53 @@ fn main() -> Result<()> {
     let options = InferenceOptions::new(precision)
         .with_matrix_cores(matrix_cores)
         .with_fused_attention(args.fused_attention);
+    let mut options = options
+        .with_codegen(args.codegen.into())
+        .with_experimental_kernels(args.kernels);
+    ensure!(
+        args.codegen == CodegenArg::Experimental
+            || matches.value_source("kernels") != Some(clap::parser::ValueSource::CommandLine),
+        "--kernels requires --codegen experimental"
+    );
+    if args.codegen == CodegenArg::Experimental {
+        ensure!(
+            args.bf16,
+            "experimental Qwen3-family inference requires BF16 (--bf16)"
+        );
+        ensure!(
+            args.image.is_empty(),
+            "experimental codegen does not yet support image inputs"
+        );
+        ensure!(!args.blas, "experimental codegen does not support --blas");
+        for (name, enabled) in [
+            ("matrix_cores", args.matrix_cores),
+            ("fused_attention", args.fused_attention),
+        ] {
+            ensure!(
+                !(enabled
+                    && matches.value_source(name) == Some(clap::parser::ValueSource::CommandLine)),
+                "experimental codegen does not support --{}; omit it or set it to false",
+                name.replace('_', "-")
+            );
+        }
+        options.matrix_cores = MatrixCoreMode::Disabled;
+        options.fused_attention = false;
+        ensure!(
+            catena_qwen3::model::configured_gpu_dialect()? == catena_lang::runtime::GpuDialect::Hip,
+            "experimental BF16 Qwen3 requires HIP gfx11; CUDA is not supported"
+        );
+    }
+    Ok(options)
+}
+
+fn main() -> Result<()> {
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches)?;
+    let options = inference_options(&args, &matches)?;
+    ensure!(
+        args.image.is_empty() || args.mmproj.is_some() || args.model.is_some(),
+        "local image runs require --mmproj PATH"
+    );
     let hub_gguf = args.model.as_deref().map(download_gguf).transpose()?;
     let selected_gguf = match (&args.gguf, &hub_gguf) {
         (Some(path), None) => path.clone(),
@@ -155,7 +225,7 @@ fn main() -> Result<()> {
             "loaded Catena runtime and weights in {:.2?}",
             load_started.elapsed()
         );
-        return run_benchmark(&model, args.pp, args.tg, args.bench_runs);
+        return run_benchmark(&model, args.pp, args.tg, args.tg_context, args.bench_runs);
     }
 
     let prompt = args.prompt.as_deref().unwrap_or_default();
@@ -368,7 +438,13 @@ struct BenchRow {
     stddev_tokens_per_second: Option<f64>,
 }
 
-fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()> {
+fn run_benchmark(
+    model: &Model,
+    pp: usize,
+    tg: usize,
+    tg_context: usize,
+    runs: usize,
+) -> Result<()> {
     let mut rows = Vec::with_capacity(2);
     if pp > 0 {
         let tokens = synthetic_tokens(pp, model.config().vocabulary_size);
@@ -387,20 +463,27 @@ fn run_benchmark(model: &Model, pp: usize, tg: usize, runs: usize) -> Result<()>
         });
     }
     if tg > 0 {
-        let tokens = synthetic_tokens(tg, model.config().vocabulary_size);
+        let total = tg_context
+            .checked_add(tg)
+            .and_then(|n| n.checked_add(2))
+            .ok_or_else(|| anyhow::anyhow!("benchmark capacity overflow"))?;
+        let tokens = synthetic_tokens(total, model.config().vocabulary_size);
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
-            let mut session = model.session(tg)?;
+            let mut session = model.session(total)?;
+            session.prefill_next_token(&tokens[..tg_context])?;
+            for &token in &tokens[tg_context..tg_context + 2] {
+                session.decode_next_token(token)?;
+            }
             let started = Instant::now();
-            session.prefill_next_token(&tokens[..1])?;
-            for &token in &tokens[1..] {
+            for &token in &tokens[tg_context + 2..] {
                 session.decode_next_token(token)?;
             }
             samples.push((tg, started.elapsed()));
         }
         let (mean, stddev) = tokens_per_second_stats(&samples);
         rows.push(BenchRow {
-            test: format!("tg{tg}"),
+            test: format!("tg{tg}/ctx{tg_context}"),
             mean_tokens_per_second: mean,
             stddev_tokens_per_second: stddev,
         });
@@ -488,7 +571,71 @@ fn format_parameter_count(parameters: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use catena_lang::codegen::CodegenKind;
+
+    fn options_from_cli(extra: &[&str]) -> Result<InferenceOptions> {
+        let mut argv = vec!["catena-qwen3", "--prompt", "Gravity is"];
+        argv.extend_from_slice(extra);
+        let matches = Args::command().try_get_matches_from(argv)?;
+        inference_options(&Args::from_arg_matches(&matches)?, &matches)
+    }
+
+    #[test]
+    fn compiler_selection_preserves_default_and_disables_legacy_acceleration() -> Result<()> {
+        let default = options_from_cli(&[])?;
+        assert_eq!(default.codegen, CodegenKind::Default);
+        assert_eq!(default.matrix_cores, MatrixCoreMode::Wmma);
+        assert!(default.fused_attention);
+        let experimental = options_from_cli(&["--codegen", "experimental"])?;
+        assert_eq!(experimental.codegen, CodegenKind::Experimental);
+        assert_eq!(experimental.precision, InferencePrecision::Bf16);
+        assert_eq!(experimental.matrix_cores, MatrixCoreMode::Disabled);
+        assert!(!experimental.fused_attention);
+        assert!(options_from_cli(&["--codegen", "unknown"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_kernel_selection_requires_experimental_codegen() -> Result<()> {
+        assert_eq!(
+            options_from_cli(&["--codegen", "experimental"])?.experimental_kernels,
+            ExperimentalKernelKind::Fused
+        );
+        assert_eq!(
+            options_from_cli(&["--codegen", "experimental", "--kernels", "reference"])?
+                .experimental_kernels,
+            ExperimentalKernelKind::Reference
+        );
+        assert!(options_from_cli(&["--kernels", "fused"]).is_err());
+        assert!(options_from_cli(&["--codegen", "experimental", "--kernels", "unknown"]).is_err());
+        assert!(Args::try_parse_from(["catena-qwen3", "--bench", "--tg-context", "0"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_rejects_explicit_legacy_options_and_f32() {
+        for option in [
+            "--matrix-cores",
+            "--fused-attention",
+            "--blas",
+            "--bf16=false",
+        ] {
+            assert!(
+                options_from_cli(&["--codegen", "experimental", option]).is_err(),
+                "{option}"
+            );
+        }
+        assert!(options_from_cli(&["--codegen", "experimental", "--image", "image.png"]).is_err());
+        assert!(
+            options_from_cli(&[
+                "--codegen",
+                "experimental",
+                "--matrix-cores=false",
+                "--fused-attention=false"
+            ])
+            .is_ok()
+        );
+    }
 
     #[test]
     fn benchmark_cli_defaults_do_not_require_a_prompt() {
