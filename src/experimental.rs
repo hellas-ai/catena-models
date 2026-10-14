@@ -163,6 +163,24 @@ pub(crate) fn workspace_bytes(config: &ModelConfig, options: InferenceOptions) -
     }
 }
 
+/// Independently owned activation buffers reused across every MoE layer/token.
+pub(crate) fn activation_scratch_sizes(c: &ModelConfig, options: InferenceOptions) -> Vec<usize> {
+    if options.codegen != CodegenKind::Experimental
+        || c.architecture != ModelArchitecture::Qwen35Moe
+    {
+        return vec![];
+    }
+    vec![
+        c.linear_qkv_size().unwrap().max(c.query_size() * 2),
+        c.linear_inner_size.unwrap().max(c.key_value_size()),
+        c.linear_time_step_rank.unwrap().max(c.key_value_size()),
+        c.linear_time_step_rank.unwrap(),
+        c.linear_qkv_size().unwrap().max(c.query_size()),
+        c.linear_key_size().unwrap(),
+        c.linear_key_size().unwrap(),
+    ]
+}
+
 fn c(n: usize) -> String {
     format!("(const.u64.0x{n:016X})")
 }

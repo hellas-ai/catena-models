@@ -1145,34 +1145,51 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
         &c,
         InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental),
     )? / 4;
+    let activation_sizes = activation_scratch_sizes(
+        &c,
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental),
+    );
+    let activations = |runtime: &Runtime| -> Result<Vec<MemOwn>> {
+        Ok(activation_sizes
+            .iter()
+            .map(|&n| runtime.mem_u16(&vec![0; n]))
+            .collect::<Result<_, _>>()?)
+    };
     let invoke = |runtime: &Runtime,
                   artifact: &Artifact,
                   weights: &[MemOwn],
                   tokens: &[u64],
                   position: usize,
                   cache: MemOwn,
-                  scratch: Option<MemOwn>|
-     -> Result<(MemOwn, Option<MemOwn>, Vec<f32>)> {
+                  scratch: Option<MemOwn>,
+                  buffers: Vec<MemOwn>|
+     -> Result<(MemOwn, Option<MemOwn>, Vec<MemOwn>, Vec<f32>)> {
         let token_mem = runtime.mem_u64(tokens)?;
         let mut args = vec![token_mem.as_ref().into(), cache.into()];
         if let Some(scratch) = scratch {
             args.push(scratch.into());
         }
+        args.extend(buffers.into_iter().map(Value::MemOwn));
         args.extend([(capacity as u64).into(), (position as u64).into()]);
         args.extend(weights.iter().map(|w| w.as_ref().into()));
         let mut outputs = memories(artifact, "qwen3", args)?;
-        let workspace = if outputs.len() == 4 {
+        let workspace = if outputs.len() == 11 {
             Some(outputs.remove(1))
         } else {
             None
         };
+        let buffers = if workspace.is_some() {
+            outputs.drain(1..8).collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
         let cache = outputs.remove(0);
         let logits = values(&outputs.remove(0))?;
-        Ok((cache, workspace, logits))
+        Ok((cache, workspace, buffers, logits))
     };
     for prompt in [vec![1u64, 2], vec![1, 2, 3, 4, 5, 6, 7]] {
         let cache = || rt.mem_u16(&vec![0; c.cache_elements(capacity).unwrap()]);
-        let (mut ec, mut scratch, mut actual) = invoke(
+        let (mut ec, mut scratch, mut buffers, mut actual) = invoke(
             &rt,
             &experimental,
             &ew,
@@ -1180,8 +1197,9 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             0,
             cache()?,
             Some(rt.mem_f32(&vec![0.0; workspace_len])?),
+            activations(&rt)?,
         )?;
-        let (mut rc, _, mut expected) = invoke(
+        let (mut rc, _, _, mut expected) = invoke(
             &reference_rt,
             &reference,
             &rw,
@@ -1189,11 +1207,27 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             0,
             reference_rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?,
             None,
+            vec![],
         )?;
         let snapshot = ec.try_to_u16_vec()?;
-        assert_eq!(snapshot, rc.try_to_u16_vec()?, "hybrid cache after prefill");
+        let reference_cache = rc.try_to_u16_vec()?;
+        assert_eq!(
+            snapshot
+                .iter()
+                .zip(&reference_cache)
+                .position(|(a, b)| a != b),
+            None,
+            "hybrid prefill cache mismatch: {:?}",
+            snapshot
+                .iter()
+                .zip(&reference_cache)
+                .enumerate()
+                .filter(|(_, (a, b))| a != b)
+                .take(12)
+                .collect::<Vec<_>>()
+        );
         // A new session must reproduce prefill after another session has run.
-        let (independent, _, repeated) = invoke(
+        let (independent, _, _, repeated) = invoke(
             &rt,
             &experimental,
             &ew,
@@ -1201,6 +1235,7 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             0,
             cache()?,
             Some(rt.mem_f32(&vec![0.0; workspace_len])?),
+            activations(&rt)?,
         )?;
         assert_eq!(independent.try_to_u16_vec()?, snapshot);
         assert_eq!(repeated, actual);
@@ -1215,10 +1250,26 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             };
             let token = argmax(&expected);
             assert_eq!(argmax(&actual), token);
-            (ec, scratch, actual) =
-                invoke(&rt, &experimental, &ew, &[token], position, ec, scratch)?;
-            (rc, _, expected) =
-                invoke(&reference_rt, &reference, &rw, &[token], position, rc, None)?;
+            (ec, scratch, buffers, actual) = invoke(
+                &rt,
+                &experimental,
+                &ew,
+                &[token],
+                position,
+                ec,
+                scratch,
+                buffers,
+            )?;
+            (rc, _, _, expected) = invoke(
+                &reference_rt,
+                &reference,
+                &rw,
+                &[token],
+                position,
+                rc,
+                None,
+                vec![],
+            )?;
             assert_eq!(
                 ec.try_to_u16_vec()?,
                 rc.try_to_u16_vec()?,
@@ -1269,6 +1320,7 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
         let mut ec = rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?;
         let mut rc = reference_rt.mem_u16(&vec![0; c.cache_elements(capacity)?])?;
         let mut scratch = rt.mem_f32(&vec![0.0; workspace_len])?;
+        let mut buffers = activations(&rt)?;
         for position in 0..capacity {
             let coordinates = match position {
                 2..=5 => [
@@ -1284,7 +1336,8 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
                              weights: &[MemOwn],
                              image: &MemOwn,
                              cache: MemOwn,
-                             workspace: Option<MemOwn>|
+                             workspace: Option<MemOwn>,
+                             buffers: Vec<MemOwn>|
              -> Result<Vec<MemOwn>> {
                 let hidden = if (2..=5).contains(&position) {
                     last(memories(
@@ -1306,6 +1359,7 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
                 if let Some(workspace) = workspace {
                     inputs.push(workspace.into());
                 }
+                inputs.extend(buffers.into_iter().map(Value::MemOwn));
                 inputs.extend([(capacity as u64).into(), (position as u64).into()]);
                 if experimental {
                     inputs.push((if position < 8 { 8u64 } else { 1u64 }).into());
@@ -1313,11 +1367,20 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
                 inputs.extend(weights.iter().map(|w| w.as_ref().into()));
                 memories(artifact, "qwen3.multimodal", inputs)
             };
-            let mut actual = invoke_mm(&rt, &experimental, &ew, &image, ec, Some(scratch))?;
-            let mut expected =
-                invoke_mm(&reference_rt, &reference, &rw, &reference_image, rc, None)?;
+            let mut actual =
+                invoke_mm(&rt, &experimental, &ew, &image, ec, Some(scratch), buffers)?;
+            let mut expected = invoke_mm(
+                &reference_rt,
+                &reference,
+                &rw,
+                &reference_image,
+                rc,
+                None,
+                vec![],
+            )?;
             ec = actual.remove(0);
             scratch = actual.remove(0);
+            buffers = actual.drain(..7).collect();
             rc = expected.remove(0);
             assert_eq!(
                 ec.try_to_u16_vec()?,
@@ -1460,5 +1523,220 @@ fn experimental_qwen35_online_and_cooperative_norm_on_gpu() -> Result<()> {
     )?;
     let coop = values(&out.pop().unwrap())?;
     assert_eq!(coop, values(&out.pop().unwrap())?);
+    Ok(())
+}
+
+#[test]
+fn experimental_qwen35_preparation_kernels_on_gpu() -> Result<()> {
+    if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
+        return Ok(());
+    }
+    let c = tiny_moe_config();
+    let options =
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+    let source = source(&c, options)?;
+    let module = compile(
+        crate::catena::runtime_sources_for_options(&source, options),
+        GpuDialect::Hip,
+    )?;
+    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let artifact = rt.load(module)?;
+    let input = (0..c.hidden_size)
+        .map(|i| rounded((i as f32 - 13.0) / 31.0))
+        .collect::<Vec<_>>();
+    let widths = [
+        c.linear_qkv_size().unwrap(),
+        c.linear_inner_size.unwrap(),
+        c.linear_time_step_rank.unwrap(),
+        c.linear_time_step_rank.unwrap(),
+    ];
+    let weights = widths
+        .iter()
+        .enumerate()
+        .map(|(wi, &n)| {
+            upload(
+                &rt,
+                &(0..n * c.hidden_size)
+                    .map(|i| rounded(((i * 7 + wi * 11) % 31) as f32 / 64.0 - 0.23))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut inputs = vec![upload(&rt, &input)?.into()];
+    inputs.extend(weights.iter().map(|w| w.as_ref().into()));
+    let grouped = memories(&artifact, "qwen35.linear-projections", inputs)?;
+    for i in 0..4 {
+        let old = last(memories(
+            &artifact,
+            "qwen3.fused.project",
+            vec![
+                upload(&rt, &input)?.into(),
+                weights[i].as_ref().into(),
+                (c.hidden_size as u64).into(),
+                (widths[i] as u64).into(),
+            ],
+        )?);
+        assert_eq!(
+            grouped[i].try_to_u16_vec()?,
+            old.try_to_u16_vec()?,
+            "group projection {i}"
+        );
+    }
+    let qkv = (0..widths[0])
+        .map(|i| rounded(((i * 13) % 43) as f32 / 37.0 - 0.5))
+        .collect::<Vec<_>>();
+    let conv_weights = rt.mem_f32(
+        &(0..widths[0] * 4)
+            .map(|i| (i % 7) as f32 / 13.0 - 0.2)
+            .collect::<Vec<_>>(),
+    )?;
+    let capacity = 4;
+    let cache_size = c.cache_elements(capacity)?;
+    for position in [0u64, 1, 3, 7] {
+        let history = (0..cache_size)
+            .map(|i| rounded(((i * 11) % 41) as f32 / 33.0 - 0.4))
+            .collect::<Vec<_>>();
+        let old = last(memories(
+            &artifact,
+            "qwen35.conv",
+            vec![
+                upload(&rt, &qkv)?.into(),
+                upload(&rt, &history)?.into(),
+                conv_weights.as_ref().into(),
+                0u64.into(),
+                position.into(),
+            ],
+        )?);
+        let q = last(memories(
+            &artifact,
+            "qwen35.coop-l2",
+            vec![
+                upload(&rt, &values(&old)?)?.into(),
+                0u64.into(),
+                (c.linear_state_size.unwrap() as u64).into(),
+            ],
+        )?);
+        let k = last(memories(
+            &artifact,
+            "qwen35.coop-l2",
+            vec![
+                upload(&rt, &values(&old)?)?.into(),
+                (c.linear_key_size().unwrap() as u64).into(),
+                (c.linear_state_size.unwrap() as u64).into(),
+            ],
+        )?);
+        let prepared = memories(
+            &artifact,
+            "qwen35.linear-prepare",
+            vec![
+                upload(&rt, &qkv)?.into(),
+                upload(&rt, &history)?.into(),
+                conv_weights.as_ref().into(),
+                0u64.into(),
+                position.into(),
+            ],
+        )?;
+        assert_eq!(
+            prepared[0].try_to_u16_vec()?,
+            old.try_to_u16_vec()?,
+            "prepared convolution {position}"
+        );
+        assert_eq!(
+            prepared[1].try_to_u16_vec()?,
+            q.try_to_u16_vec()?,
+            "prepared query {position}"
+        );
+        assert_eq!(
+            prepared[2].try_to_u16_vec()?,
+            k.try_to_u16_vec()?,
+            "prepared key {position}"
+        );
+    }
+    let qg = (0..c.query_size() * 2)
+        .map(|i| rounded(((i * 17) % 53) as f32 / 23.0 - 0.7))
+        .collect::<Vec<_>>();
+    let key = (0..c.key_value_size())
+        .map(|i| rounded(((i * 19) % 37) as f32 / 21.0 - 0.2))
+        .collect::<Vec<_>>();
+    let value = (0..c.key_value_size())
+        .map(|i| rounded(i as f32 / 17.0))
+        .collect::<Vec<_>>();
+    let norm = rt.mem_f32(
+        &(0..c.head_dim)
+            .map(|i| 0.7 + i as f32 / 37.0)
+            .collect::<Vec<_>>(),
+    )?;
+    let rope = (0..c.rope_dimension_count)
+        .map(|i| {
+            if i < c.rope_dimension_count / 2 {
+                (i as f32 / 19.0).cos()
+            } else {
+                ((i - c.rope_dimension_count / 2) as f32 / 19.0).sin()
+            }
+        })
+        .collect::<Vec<_>>();
+    let query = last(memories(
+        &artifact,
+        "qwen35.query",
+        vec![upload(&rt, &qg)?.into()],
+    )?);
+    let old_norm = |xs: &[f32], rows: usize| -> Result<MemOwn> {
+        Ok(last(memories(
+            &artifact,
+            "qwen35.normalize",
+            vec![
+                upload(&rt, xs)?.into(),
+                norm.as_ref().into(),
+                (c.head_dim as u64).into(),
+                (c.head_dim as f32).into(),
+                (rows as u64).into(),
+                (c.head_dim.next_power_of_two().trailing_zeros() as u64).into(),
+                (c.head_dim.next_power_of_two() as u64).into(),
+            ],
+        )?))
+    };
+    let q = old_norm(&values(&query)?, c.num_attention_heads)?;
+    let k = old_norm(&key, c.num_key_value_heads)?;
+    let qrot = last(memories(
+        &artifact,
+        "qwen3.rotate",
+        vec![q.into(), rt.mem_f32(&rope)?.into()],
+    )?);
+    let krot = last(memories(
+        &artifact,
+        "qwen3.rotate",
+        vec![k.into(), rt.mem_f32(&rope)?.into()],
+    )?);
+    let prepared = memories(
+        &artifact,
+        "qwen35.full-prepare",
+        vec![
+            upload(&rt, &qg)?.into(),
+            upload(&rt, &key)?.into(),
+            upload(&rt, &value)?.into(),
+            rt.mem_f32(&rope)?.into(),
+            rt.mem_u16(&vec![0; cache_size])?.into(),
+            norm.as_ref().into(),
+            norm.as_ref().into(),
+            0u64.into(),
+            (c.key_value_size() as u64).into(),
+        ],
+    )?;
+    assert_eq!(
+        prepared[0].try_to_u16_vec()?,
+        qrot.try_to_u16_vec()?,
+        "prepared full query"
+    );
+    let cache = prepared[1].try_to_u16_vec()?;
+    assert_eq!(
+        &cache[..c.key_value_size()],
+        &krot.try_to_u16_vec()?,
+        "prepared full key"
+    );
+    assert_eq!(
+        &cache[c.key_value_size()..2 * c.key_value_size()],
+        &value.iter().map(|&v| bf16(v)).collect::<Vec<_>>(),
+        "prepared full value"
+    );
     Ok(())
 }

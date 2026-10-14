@@ -28,6 +28,7 @@ pub struct Model {
     dialect: GpuDialect,
     multimodal: bool,
     experimental_workspace_bytes: usize,
+    activation_scratch_sizes: Vec<usize>,
 }
 
 impl Model {
@@ -103,6 +104,8 @@ impl Model {
             crate::experimental::validate(&config, options, Some(dialect))?;
         }
         let experimental_workspace_bytes = crate::experimental::workspace_bytes(&config, options)?;
+        let activation_scratch_sizes =
+            crate::experimental::activation_scratch_sizes(&config, options);
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
@@ -168,6 +171,7 @@ impl Model {
             dialect,
             multimodal,
             experimental_workspace_bytes,
+            activation_scratch_sizes,
         })
     }
 
@@ -220,6 +224,11 @@ impl Model {
                         .mem_f32(&vec![0.0; self.experimental_workspace_bytes / 4])?,
                 )
             },
+            activations: self
+                .activation_scratch_sizes
+                .iter()
+                .map(|&n| self.runtime.mem_u16(&vec![0; n]))
+                .collect::<Result<_, _>>()?,
             position: 0,
             capacity,
             next_rope_position: None,
@@ -261,7 +270,8 @@ impl Model {
         capacity: usize,
         cache: MemOwn,
         workspace: Option<MemOwn>,
-    ) -> Result<(MemOwn, Option<MemOwn>, MemOwn, u64)> {
+        activations: Vec<MemOwn>,
+    ) -> Result<(MemOwn, Option<MemOwn>, Vec<MemOwn>, MemOwn, u64)> {
         self.ensure_execution_supported()?;
         ensure!(!tokens.is_empty(), "the token prefix must not be empty");
         ensure!(
@@ -281,12 +291,18 @@ impl Model {
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
         let has_workspace = workspace.is_some();
-        let model_input_count = 4 + usize::from(has_workspace) + self.weights.len();
+        ensure!(
+            activations.len() == self.activation_scratch_sizes.len(),
+            "session activation scratch unavailable"
+        );
+        let model_input_count =
+            4 + usize::from(has_workspace) + activations.len() + self.weights.len();
         let mut inputs = Vec::with_capacity(model_input_count);
         inputs.extend([token_buffer.as_ref().into(), cache.into()]);
         if let Some(workspace) = workspace {
             inputs.push(workspace.into());
         }
+        inputs.extend(activations.into_iter().map(Value::MemOwn));
         inputs.extend([(capacity as u64).into(), (start as u64).into()]);
         for weight in &self.weights {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
@@ -298,7 +314,7 @@ impl Model {
         let mut outputs = self.artifact.exec_values("qwen3", inputs)?;
         let workspace = if has_workspace {
             ensure!(
-                outputs.len() == 4,
+                outputs.len() == 4 + self.activation_scratch_sizes.len(),
                 "internal experimental output ABI mismatch"
             );
             let Value::MemOwn(workspace) = outputs.remove(1) else {
@@ -308,8 +324,15 @@ impl Model {
         } else {
             None
         };
+        let activations = outputs
+            .drain(1..1 + self.activation_scratch_sizes.len())
+            .map(|value| match value {
+                Value::MemOwn(m) => Ok(m),
+                _ => anyhow::bail!("expected activation scratch memory"),
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
-        Ok((cache, workspace, logits, token))
+        Ok((cache, workspace, activations, logits, token))
     }
 
     fn cached_result(
@@ -371,14 +394,16 @@ impl Model {
         capacity: usize,
         cache: MemOwn,
         workspace: Option<MemOwn>,
+        activations: Vec<MemOwn>,
         sequence: usize,
-    ) -> Result<(MemOwn, Option<MemOwn>, MemOwn, u64)> {
+    ) -> Result<(MemOwn, Option<MemOwn>, Vec<MemOwn>, MemOwn, u64)> {
         let positions = self.runtime.mem_u64(&positions)?;
         let mut inputs = vec![hidden.into(), positions.as_ref().into(), cache.into()];
         let has_workspace = workspace.is_some();
         if let Some(workspace) = workspace {
             inputs.push(workspace.into());
         }
+        inputs.extend(activations.into_iter().map(Value::MemOwn));
         inputs.extend([(capacity as u64).into(), (start as u64).into()]);
         if has_workspace {
             inputs.push((sequence as u64).into());
@@ -388,7 +413,10 @@ impl Model {
         }
         let mut outputs = self.artifact.exec_values("qwen3.multimodal", inputs)?;
         let workspace = if has_workspace {
-            ensure!(outputs.len() == 4, "experimental multimodal ABI mismatch");
+            ensure!(
+                outputs.len() == 4 + self.activation_scratch_sizes.len(),
+                "experimental multimodal ABI mismatch"
+            );
             match outputs.remove(1) {
                 Value::MemOwn(m) => Some(m),
                 _ => anyhow::bail!("expected multimodal workspace memory"),
@@ -396,8 +424,15 @@ impl Model {
         } else {
             None
         };
+        let activations = outputs
+            .drain(1..1 + self.activation_scratch_sizes.len())
+            .map(|value| match value {
+                Value::MemOwn(m) => Ok(m),
+                _ => anyhow::bail!("expected activation scratch memory"),
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
-        Ok((cache, workspace, logits, token))
+        Ok((cache, workspace, activations, logits, token))
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
@@ -440,6 +475,7 @@ pub struct Session<'model> {
     model: &'model Model,
     cache: Option<MemOwn>,
     workspace: Option<MemOwn>,
+    activations: Vec<MemOwn>,
     position: usize,
     capacity: usize,
     next_rope_position: Option<u64>,
@@ -614,17 +650,20 @@ impl Session<'_> {
         } else {
             None
         };
-        let (cache, workspace, logits, token) = self.model.cached_embedding_outputs(
+        let activations = std::mem::take(&mut self.activations);
+        let (cache, workspace, activations, logits, token) = self.model.cached_embedding_outputs(
             hidden,
             coordinates,
             self.position,
             self.capacity,
             cache,
             workspace,
+            activations,
             sequence,
         )?;
         self.cache = Some(cache);
         self.workspace = workspace;
+        self.activations = activations;
         self.position += 1;
         Ok((logits, token))
     }
@@ -667,11 +706,18 @@ impl Session<'_> {
                     .context("the session workspace is unavailable after a failed execution")?,
             )
         };
-        let (cache, workspace, logits, next_token) =
-            self.model
-                .cached_outputs(tokens, self.position, self.capacity, cache, workspace)?;
+        let activations = std::mem::take(&mut self.activations);
+        let (cache, workspace, activations, logits, next_token) = self.model.cached_outputs(
+            tokens,
+            self.position,
+            self.capacity,
+            cache,
+            workspace,
+            activations,
+        )?;
         self.cache = Some(cache);
         self.workspace = workspace;
+        self.activations = activations;
         self.position += tokens.len();
         Ok((logits, next_token))
     }

@@ -1,0 +1,261 @@
+# Single-token DeltaNet: direct BF16 cache reads/stores, unrounded F32 output.
+# Multi-token prefill retains the F32 shadow scan.
+
+(def program stdlib.qwen35.cached-prediction : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({(u64 val) (f32 val)} *)} -> (f32 val) =
+ ([shadow key state-base key-base lane pair.]
+  ([.pair] *.elim [iteration acc.])
+  ({[.iteration] (const.u64.0x0000000000000020)} stdlib.qwen3.memory.u64.mul [stride.])
+  ({[.stride] [.lane]} stdlib.qwen3.memory.u64.add [i.])
+
+  ({[.state-base] [.i]} stdlib.qwen3.memory.u64.add [si.])
+  ({[.key-base] [.i]} stdlib.qwen3.memory.u64.add [ki.])
+  ({[.shadow] [.si]} stdlib.qwen3.memory.own-read-bf16 [s-bf.])
+  ([.s-bf] bf16.to-f32 [s.])
+  ({[.key] [.ki]} stdlib.qwen3.memory.own-read-bf16 [kb.])
+  ([.kb] bf16.to-f32 [k.])
+  ({[.s] [.k]} stdlib.qwen3.memory.f32.mul [product.])
+  ({[.acc] [.product]} stdlib.qwen3.memory.f32.add [sum.])
+  [.sum]
+ ))
+(def program stdlib.qwen35.cached-prediction.fold : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([shadow key state-base key-base lane pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.shadow] [.key] [.state-base] [.key-base] [.lane] [.arguments]} stdlib.qwen35.cached-prediction [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+(def program stdlib.qwen35.cached-update : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (f32 val) (f32 val) (u64 val) ({(u64 val) (f32 val)} *)} -> (f32 val) =
+ ([shadow query key state-base key-base decay delta lane pair.]
+  ([.pair] *.elim [iteration acc.])
+  ({[.iteration] (const.u64.0x0000000000000020)} stdlib.qwen3.memory.u64.mul [stride.])
+  ({[.stride] [.lane]} stdlib.qwen3.memory.u64.add [i.])
+
+  ({[.state-base] [.i]} stdlib.qwen3.memory.u64.add [si.])
+  ({[.key-base] [.i]} stdlib.qwen3.memory.u64.add [ki.])
+  ({[.shadow] [.si]} stdlib.qwen3.memory.own-read-bf16 [old-bf.])
+  ([.old-bf] bf16.to-f32 [old.])
+  ({[.key] [.ki]} stdlib.qwen3.memory.own-read-bf16 [kb.])
+  ([.kb] bf16.to-f32 [k.])
+  ({[.query] [.ki]} stdlib.qwen3.memory.own-read-bf16 [qb.])
+  ([.qb] bf16.to-f32 [q.])
+  ({[.old] [.decay]} stdlib.qwen3.memory.f32.mul [decayed.])
+  ({[.k] [.delta]} stdlib.qwen3.memory.f32.mul [correction.])
+  ({[.decayed] [.correction]} stdlib.qwen3.memory.f32.add [state.])
+  ([.state] f32.to-bf16 [stored.])
+  ({[.shadow] [.si] [.stored]} stdlib.qwen3.memory.write-bf16)
+  (unit.elim)
+  ({[.state] [.q]} stdlib.qwen3.memory.f32.mul [product.])
+  ({[.acc] [.product]} stdlib.qwen3.memory.f32.add [sum.])
+  [.sum]
+ ))
+(def program stdlib.qwen35.cached-update.fold : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (f32 val) (f32 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([shadow query key state-base key-base decay delta lane pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.shadow] [.query] [.key] [.state-base] [.key-base] [.decay] [.delta] [.lane] [.arguments]} stdlib.qwen35.cached-update [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+# Fused DeltaNet prediction/update/output; F32 shadow persists across prefill.
+# A barrier separates prediction reads from state updates; no delta allocation.
+
+(def program stdlib.qwen35.cached-delta.kernel : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([conv query key alpha beta dt a shadow shadow-base out memory thread.]
+  ([.thread] stdlib.qwen3.perf.indices [indices.])
+  ([.indices] *.elim [block tid.])
+  ({[.block] (const.u64.0x0000000000000008)} stdlib.qwen3.memory.u64.mul [first-column.])
+  ({[.tid] (const.u64.0x0000000000000020)} stdlib.qwen3.memory.u64.div [local-column.])
+  ({[.first-column] [.local-column]} stdlib.qwen3.memory.u64.add [index.])
+  ({[.tid] (const.u64.0x0000000000000020)} stdlib.qwen3.memory.u64.rem [lane.])
+  ({[.index] (const.u64.0x{{VALUE_DIM}})} stdlib.qwen3.memory.u64.div [head.])
+  ({[.head] (const.u64.0x{{KEY_HEADS}})} stdlib.qwen3.memory.u64.rem [key-head.])
+  ({[.key-head] (const.u64.0x{{KEY_DIM}})} stdlib.qwen3.memory.u64.mul [key-base.])
+  ({[.index] (const.u64.0x{{KEY_DIM}})} stdlib.qwen3.memory.u64.mul [local-state.])
+  ({[.shadow-base] [.local-state]} stdlib.qwen3.memory.u64.add [state-base.])
+  ({[.memory] (const.u64.0x0000000000000110) [.thread]} stdlib.qwen3.perf.slot [shared.])
+  ({[.local-column] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [gate-pair.])
+  ({[.gate-pair] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.add [gate-slot.])
+  ({[.lane] (const.u64.0x0000000000000000)} stdlib.qwen3.memory.u64.equal [gate-leader.])
+  ({[.gate-leader] (const.u64.0x0000000000000001) (const.u64.0x0000000000000000)} stdlib.qwen3.memory.select-u64 [gate-count.])
+  ({[.alpha] [.beta] [.dt] [.a] [.head] [.shared] [.gate-slot]} partial.stdlib.qwen35.delta-gates.fold.7 [gates-written-callback.])
+  ({([.gate-count] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [gates-written-end.])
+  ({[.gates-written-end] (unit.intro meta.perf.phase) [.gates-written-callback] (core.truth)} core.fold.bounded [gates-written gates-written-proof.])
+  ([.gates-written-proof] unsafe.discard unit.elim)
+  ({[.gates-written]} stdlib.qwen3.perf.sync [gates-sync.])
+  ({[.shared] [.gates-sync]} meta.perf.after-shared [gates-ready.])
+  ({[.gates-ready] [.gate-slot]} stdlib.qwen3.perf.read [decay.])
+  ({[.gate-slot] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [rate-slot.])
+  ({[.gates-ready] [.rate-slot]} stdlib.qwen3.perf.read [rate.])
+  ({(const.u64.0x{{KEY_DIM}}) (const.u64.0x000000000000001F)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] [.lane]} stdlib.qwen3.memory.u64.sub [remaining.])
+  ({[.remaining] (const.u64.0x0000000000000020)} stdlib.qwen3.memory.u64.div [count.])
+  ({[.shadow] [.key] [.state-base] [.key-base] [.lane]} partial.stdlib.qwen35.cached-prediction.fold.5 [callback.])
+  ({[.count] (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] (const.u32.0x00000000 u32.bitcast-f32) [.callback] core.truth} core.fold.bounded_u64 [ partial proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ({[.shared] [.tid] [.partial]} stdlib.qwen3.perf.write [written.])
+  ([.written] stdlib.qwen3.perf.sync [synced.])
+  ({[.shared] [.synced]} meta.perf.after-shared [ready.])
+  ({[.ready] [.tid] (const.u64.0x0000000000000000) (const.u64.0x0000000000000020)} stdlib.qwen3.perf.reduce-add [total.])
+  ({(const.u64.0x{{KEY_SIZE}}) (const.u64.0x{{KEY_SIZE}})} stdlib.qwen3.memory.u64.add [value-base.])
+  ({[.value-base] [.index]} stdlib.qwen3.memory.u64.add [value-index.])
+  ({[.conv] [.value-index]} stdlib.qwen3.memory.own-read-bf16 [value-bf.])
+  ([.value-bf] bf16.to-f32 [value.])
+  ({[.total] [.decay]} stdlib.qwen3.memory.f32.mul [predicted.])
+  ({[.value] [.predicted]} stdlib.qwen3.memory.f32.sub [error.])
+  ({[.error] [.rate]} stdlib.qwen3.memory.f32.mul [result.])
+  ([.result] meta.perf.complete-f [delta prediction-phase.])
+  ({[.prediction-phase]} stdlib.qwen3.perf.sync [prediction-sync.])
+  ({[.shadow] [.prediction-sync]} meta.perf.after-own [update-shadow.])
+  ({[.update-shadow] [.query] [.key] [.state-base] [.key-base] [.decay] [.delta] [.lane]} partial.stdlib.qwen35.cached-update.fold.8 [update-callback.])
+  ({[.count] (unit.intro meta.master.end)} smolcat.value.named_at [update-end.])
+  ({[.update-end] (const.u32.0x00000000 u32.bitcast-f32) [.update-callback] (core.truth)} core.fold.bounded_u64 [updated update-proof.])
+  ([.update-proof] unsafe.discard unit.elim)
+  ([.updated] meta.perf.complete-f [update-value update-phase.])
+  ({[.shared] [.update-phase]} meta.perf.after-shared [update-shared.])
+  ({[.update-shared] [.tid] [.update-value]} stdlib.qwen3.perf.write [update-written.])
+  ({[.update-written]} stdlib.qwen3.perf.sync [update-sync.])
+  ({[.shared] [.update-sync]} meta.perf.after-shared [output-shared.])
+  ({[.output-shared] [.tid] (const.u64.0x0000000000000000) (const.u64.0x0000000000000020)} stdlib.qwen3.perf.reduce-add [output-total.])
+  ({[.output-total] (const.u32.0x{{DELTA_SCALE_BITS}} u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [output-value.])
+  ({[.lane] (const.u64.0x0000000000000000)} stdlib.qwen3.memory.u64.equal [leader.])
+  ({[.leader] (const.u64.0x0000000000000001) (const.u64.0x0000000000000000)} stdlib.qwen3.memory.select-u64 [writes.])
+  ({[.out] [.index] [.output-value]} partial.stdlib.qwen35.delta-update.write.fold.3 [write-callback.])
+  ({[.writes] (unit.intro meta.master.end)} smolcat.value.named_at [write-end.])
+  ({[.write-end] [.out] [.write-callback] (core.truth)} core.fold.bounded_u64 [complete write-proof.])
+  ([.write-proof] unsafe.discard unit.elim)
+  (unit.intro)
+ ))
+
+(def program stdlib.qwen35.cached-delta.host : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([conv query key alpha beta dt a shadow shadow-base out grid memory pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base] [.out] [.memory]} partial.stdlib.qwen35.cached-delta.kernel.11 [kernel.])
+  ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
+  [.acc]
+ ))
+
+(def program stdlib.qwen35.cached-delta.host.fold : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([conv query key alpha beta dt a shadow shadow-base out grid memory pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base] [.out] [.grid] [.memory] [.arguments]} stdlib.qwen35.cached-delta.host [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+
+(def program qwen35.cached-delta : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([conv query key alpha beta dt a shadow shadow-base.]
+  ({(const.u64.0x{{VALUE_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out.])
+  ({(const.u64.0x{{VALUE_BLOCKS}}) (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
+  ({(const.u64.0x0000000000000110) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
+  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base] [.out] [.grid] [.memory]} partial.stdlib.qwen35.cached-delta.host.fold.12 [callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] [.out] [.callback] (core.truth)} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+
+(def program stdlib.qwen35.import-once : {((cap.own mem) val) (u64 val) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([cache capacity pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.cache] [.acc] [.capacity]} qwen35.import [next.])
+  [.next]
+ ))
+
+(def program stdlib.qwen35.import-once.fold : {((cap.own mem) val) (u64 val) ({({master.index32 u32} :) ({((cap.own mem) val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([cache capacity pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [fold-value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.qwen3.memory.u32.to-u64 [i.])
+  ({[.i] [.fold-value]} *.intro [arguments.])
+  ({[.cache] [.capacity] [.arguments]} stdlib.qwen35.import-once [fold-result.])
+  ({[.fold-result] [.truth]} *.intro)
+ ))
+
+(def program qwen35.import-optional : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([cache shadow capacity sequence.]
+  ({[.sequence] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.equal [decode.])
+  ({[.decode] (const.u64.0x0000000000000000) (const.u64.0x0000000000000001)} stdlib.qwen3.memory.select-u64 [count.])
+  ({[.cache] [.capacity]} partial.stdlib.qwen35.import-once.fold.2 [result-callback.])
+  ({([.count] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [result-end.])
+  ({[.result-end] [.shadow] [.result-callback] (core.truth)} core.fold.bounded [result result-proof.])
+  ([.result-proof] unsafe.discard unit.elim)
+  [.result]
+ ))
+
+(def program stdlib.qwen35.persist-once : {((cap.own mem) val) (u64 val) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([shadow capacity pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.acc] [.shadow] [.capacity]} qwen35.persist [next.])
+  [.next]
+ ))
+
+(def program stdlib.qwen35.persist-once.fold : {((cap.own mem) val) (u64 val) ({({master.index32 u32} :) ({((cap.own mem) val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([shadow capacity pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [fold-value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.qwen3.memory.u32.to-u64 [i.])
+  ({[.i] [.fold-value]} *.intro [arguments.])
+  ({[.shadow] [.capacity] [.arguments]} stdlib.qwen35.persist-once [fold-result.])
+  ({[.fold-result] [.truth]} *.intro)
+ ))
+
+(def program qwen35.persist-optional : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([cache shadow capacity sequence.]
+  ({[.sequence] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.equal [decode.])
+  ({[.decode] (const.u64.0x0000000000000000) (const.u64.0x0000000000000001)} stdlib.qwen3.memory.select-u64 [count.])
+  ({[.shadow] [.capacity]} partial.stdlib.qwen35.persist-once.fold.2 [result-callback.])
+  ({([.count] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [result-end.])
+  ({[.result-end] [.cache] [.result-callback] (core.truth)} core.fold.bounded [result result-proof.])
+  ([.result-proof] unsafe.discard unit.elim)
+  [.result]
+ ))
+
+(def program stdlib.qwen35.delta-cached : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) (u64 val) ({1 ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> ((cap.own mem) val) =
+ ([conv query key alpha beta dt a shadow shadow-base cache conv-base sequence proofs.]
+  ([.proofs] *.elim [payload proof-tail.])
+  ([.payload] unit.elim)
+  ([.proof-tail] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.conv-base] (const.u64.0x{{CONV_STATE_SIZE}})} stdlib.qwen3.memory.u64.add [cache-base.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.cache] [.cache-base]} qwen35.cached-delta [output.])
+  [.output]
+ ))
+
+(def program stdlib.qwen35.delta-shadow : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) (u64 val) ({1 ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> ((cap.own mem) val) =
+ ([conv query key alpha beta dt a shadow shadow-base cache conv-base sequence proofs.]
+  ([.proofs] *.elim [payload proof-tail.])
+  ([.payload] unit.elim)
+  ([.proof-tail] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base]} qwen35.fused-delta [output.])
+  [.output]
+ ))
+
+(def program qwen35.delta-dispatch : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([conv query key alpha beta dt a shadow shadow-base cache conv-base sequence.]
+  ({[.sequence] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.equal [decode.])
+  ({[.decode] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base] [.cache] [.conv-base] [.sequence]} partial.stdlib.qwen35.delta-cached.12 [cached-branch.])
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.shadow-base] [.cache] [.conv-base] [.sequence]} partial.stdlib.qwen35.delta-shadow.12 [shadow-branch.])
+  ({[.condition] (unit.intro) [.cached-branch] [.shadow-branch] (unit.intro)} core.if [output.])
+  [.output]
+ ))

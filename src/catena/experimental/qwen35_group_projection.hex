@@ -1,0 +1,126 @@
+# Grouped BF16 projections preserve the default 256-lane dot/reduction order.
+
+(def program stdlib.qwen35.group-project.kernel : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input w0 w1 w2 w3 n0 n1 n2 n3 out0 out1 out2 out3 memory thread.]
+  ({[.thread]} stdlib.qwen3.perf.indices [indices.])
+  ([.indices] *.elim [row tid.])
+  ({[.n0] [.n1]} stdlib.qwen3.memory.u64.add [end1.])
+  ({[.end1] [.n2]} stdlib.qwen3.memory.u64.add [end2.])
+  ({[.row] [.n0]} stdlib.qwen3.memory.u64.less [group0.])
+  ({[.row] [.end1]} stdlib.qwen3.memory.u64.less [group1.])
+  ({[.row] [.end2]} stdlib.qwen3.memory.u64.less [group2.])
+  ({[.group2] [.w2] [.w3]} stdlib.qwen3.memory.select-ref [w23.])
+  ({[.group1] [.w1] [.w23]} stdlib.qwen3.memory.select-ref [w123.])
+  ({[.group0] [.w0] [.w123]} stdlib.qwen3.memory.select-ref [w-selected.])
+  ({[.group2] [.out2] [.out3]} stdlib.qwen3.memory.select-own [out23.])
+  ({[.group1] [.out1] [.out23]} stdlib.qwen3.memory.select-own [out123.])
+  ({[.group0] [.out0] [.out123]} stdlib.qwen3.memory.select-own [out-selected.])
+  ({[.row] [.n0]} stdlib.qwen3.memory.u64.sub [local1.])
+  ({[.row] [.end1]} stdlib.qwen3.memory.u64.sub [local2.])
+  ({[.row] [.end2]} stdlib.qwen3.memory.u64.sub [local3.])
+  ({[.group2] [.local2] [.local3]} stdlib.qwen3.memory.select-u64 [local23.])
+  ({[.group1] [.local1] [.local23]} stdlib.qwen3.memory.select-u64 [local123.])
+  ({[.group0] [.row] [.local123]} stdlib.qwen3.memory.select-u64 [local.])
+  ({[.local] (const.u64.0x{{HIDDEN_PAIRS}})} stdlib.qwen3.memory.u64.mul [base.])
+  ({(const.u64.0x{{HIDDEN_PAIRS}}) (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] [.tid]} stdlib.qwen3.memory.u64.sub [remaining.])
+  ({[.remaining] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [steps.])
+  ({[.input] [.w-selected] [.base] [.tid]} partial.stdlib.qwen3.fused.dot.fold.4 [callback.])
+  ({[.steps] (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] (const.u32.0x00000000 u32.bitcast-f32) [.callback] (core.truth)} core.fold.bounded_u64 [sum proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ({[.memory] (const.u64.0x0000000000000100) [.thread]} stdlib.qwen3.perf.slot [shared.])
+  ({[.shared] [.tid] [.sum]} stdlib.qwen3.perf.write [written.])
+  ({[.written]} stdlib.qwen3.perf.sync [synced.])
+  ({[.shared] [.synced]} meta.perf.after-shared [ready.])
+  ({[.ready] [.tid] (const.u64.0x0000000000000000) (const.u64.0x0000000000000100)} stdlib.qwen3.perf.reduce-add [total.])
+  ({[.tid] (const.u64.0x0000000000000000)} stdlib.qwen3.memory.u64.equal [leader.])
+  ({[.leader] (const.u64.0x0000000000000001) (const.u64.0x0000000000000000)} stdlib.qwen3.memory.select-u64 [writes.])
+  ({[.out-selected] [.local] [.total]} partial.stdlib.qwen3.fused.project.write.fold.3 [write-callback.])
+  ({[.writes] (unit.intro meta.master.end)} smolcat.value.named_at [write-end.])
+  ({[.write-end] [.out-selected] [.write-callback] (core.truth)} core.fold.bounded_u64 [written-out write-proof.])
+  ([.write-proof] unsafe.discard unit.elim)
+  (unit.intro)
+ ))
+
+(def program stdlib.qwen35.group-project.host : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([input w0 w1 w2 w3 n0 n1 n2 n3 out0 out1 out2 out3 grid memory pair.]
+  ([.pair] *.elim [i acc.])
+  ({[.input] [.w0] [.w1] [.w2] [.w3] [.n0] [.n1] [.n2] [.n3] [.out0] [.out1] [.out2] [.out3] [.memory]} partial.stdlib.qwen35.group-project.kernel.14 [kernel.])
+  ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
+  [.acc]
+ ))
+
+(def program stdlib.qwen35.group-project.host.fold : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input w0 w1 w2 w3 n0 n1 n2 n3 out0 out1 out2 out3 grid memory pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({[.i] [.value]} *.intro [arguments.])
+  ({[.input] [.w0] [.w1] [.w2] [.w3] [.n0] [.n1] [.n2] [.n3] [.out0] [.out1] [.out2] [.out3] [.grid] [.memory] [.arguments]} stdlib.qwen35.group-project.host [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+
+(def program qwen35.group-project : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([input w0 w1 w2 w3 n0 n1 n2 n3 out0 out1 out2 out3.]
+  ({[.n0] [.n1]} stdlib.qwen3.memory.u64.add [end1.])
+  ({[.end1] [.n2]} stdlib.qwen3.memory.u64.add [end2.])
+  ({[.end2] [.n3]} stdlib.qwen3.memory.u64.add [rows.])
+  ({[.rows] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
+  ({(const.u64.0x0000000000000100) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
+  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
+  ({[.input] [.w0] [.w1] [.w2] [.w3] [.n0] [.n1] [.n2] [.n3] [.out0] [.out1] [.out2] [.out3] [.grid] [.memory]} partial.stdlib.qwen35.group-project.host.fold.15 [callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.end] [.out0] [.callback] (core.truth)} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+
+(def program qwen35.linear-projections : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input w0 w1 w2 w3.]
+  ({(const.u64.0x{{QKV_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out0.])
+  ({(const.u64.0x{{VALUE_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out1.])
+  ({(const.u64.0x{{VALUE_HEADS}})} stdlib.qwen3.memory.alloc-bf16 [out2.])
+  ({(const.u64.0x{{VALUE_HEADS}})} stdlib.qwen3.memory.alloc-bf16 [out3.])
+  ({[.input] [.w0] [.w1] [.w2] [.w3] (const.u64.0x{{QKV_SIZE}}) (const.u64.0x{{VALUE_SIZE}}) (const.u64.0x{{VALUE_HEADS}}) (const.u64.0x{{VALUE_HEADS}}) [.out0] [.out1] [.out2] [.out3]} qwen35.group-project [ready0.])
+  ([.ready0] meta.master.complete-own [final0 phase.])
+  ({[.out1] [.phase]} meta.master.after-own [final1.])
+  ({[.out2] [.phase]} meta.master.after-own [final2.])
+  ({[.out3] [.phase]} meta.master.after-own [final3.])
+  {[.final0] [.final1] [.final2] [.final3]}
+ ))
+
+(def program qwen35.full-projections : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input w0 w1 w2.]
+  ({(const.u64.0x{{DOUBLE_QUERY_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out0.])
+  ({(const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out1.])
+  ({(const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.qwen3.memory.alloc-bf16 [out2.])
+  ({[.input] [.w0] [.w1] [.w2] [.w2] (const.u64.0x{{DOUBLE_QUERY_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}}) (const.u64.0x0000000000000000) [.out0] [.out1] [.out2] [.out2]} qwen35.group-project [ready0.])
+  ([.ready0] meta.master.complete-own [final0 phase.])
+  ({[.out1] [.phase]} meta.master.after-own [final1.])
+  ({[.out2] [.phase]} meta.master.after-own [final2.])
+  {[.final0] [.final1] [.final2]}
+ ))
+
+(def program qwen35.linear-projections-reuse : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input w0 w1 w2 w3 out0 out1 out2 out3.]
+  ({[.input] [.w0] [.w1] [.w2] [.w3] (const.u64.0x{{QKV_SIZE}}) (const.u64.0x{{VALUE_SIZE}}) (const.u64.0x{{VALUE_HEADS}}) (const.u64.0x{{VALUE_HEADS}}) [.out0] [.out1] [.out2] [.out3]} qwen35.group-project [ready0.])
+  ([.ready0] meta.master.complete-own [final0 phase.])
+  ({[.out1] [.phase]} meta.master.after-own [final1.])
+  ({[.out2] [.phase]} meta.master.after-own [final2.])
+  ({[.out3] [.phase]} meta.master.after-own [final3.])
+  {[.final0] [.final1] [.final2] [.final3]}
+ ))
+
+
+(def program qwen35.full-projections-reuse : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([input w0 w1 w2 out0 out1 out2.]
+  ({[.input] [.w0] [.w1] [.w2] [.w2] (const.u64.0x{{DOUBLE_QUERY_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}}) (const.u64.0x0000000000000000) [.out0] [.out1] [.out2] [.out2]} qwen35.group-project [ready0.])
+  ([.ready0] meta.master.complete-own [final0 phase.])
+  ({[.out1] [.phase]} meta.master.after-own [final1.])
+  ({[.out2] [.phase]} meta.master.after-own [final2.])
+  {[.final0] [.final1] [.final2]}
+ ))
+

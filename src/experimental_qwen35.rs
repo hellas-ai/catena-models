@@ -1,6 +1,9 @@
 //! Dense and MoE Qwen3.5/3.6 hybrid graphs for the experimental compiler.
 use super::*;
 use crate::spec::LayerType;
+const SCRATCH: [&str; 7] = [
+    "scratch0", "scratch1", "scratch2", "scratch3", "scratch4", "scratch5", "scratch6",
+];
 const TRIPLE: &str = "({((cap.own mem) val) ({((cap.own mem) val) ((cap.own mem) val)} *)} *)";
 const FOLDED: &str = "({({master.index32 u32} :) ({({((cap.own mem) val) ({((cap.own mem) val) ((cap.own mem) val)} *)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)";
 
@@ -283,10 +286,11 @@ fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
     args.extend(moe_ws.iter().map(|w| (*w, REF)));
     header(&mut new, name, &args, TRIPLE);
     let mut body = old[body_start..ffn].to_owned();
+    args.insert(7, ("sequence", U64));
+    args.splice(8..8, SCRATCH.iter().map(|name| (*name, OWN)));
+    new.clear();
+    header(&mut new, name, &args, TRIPLE);
     if !linear {
-        args.insert(7, ("sequence", U64));
-        new.clear();
-        header(&mut new, name, &args, TRIPLE);
         let start = body.find("  ({[.query] [.cache-ready] [.keys]").unwrap();
         let end = body.find("  ({[.full-context] [.o-weight]").unwrap();
         let mut attention = String::new();
@@ -324,6 +328,103 @@ fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
         );
         attention.push_str("  ([.attention-output] *.elim [attention-cache full-context.])\n");
         body.replace_range(start..end, &attention);
+    }
+    // The four linear and three full-attention matrices share one projection launch.
+    if linear {
+        let start = body.find("  ({[.normalized] [.qkv-weight]").unwrap();
+        let end = start + body[start..].find("  ({[.capacity]").unwrap();
+        let mut projected = String::new();
+        call(
+            &mut projected,
+            &[
+                "normalized",
+                "qkv-weight",
+                "z-weight",
+                "alpha-weight",
+                "beta-weight",
+                "scratch0",
+                "scratch1",
+                "scratch2",
+                "scratch3",
+            ],
+            "qwen35.linear-projections-reuse",
+            "qkv z alpha beta",
+        );
+        body.replace_range(start..end, &projected);
+    } else {
+        let start = body.find("  ({[.normalized] [.q-weight]").unwrap();
+        let end = start + body[start..].find("  ({[.query-raw] [.q-norm]").unwrap();
+        let mut projected = String::new();
+        call(
+            &mut projected,
+            &[
+                "normalized",
+                "q-weight",
+                "k-weight",
+                "v-weight",
+                "scratch0",
+                "scratch1",
+                "scratch2",
+            ],
+            "qwen35.full-projections-reuse",
+            "qg key-raw value",
+        );
+        call(&mut projected, &["qg"], "qwen35.query", "query-raw");
+        body.replace_range(start..end, &projected);
+        let start = body.find("  ({[.qg] } qwen35.query").unwrap();
+        let offsets = start + body[start..].find("  ({[.layer]").unwrap();
+        let append = offsets + body[offsets..].find("  ({[.key] [.cache]").unwrap();
+        let end = append + body[append..].find("  ({[.position]").unwrap();
+        let mut prep = body[offsets..append].to_owned();
+        call(
+            &mut prep,
+            &[
+                "qg",
+                "key-raw",
+                "value",
+                "rope",
+                "cache",
+                "q-norm",
+                "k-norm",
+                "key-target",
+                "value-target",
+                "scratch4",
+            ],
+            "qwen35.full-prepare-reuse",
+            "query cache-prepared",
+        );
+        free(&mut prep, "key-raw", "cache-prepared", "cache-prepared-k");
+        free(&mut prep, "value", "cache-prepared-k", "cache-ready");
+        body.replace_range(start..end, &prep);
+    }
+    if linear {
+        let start = body.find("  ({[.qkv] [.cache] [.conv-weight]").unwrap();
+        let end = start
+            + body[start..]
+                .find("  ({[.convolved] [.query] [.key]")
+                .unwrap();
+        let mut prep = String::new();
+        call(
+            &mut prep,
+            &[
+                "qkv",
+                "cache",
+                "conv-weight",
+                "conv-base",
+                "position",
+                "scratch4",
+                "scratch5",
+                "scratch6",
+            ],
+            "qwen35.linear-prepare-reuse",
+            "convolved query key",
+        );
+        body.replace_range(start..end, &prep);
+        let target = "[.shadow] [.shadow-base] } qwen35.delta";
+        let replacement =
+            "[.shadow] [.shadow-base] [.cache] [.conv-base] [.sequence] } qwen35.delta-dispatch";
+        ensure!(body.contains(target), "missing linear DeltaNet call");
+        body = body.replace(target, replacement);
     }
     new.push_str(&body);
     let residual = if linear {
@@ -457,8 +558,22 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         include_str!("catena/experimental/qwen35_online.hex"),
         include_str!("catena/experimental/qwen35_cooperative_norm.hex"),
         include_str!("catena/experimental/qwen35_fused_delta.hex"),
+        include_str!("catena/experimental/qwen35_cached_delta.hex"),
     ]
     .join("\n");
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        kernels.push_str(include_str!(
+            "catena/experimental/qwen35_group_projection.hex"
+        ));
+    }
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        kernels.push_str(include_str!(
+            "catena/experimental/qwen35_linear_prepare.hex"
+        ));
+    }
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        kernels.push_str(include_str!("catena/experimental/qwen35_full_prepare.hex"));
+    }
     for (key, value) in [
         ("KEY_DIM", key_dim),
         ("KEY_HEADS", key_heads),
@@ -468,7 +583,10 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ("VALUE_SIZE", value_size),
         ("VALUE_BLOCKS", value_size / 8),
         ("QKV_SIZE", qkv_size),
+        ("CONV_HEADS", qkv_size.div_ceil(key_dim)),
         ("QUERY_SIZE", config.query_size()),
+        ("DOUBLE_QUERY_SIZE", config.query_size() * 2),
+        ("HIDDEN_PAIRS", config.hidden_size / 2),
         ("KEY_VALUE_SIZE", config.key_value_size()),
         ("QUERY_HEADS", config.num_attention_heads),
         (
@@ -476,6 +594,17 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             config.num_attention_heads / config.num_key_value_heads,
         ),
         ("HEAD_DIM", config.head_dim),
+        ("ROPE_DIM", config.rope_dimension_count),
+        ("ROPE_HALF_DIM", config.rope_dimension_count / 2),
+        ("PAD_HEAD_DIM", config.head_dim.next_power_of_two()),
+        (
+            "HEAD_STAGES",
+            config.head_dim.next_power_of_two().trailing_zeros() as usize,
+        ),
+        (
+            "FULL_PREP_HEADS",
+            config.num_attention_heads + config.num_key_value_heads,
+        ),
         (
             "HEADS_PER_KV",
             config.num_attention_heads / config.num_key_value_heads,
@@ -496,6 +625,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     }
     for (key, value) in [
         ("SCALE_BITS", (config.head_dim as f32).sqrt().recip()),
+        ("HEAD_DIM_F32", config.head_dim as f32),
         ("DELTA_SCALE_BITS", (key_dim as f32).sqrt().recip()),
         ("VALUE_DIM_F32", value_dim as f32),
         ("RMS_EPSILON_BITS", config.rms_norm_eps),
@@ -619,18 +749,23 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ),
     ] {
         let pair = format!("({{{TRIPLE} ({{{proof} 1}} *)}} *)");
+        let mut branch_args = vec![
+            ("weights", group),
+            ("rope", OWN),
+            ("capacity", U64),
+            ("position", U64),
+            ("layer", U64),
+            ("sequence", U64),
+        ];
+        if moe {
+            branch_args.extend(SCRATCH.iter().map(|name| (*name, OWN)));
+        }
+        branch_args.push(("pair", &pair));
+
         header(
             &mut s,
             &format!("stdlib.qwen35.branch-{kind}"),
-            &[
-                ("weights", group),
-                ("rope", OWN),
-                ("capacity", U64),
-                ("position", U64),
-                ("layer", U64),
-                ("sequence", U64),
-                ("pair", &pair),
-            ],
+            &branch_args,
             TRIPLE,
         );
         s.push_str("  ([.pair] *.elim [state proofs.])\n  ([.proofs] *.elim [proof unit.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.unit] unit.elim)\n");
@@ -647,8 +782,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         if kind == "linear" || moe {
             args.push("shadow");
         }
-        if kind == "full" && moe {
+        if moe {
             args.push("sequence");
+            args.extend(SCRATCH);
         }
         args.extend(ws.iter().map(String::as_str));
         call(
@@ -674,7 +810,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         }
         finish(&mut s);
     }
-    let captures = [
+    let mut captures = vec![
         ("full-weights", full_tree.as_str()),
         ("linear-weights", linear_tree.as_str()),
         ("rope", OWN),
@@ -682,6 +818,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ("position", U64),
         ("sequence", U64),
     ];
+    if moe {
+        captures.extend(SCRATCH.iter().map(|name| (*name, OWN)));
+    }
     let mut args = captures.to_vec();
     args.push(("pair", FOLDED));
     header(
@@ -738,8 +877,14 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 "position",
                 "layer",
                 "sequence",
-            ],
-            &format!("partial.stdlib.qwen35.branch-{kind}.6"),
+            ]
+            .into_iter()
+            .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+            .collect::<Vec<_>>(),
+            &format!(
+                "partial.stdlib.qwen35.branch-{kind}.{}",
+                if moe { 13 } else { 6 }
+            ),
             &format!("{kind}-branch"),
         );
     }
@@ -799,6 +944,33 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 c(rows)
             ),
         );
+    }
+    if moe {
+        for name in [
+            "qkv",
+            "z",
+            "alpha",
+            "beta",
+            "query",
+            "key",
+            "convolved",
+            "qg",
+            "key-raw",
+            "value",
+        ] {
+            let prefix = format!("  ({{[.{name}]");
+            s = s
+                .lines()
+                .map(|line| {
+                    if line.starts_with(&prefix) && line.contains("qwen3.free-bf16-before") {
+                        line.replace("qwen3.free-bf16-before", "qwen3.keep-bf16-before")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
     }
     Ok(s)
 }
@@ -1000,7 +1172,8 @@ fn emit_entry(
     linear_tree: &str,
     _recurrent: usize,
 ) -> Result<()> {
-    let captures = [
+    let moe = config.architecture == ModelArchitecture::Qwen35Moe;
+    let mut captures = vec![
         ("tokens", REF),
         ("embedding", REF),
         ("full-weights", full_tree),
@@ -1008,6 +1181,9 @@ fn emit_entry(
         ("capacity", U64),
         ("start", U64),
     ];
+    if moe {
+        captures.extend(SCRATCH.iter().map(|name| (*name, OWN)));
+    }
     let mut args = captures.to_vec();
     args.push(("pair", FOLDED));
     header(
@@ -1049,8 +1225,14 @@ fn emit_entry(
             "capacity",
             "position",
             "sequence",
-        ],
-        "partial.stdlib.qwen35.layer.fold.6",
+        ]
+        .into_iter()
+        .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+        .collect::<Vec<_>>(),
+        &format!(
+            "partial.stdlib.qwen35.layer.fold.{}",
+            if moe { 13 } else { 6 }
+        ),
         "layer-callback",
     );
     writeln!(s,"  ({{(const.u32.0x{:08X}) (unit.intro meta.master.end32)}} smolcat.value.named_at [layer-end.])",config.num_layers).unwrap();
@@ -1084,12 +1266,15 @@ fn emit_entry(
         ("capacity", U64),
         ("start", U64),
     ];
+    if moe {
+        inputs.splice(3..3, SCRATCH.iter().map(|name| (*name, OWN)));
+    }
     inputs.extend(ws.iter().map(|w| (w.as_str(), REF)));
     header(
         s,
         "qwen3",
         &inputs,
-        "{((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)}",
+        &format!("{{{}}}", vec![OWN; if moe { 11 } else { 4 }].join(" ")),
     );
     let mut cursor = 1;
     for layer in 0..config.num_layers {
@@ -1116,10 +1301,28 @@ fn emit_entry(
         );
     }
     s.push_str("  ([.workspace] [shadow.])\n");
+    let moe = config.architecture == ModelArchitecture::Qwen35Moe;
+    if moe {
+        call(
+            s,
+            &["tokens"],
+            "stdlib.qwen3.memory.ref-count-u64",
+            "sequence",
+        );
+    }
+
     call(
         s,
-        &["cache", "shadow", "capacity"],
-        "qwen35.import",
+        &if moe {
+            vec!["cache", "shadow", "capacity", "sequence"]
+        } else {
+            vec!["cache", "shadow", "capacity"]
+        },
+        if moe {
+            "qwen35.import-optional"
+        } else {
+            "qwen35.import"
+        },
         "shadow-ready",
     );
     call(
@@ -1142,8 +1345,14 @@ fn emit_entry(
             "linear-weights",
             "capacity",
             "start",
-        ],
-        "partial.stdlib.qwen35.token.fold.6",
+        ]
+        .into_iter()
+        .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+        .collect::<Vec<_>>(),
+        &format!(
+            "partial.stdlib.qwen35.token.fold.{}",
+            if moe { 13 } else { 6 }
+        ),
         "token-callback",
     );
     s.push_str("  ({([.tokens] stdlib.qwen3.memory.ref-count-u64 stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [token-end.])\n  ({[.token-end] [.initial-state] [.token-callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
@@ -1154,8 +1363,16 @@ fn emit_entry(
     );
     call(
         s,
-        &["cache-final", "shadow-final", "capacity"],
-        "qwen35.persist",
+        &if moe {
+            vec!["cache-final", "shadow-final", "capacity", "sequence"]
+        } else {
+            vec!["cache-final", "shadow-final", "capacity"]
+        },
+        if moe {
+            "qwen35.persist-optional"
+        } else {
+            "qwen35.persist"
+        },
         "cache-persisted",
     );
     s.push_str("  ([.cache-persisted] [cache-result.])\n");
@@ -1194,7 +1411,21 @@ fn emit_entry(
         },
         "token",
     );
-    s.push_str("  {[.cache-result] [.shadow-final] [.logits-final] [.token]}");
+    let mut result = vec!["cache-result", "shadow-final"];
+    if moe {
+        result.extend(SCRATCH);
+    }
+    result.extend(["logits-final", "token"]);
+    writeln!(
+        s,
+        "  {{{}}}",
+        result
+            .iter()
+            .map(|name| format!("[.{name}]"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
+    .unwrap();
     finish(s);
     Ok(())
 }
@@ -1243,14 +1474,21 @@ pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions)
         ("start", U64),
         ("sequence", U64),
     ];
+    let moe = config.architecture == ModelArchitecture::Qwen35Moe;
+    if moe {
+        args.splice(4..4, SCRATCH.iter().map(|name| (*name, OWN)));
+    }
     args.extend(ws.iter().map(|w| (w.as_str(), REF)));
     header(
         &mut mm,
         "qwen3.multimodal",
         &args,
-        "{((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)}",
+        &format!("{{{}}}", vec![OWN; if moe { 11 } else { 4 }].join(" ")),
     );
-    mm.push_str(&body[..allocation]);
+    mm.push_str(&body[..allocation].replace(
+        "  ({[.tokens] } stdlib.qwen3.memory.ref-count-u64 [sequence.])\n",
+        "",
+    ));
     call(&mut mm, &["positions"], "qwen3.mm-rope-table", "rope");
     pack(
         &mut mm,
@@ -1266,8 +1504,14 @@ pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions)
             "capacity",
             "start",
             "sequence",
-        ],
-        "partial.stdlib.qwen35.layer.fold.6",
+        ]
+        .into_iter()
+        .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+        .collect::<Vec<_>>(),
+        &format!(
+            "partial.stdlib.qwen35.layer.fold.{}",
+            if moe { 13 } else { 6 }
+        ),
         "layer-callback",
     );
     writeln!(mm, "  ({{(const.u32.0x{:08X}) (unit.intro meta.master.end32)}} smolcat.value.named_at [layer-end.])", config.num_layers).unwrap();
@@ -1326,7 +1570,7 @@ mod tests {
                 .unwrap()
                 .outputs
                 .len(),
-            4
+            11
         );
         Ok(())
     }

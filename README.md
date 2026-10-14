@@ -59,7 +59,10 @@ Qwen3.5/3.6 images use the existing native vision encoder with the selected
 language compiler. Older Qwen3 MoE uses the default compiler.
 
 Experimental Qwen3.5 MoE combines routed/shared expert gate/up activations and
-down projections, keeps routing scratch per session, and uses parallel argmax.
+down projections, keeps routing and activation scratch per session, and uses parallel argmax.
+Grouped QKV/Z/gate projections, fused convolution/QK normalization, and fused
+head normalization/RoPE/KV append reduce preparation launches. Single-token
+DeltaNet updates read and store BF16 cache directly while computing in F32.
 Its full-attention layers use SIMT online cached attention during decode,
 including context output gating, without score/probability allocations.
 Multi-token prefill retains the validated staged BF16 attention path.

@@ -14,3 +14,8 @@
   ([.ready] stdlib.qwen3.memory.free-bf16 unit.elim)
   [.result]
  ))
+
+# Keep session scratch alive while preserving the consuming buffer dependency.
+(def program qwen3.keep-bf16-before : {((cap.own mem) val) ((cap.own mem) val)} -> ((cap.own mem) val) =
+ ([old after.] ([.after] meta.master.complete-own [result phase.])
+  ({[.old] [.phase]} meta.master.after-own [ready.]) [.result]))
