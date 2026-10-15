@@ -317,9 +317,10 @@ mod tests {
 
     #[test]
     fn downloaded_tokenizer_round_trips_when_present() -> Result<()> {
-        let path = Path::new("models/Qwen3-30B-A3B-Base/tokenizer.json");
-        if path.exists() {
-            let tokenizer = QwenTokenizer::open(path)?;
+        if let Ok(selector) = std::env::var("CATENA_TOKENIZER_MODEL") {
+            let path = crate::hfhub::download_gguf(&selector)?.primary;
+            let tokenizer =
+                QwenTokenizer::from_gguf(path)?.context("missing embedded tokenizer")?;
             let tokens = tokenizer.encode("Gravity is")?;
             assert!(!tokens.is_empty());
             assert_eq!(tokenizer.decode(&tokens, false)?, "Gravity is");
@@ -329,9 +330,10 @@ mod tests {
 
     #[test]
     fn downloaded_tokenizer_streams_when_present() -> Result<()> {
-        let path = Path::new("models/Qwen3-30B-A3B-Base/tokenizer.json");
-        if path.exists() {
-            let tokenizer = QwenTokenizer::open(path)?;
+        if let Ok(selector) = std::env::var("CATENA_TOKENIZER_MODEL") {
+            let path = crate::hfhub::download_gguf(&selector)?.primary;
+            let tokenizer =
+                QwenTokenizer::from_gguf(path)?.context("missing embedded tokenizer")?;
             let tokens = tokenizer.encode("Gravity is the only thing")?;
             let mut stream = tokenizer.decode_stream(false);
             let mut decoded = String::new();
@@ -350,7 +352,8 @@ mod tests {
 
     #[test]
     fn dense_qwen3_gguf_tokenizer_round_trips_when_present() -> Result<()> {
-        if let Some(path) = std::env::var_os("CATENA_QWEN3_DENSE_GGUF") {
+        if let Some(selector) = std::env::var_os("CATENA_QWEN3_DENSE_MODEL") {
+            let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
             let tokenizer = QwenTokenizer::from_gguf(path)?.context("missing GGUF tokenizer")?;
             let prompt = "The capital of France is";
             let tokens = tokenizer.encode(prompt)?;

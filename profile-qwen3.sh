@@ -6,9 +6,9 @@ cd "$script_dir"
 
 usage() {
   cat >&2 <<'EOF'
-usage: ./profile-qwen3.sh GGUF_PATH [PROFILE_TOKENS]
+usage: ./profile-qwen3.sh HF_MODEL [PROFILE_TOKENS]
 
-Profile native-BF16 decode from a local GGUF file, shard, or shard directory.
+Profile native-BF16 decode from an HF name owner/repository[:variant].
 PROFILE_TOKENS defaults to 32. Environment overrides:
   QWEN3_PROFILE_TOKENS          tokens in each profiled pass
   QWEN3_PROFILE_BASELINE_TOKENS tokens in the unprofiled baseline (default 128)
@@ -18,17 +18,13 @@ PROFILE_TOKENS defaults to 32. Environment overrides:
 EOF
 }
 
-gguf_path="${1:-${QWEN3_PROFILE_GGUF:-}}"
+model="${1:-}"
 profile_tokens="${QWEN3_PROFILE_TOKENS:-${2:-32}}"
 baseline_tokens="${QWEN3_PROFILE_BASELINE_TOKENS:-128}"
 baseline_runs="${QWEN3_PROFILE_BASELINE_RUNS:-3}"
 
-if [[ -z "$gguf_path" ]]; then
+if [[ -z "$model" ]]; then
   usage
-  exit 2
-fi
-if [[ ! -e "$gguf_path" ]]; then
-  echo "GGUF path does not exist: $gguf_path" >&2
   exit 2
 fi
 for value_name in profile_tokens baseline_tokens baseline_runs; do
@@ -64,7 +60,7 @@ profiler_library_path="$profiler_root/lib"
 
 runner=(
   target/release/catena-qwen3
-  --gguf "$gguf_path"
+  --model "$model"
   --bf16
   --bench
   --pp 0

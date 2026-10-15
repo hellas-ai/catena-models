@@ -153,6 +153,74 @@ fn emit_moe(s: &mut String, c0: &ModelConfig, shadow_bytes: usize) -> Result<()>
     Ok(())
 }
 
+fn emit_attention_branches(s: &mut String) {
+    let output = format!("({{{OWN} {OWN}}} *)");
+    for (kind, proof) in [
+        ("online", "((master.predicate prop.IsTrue) |-)"),
+        (
+            "staged",
+            "(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-)",
+        ),
+    ] {
+        let pair = format!("({{{TRIPLE} ({{{proof} 1}} *)}} *)");
+        header(
+            s,
+            &format!("qwen35.attention.{kind}"),
+            &[
+                ("keys", U64),
+                ("key-offset", U64),
+                ("value-offset", U64),
+                ("pair", &pair),
+            ],
+            &output,
+        );
+        s.push_str("  ([.pair] *.elim [state proofs.])\n  ([.proofs] *.elim [proof unit.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.unit] unit.elim)\n");
+        unpack(s, "state", &names(&["query", "cache", "qg"]));
+        if kind == "online" {
+            call(
+                s,
+                &["query", "cache", "qg", "keys", "key-offset", "value-offset"],
+                "qwen35.online",
+                "context",
+            );
+            free(s, "query", "context", "context-query");
+            free(s, "qg", "context-query", "result");
+        } else {
+            call(
+                s,
+                &["query", "cache", "keys", "key-offset"],
+                "qwen3.scores",
+                "scores",
+            );
+            free(s, "query", "scores", "scores-ready");
+            call(
+                s,
+                &["scores-ready", "keys"],
+                "qwen35.softmax",
+                "probabilities",
+            );
+            call(
+                s,
+                &["scores-ready", "probabilities"],
+                "qwen3.free-f32-before",
+                "prob-ready",
+            );
+            call(
+                s,
+                &["prob-ready", "cache", "keys", "value-offset"],
+                "qwen35.context",
+                "context",
+            );
+            free(s, "prob-ready", "context", "context-ready");
+            call(s, &["qg", "context-ready"], "qwen35.gate-context", "gated");
+            free(s, "qg", "gated", "gated-ready");
+            free(s, "context-ready", "gated-ready", "result");
+        }
+        s.push_str("  ([.result] meta.master.complete-own [ready phase.])\n  ({[.cache] [.phase]} meta.master.after-own [cache-ready.])\n  ({[.cache-ready] [.ready]} *.intro)");
+        finish(s);
+    }
+}
+
 fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
     let start = s.find(&format!("(def program {name} :")).unwrap();
     let end = start + s[start..].find("\n ))").unwrap() + 5;
@@ -214,7 +282,50 @@ fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
     );
     args.extend(moe_ws.iter().map(|w| (*w, REF)));
     header(&mut new, name, &args, TRIPLE);
-    new.push_str(&old[body_start..ffn]);
+    let mut body = old[body_start..ffn].to_owned();
+    if !linear {
+        args.insert(7, ("sequence", U64));
+        new.clear();
+        header(&mut new, name, &args, TRIPLE);
+        let start = body.find("  ({[.query] [.cache-ready] [.keys]").unwrap();
+        let end = body.find("  ({[.full-context] [.o-weight]").unwrap();
+        let mut attention = String::new();
+        pack(
+            &mut attention,
+            &names(&["query", "cache-ready", "qg"]),
+            "attention-input",
+        );
+        call(
+            &mut attention,
+            &["sequence", &c(1)],
+            "stdlib.qwen3.memory.u64.equal",
+            "decode",
+        );
+        attention.push_str("  ({[.decode] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [attention-condition.])\n");
+        for kind in ["online", "staged"] {
+            call(
+                &mut attention,
+                &["keys", "key-offset", "value-offset"],
+                &format!("partial.qwen35.attention.{kind}.3"),
+                &format!("{kind}-attention"),
+            );
+        }
+        call(
+            &mut attention,
+            &[
+                "attention-condition",
+                "attention-input",
+                "online-attention",
+                "staged-attention",
+                "(unit.intro)",
+            ],
+            "core.if",
+            "attention-output",
+        );
+        attention.push_str("  ([.attention-output] *.elim [attention-cache full-context.])\n");
+        body.replace_range(start..end, &attention);
+    }
+    new.push_str(&body);
     let residual = if linear {
         "attention-ready"
     } else {
@@ -226,7 +337,7 @@ fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
     new.push_str("  ([.ffn-result] *.elim [shadow-result hidden-result.])\n  ([.hidden-result] meta.master.complete-own [completed phase.])\n");
     call(
         &mut new,
-        &[if linear { "cache" } else { "cache-ready" }, "phase"],
+        &[if linear { "cache" } else { "attention-cache" }, "phase"],
         "meta.master.after-own",
         "cache-result",
     );
@@ -343,14 +454,19 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     let mut kernels = [
         include_str!("catena/experimental/qwen35.hex"),
         include_str!("catena/experimental/qwen35_attention.hex"),
+        include_str!("catena/experimental/qwen35_online.hex"),
+        include_str!("catena/experimental/qwen35_cooperative_norm.hex"),
+        include_str!("catena/experimental/qwen35_fused_delta.hex"),
     ]
     .join("\n");
     for (key, value) in [
         ("KEY_DIM", key_dim),
         ("KEY_HEADS", key_heads),
+        ("VALUE_HEADS", value_heads),
         ("KEY_SIZE", config.linear_key_size().unwrap()),
         ("VALUE_DIM", value_dim),
         ("VALUE_SIZE", value_size),
+        ("VALUE_BLOCKS", value_size / 8),
         ("QKV_SIZE", qkv_size),
         ("QUERY_SIZE", config.query_size()),
         ("KEY_VALUE_SIZE", config.key_value_size()),
@@ -360,6 +476,11 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             config.num_attention_heads / config.num_key_value_heads,
         ),
         ("HEAD_DIM", config.head_dim),
+        (
+            "HEADS_PER_KV",
+            config.num_attention_heads / config.num_key_value_heads,
+        ),
+        ("DOT_STEPS", config.head_dim.div_ceil(32)),
         ("RECURRENT_SIZE", recurrent),
         ("CONV_STATE_SIZE", conv),
         ("LINEAR_STRIDE", conv + recurrent),
@@ -374,6 +495,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         kernels = kernels.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
     }
     for (key, value) in [
+        ("SCALE_BITS", (config.head_dim as f32).sqrt().recip()),
         ("DELTA_SCALE_BITS", (key_dim as f32).sqrt().recip()),
         ("VALUE_DIM_F32", value_dim as f32),
         ("RMS_EPSILON_BITS", config.rms_norm_eps),
@@ -465,8 +587,15 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))?;
         emit_moe(&mut s, config, shadow_bytes)?;
+        emit_attention_branches(&mut s);
         replace_moe_decoder(&mut s, "qwen3.decoder-layer", false)?;
         replace_moe_decoder(&mut s, "qwen35.linear-decoder", true)?;
+    }
+    if moe {
+        s = s
+            .replace("} qwen35.l2 [", "} qwen35.coop-l2 [")
+            .replace("} qwen35.gated-norm [", "} qwen35.coop-gated [")
+            .replace("} qwen35.delta [", "} qwen35.fused-delta [");
     }
     let full_count = if moe { 16 } else { 11 };
     let linear_count = if moe { 19 } else { 14 };
@@ -499,6 +628,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 ("capacity", U64),
                 ("position", U64),
                 ("layer", U64),
+                ("sequence", U64),
                 ("pair", &pair),
             ],
             TRIPLE,
@@ -516,6 +646,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         let mut args = vec!["hidden", "cache", "rope", "capacity", "position", "layer"];
         if kind == "linear" || moe {
             args.push("shadow");
+        }
+        if kind == "full" && moe {
+            args.push("sequence");
         }
         args.extend(ws.iter().map(String::as_str));
         call(
@@ -547,6 +680,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ("rope", OWN),
         ("capacity", U64),
         ("position", U64),
+        ("sequence", U64),
     ];
     let mut args = captures.to_vec();
     args.push(("pair", FOLDED));
@@ -603,8 +737,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 "capacity",
                 "position",
                 "layer",
+                "sequence",
             ],
-            &format!("partial.stdlib.qwen35.branch-{kind}.5"),
+            &format!("partial.stdlib.qwen35.branch-{kind}.6"),
             &format!("{kind}-branch"),
         );
     }
@@ -646,16 +781,23 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         ),
     ] {
         let columns = c(width);
-        let stages = c(width.trailing_zeros() as usize);
+        let padded = c(width.next_power_of_two());
+        let stages = c(width.next_power_of_two().trailing_zeros() as usize);
         let pattern = format!("{columns} {float} {} }} qwen3.fused.normalize", c(rows));
         s = s.replace(
             &pattern,
-            &format!("{columns} {float} {} {stages} }} qwen35.normalize", c(rows)),
+            &format!(
+                "{columns} {float} {} {stages} {padded} }} qwen35.normalize",
+                c(rows)
+            ),
         );
         let pattern = format!("{columns} {float} {}}} qwen3.fused.normalize", c(rows));
         s = s.replace(
             &pattern,
-            &format!("{columns} {float} {} {stages}}} qwen35.normalize", c(rows)),
+            &format!(
+                "{columns} {float} {} {stages} {padded}}} qwen35.normalize",
+                c(rows)
+            ),
         );
     }
     Ok(s)
@@ -891,6 +1033,12 @@ fn emit_entry(
     );
     free(s, "previous", "embedded", "hidden");
     call(s, &["position"], "qwen3.rope-one", "rope");
+    call(
+        s,
+        &["tokens"],
+        "stdlib.qwen3.memory.ref-count-u64",
+        "sequence",
+    );
     pack(s, &names(&["cache", "shadow", "hidden"]), "initial");
     call(
         s,
@@ -900,8 +1048,9 @@ fn emit_entry(
             "rope",
             "capacity",
             "position",
+            "sequence",
         ],
-        "partial.stdlib.qwen35.layer.fold.5",
+        "partial.stdlib.qwen35.layer.fold.6",
         "layer-callback",
     );
     writeln!(s,"  ({{(const.u32.0x{:08X}) (unit.intro meta.master.end32)}} smolcat.value.named_at [layer-end.])",config.num_layers).unwrap();
@@ -1050,6 +1199,96 @@ fn emit_entry(
     Ok(())
 }
 
+/// Reuse the hybrid layer fold with supplied embeddings and independent MRoPE.
+pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    let half = config.rope_dimension_count / 2;
+    let sections = config.mrope_sections;
+    ensure!(
+        sections.iter().sum::<usize>() == half
+            && sections[1] * 3 <= half + 2
+            && sections[2] * 3 <= half + 2,
+        "unsupported interleaved MRoPE sections {sections:?}"
+    );
+    let mut s = source(config, options)?;
+    let mut helpers = include_str!("catena/experimental/qwen35_multimodal.hex").to_owned();
+    for (name, value) in [
+        ("HIDDEN_SIZE", config.hidden_size),
+        ("ROPE_DIM", config.rope_dimension_count),
+        ("ROPE_HALF_DIM", half),
+        ("HEIGHT_END", sections[1] * 3),
+        ("WIDTH_END", sections[2] * 3),
+    ] {
+        helpers = helpers.replace(&format!("{{{{{name}}}}}"), &format!("{value:016X}"));
+    }
+    let entry = &s[s.rfind("(def program qwen3 :").unwrap()..];
+    let body = &entry[entry.find("\n  ({").unwrap()..];
+    let allocation = body
+        .find(&format!(
+            "  ({{{} }} stdlib.qwen3.memory.alloc-bf16",
+            c(config.hidden_size)
+        ))
+        .unwrap();
+    let tail = body.find("  ({[.cache-final] [.shadow-final]").unwrap();
+    let mut mm = String::new();
+    let specs = weight_specs(config)?;
+    let ws = (0..specs.len())
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>();
+    let mut args = vec![
+        ("hidden", OWN),
+        ("positions", REF),
+        ("cache", OWN),
+        ("workspace", OWN),
+        ("capacity", U64),
+        ("start", U64),
+        ("sequence", U64),
+    ];
+    args.extend(ws.iter().map(|w| (w.as_str(), REF)));
+    header(
+        &mut mm,
+        "qwen3.multimodal",
+        &args,
+        "{((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)}",
+    );
+    mm.push_str(&body[..allocation]);
+    call(&mut mm, &["positions"], "qwen3.mm-rope-table", "rope");
+    pack(
+        &mut mm,
+        &names(&["cache", "shadow-ready", "hidden"]),
+        "initial-state",
+    );
+    call(
+        &mut mm,
+        &[
+            "full-weights",
+            "linear-weights",
+            "rope",
+            "capacity",
+            "start",
+            "sequence",
+        ],
+        "partial.stdlib.qwen35.layer.fold.6",
+        "layer-callback",
+    );
+    writeln!(mm, "  ({{(const.u32.0x{:08X}) (unit.intro meta.master.end32)}} smolcat.value.named_at [layer-end.])", config.num_layers).unwrap();
+    mm.push_str("  ({[.layer-end] [.initial-state] [.layer-callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
+    unpack(
+        &mut mm,
+        "final-state",
+        &names(&["cache-final", "shadow-final", "decoded-hidden"]),
+    );
+    call(
+        &mut mm,
+        &["rope", "decoded-hidden"],
+        "qwen3.free-f32-before",
+        "hidden-final",
+    );
+    mm.push_str(&body[tail..]);
+    s.push_str(&helpers);
+    s.push_str(&mm);
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1066,6 +1305,7 @@ mod tests {
         c.num_key_value_heads = 1;
         c.head_dim = 16;
         c.rope_dimension_count = 8;
+        c.mrope_sections = [2, 1, 1];
         c.vocabulary_size = 33;
         c.linear_state_size = Some(16);
         c.linear_group_count = Some(1);
@@ -1073,7 +1313,7 @@ mod tests {
         c.linear_inner_size = Some(32);
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
-        let source = source(&c, options)?;
+        let source = multimodal_source(&c, options)?;
         let module = compile(
             crate::catena::runtime_sources_for_options(&source, options),
             GpuDialect::Hip,
@@ -1082,7 +1322,7 @@ mod tests {
             module
                 .functions
                 .iter()
-                .find(|f| f.source_name == "qwen3")
+                .find(|f| f.source_name == "qwen3.multimodal")
                 .unwrap()
                 .outputs
                 .len(),
@@ -1093,12 +1333,12 @@ mod tests {
     #[test]
     fn qwen35_dense_compiles() -> Result<()> {
         let mut c = ModelConfig::qwen35_0_8b();
-        c.hidden_size = 32;
+        c.hidden_size = 48;
         c.intermediate_size = 64;
         c.num_layers = 4;
         c.num_attention_heads = 2;
         c.num_key_value_heads = 1;
-        c.head_dim = 16;
+        c.head_dim = 24;
         c.rope_dimension_count = 8;
         c.vocabulary_size = 33;
         c.linear_state_size = Some(16);
@@ -1107,6 +1347,7 @@ mod tests {
         c.linear_inner_size = Some(32);
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+        validate(&c, options, Some(GpuDialect::Hip))?;
         let source = source(&c, options)?;
         let module = compile(
             crate::catena::runtime_sources_for_options(&source, options),

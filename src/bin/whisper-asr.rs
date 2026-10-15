@@ -6,9 +6,8 @@ use std::path::PathBuf;
 #[command(about = "Whisper-small ASR through Catena (16 kHz WAV, up to 30 seconds)")]
 struct Args {
     wav: Option<PathBuf>,
-    /// Override the cached openai/whisper-small snapshot with a local directory.
-    #[arg(long)]
-    model_dir: Option<PathBuf>,
+    #[arg(long, required = true, value_name = "MODEL")]
+    model: String,
     #[arg(long)]
     language: Option<String>,
     #[arg(long, default_value_t = 256)]
@@ -29,7 +28,7 @@ struct Args {
 }
 fn main() -> Result<()> {
     let a = Args::parse();
-    let model_dir = whisper::hub::snapshot(a.model_dir.as_deref())?;
+    let model_dir = whisper::hub::snapshot(&a.model)?;
     let config = Config::read(&model_dir)?;
     if a.timings || a.inspect {
         eprintln!("Whisper snapshot: {}", model_dir.display());

@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Run greedy BF16 generation from the local Qwen3 base checkpoint."""
+"""Run greedy BF16 generation from a Hugging Face model name."""
 
 from __future__ import annotations
 
 import argparse
 import sys
 import time
-from pathlib import Path
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -14,11 +13,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Greedy Qwen3-30B-A3B-Base generation through Transformers"
+        description="Greedy Qwen generation through Transformers"
     )
     parser.add_argument("--prompt", nargs="?", default="The capital of France is")
     parser.add_argument(
-        "--model-dir", type=Path, default=Path("Qwen/Qwen3-30B-A3B-Base")
+        "--model", required=True
     )
     parser.add_argument("-n", "--max-new-tokens", type=int, default=20)
     parser.add_argument(
@@ -52,9 +51,9 @@ def main() -> None:
         raise SystemExit("CUDA/ROCm PyTorch is not available in this environment")
 
     load_started = time.perf_counter()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_dir,
+        args.model,
         dtype=torch.bfloat16,
         device_map=device,
         attn_implementation="eager",

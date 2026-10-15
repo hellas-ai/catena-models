@@ -74,10 +74,6 @@ pub(crate) fn validate(
     ) {
         config.validate()?;
         ensure!(
-            config.hidden_size.is_power_of_two() && config.head_dim.is_power_of_two(),
-            "experimental Qwen3.5 requires power-of-two hidden and attention head widths"
-        );
-        ensure!(
             options.experimental_kernels == ExperimentalKernelKind::Fused,
             "experimental Qwen3.5 requires --kernels fused"
         );
@@ -98,6 +94,16 @@ pub(crate) fn validate(
         );
     }
     if config.architecture == ModelArchitecture::Qwen35Moe {
+        ensure!(
+            config.hidden_size.is_power_of_two(),
+            "experimental MoE router requires a power-of-two hidden width"
+        );
+        ensure!(
+            config.head_dim <= 256
+                && config.linear_state_size.unwrap() <= 256
+                && config.linear_value_head_size().unwrap() <= 256,
+            "experimental MoE attention and normalization support head widths up to 256"
+        );
         ensure!(
             config.num_experts <= 256 && config.experts_per_token <= 8,
             "experimental MoE supports at most 256 experts and eight active experts"
@@ -122,6 +128,15 @@ pub(crate) fn validate(
         "experimental Qwen3 rotary dimension must be even"
     );
     Ok(())
+}
+
+pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    validate(config, options, None)?;
+    ensure!(
+        config.is_qwen35(),
+        "image inputs require Qwen3.5 dense or MoE"
+    );
+    qwen35::multimodal_source(config, options)
 }
 
 /// Persistent experimental scratch is returned by the artifact after every call.
@@ -718,6 +733,14 @@ mod tests {
             bad.num_experts = experts;
             bad.experts_per_token = selected;
             bad.shared_expert_intermediate_size = shared;
+            assert!(validate(&bad, options, None).is_err());
+        }
+        for head in [512, 1024] {
+            let mut bad = config.clone();
+            bad.head_dim = head;
+            assert!(validate(&bad, options, None).is_err());
+            let mut bad = config.clone();
+            bad.linear_state_size = Some(head);
             assert!(validate(&bad, options, None).is_err());
         }
         assert!(

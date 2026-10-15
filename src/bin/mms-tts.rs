@@ -11,8 +11,8 @@ struct Args {
     text: Option<String>,
     #[arg(long, default_value = "speech.wav")]
     output: PathBuf,
-    #[arg(long)]
-    model_dir: Option<PathBuf>,
+    #[arg(long, required = true, value_name = "MODEL")]
+    model: String,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     #[arg(long, default_value_t = 1.)]
@@ -45,7 +45,7 @@ fn main() -> Result<()> {
         a.inspect || a.generate_entrypoint.is_some() || a.text.is_some(),
         "text is required"
     );
-    let dir = tts::snapshot(a.model_dir.as_deref())?;
+    let dir = tts::snapshot(&a.model)?;
     let config = Config::read(&dir)?;
     if a.timings || a.inspect {
         eprintln!("MMS snapshot: {}", dir.display());

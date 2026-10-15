@@ -540,10 +540,11 @@ mod reference_tests {
         Ok(())
     }
     #[test]
-    #[ignore = "requires QWEN35_MMPROJ_PATHS (colon-separated BF16 projector paths), no GPU"]
+    #[ignore = "requires QWEN35_MMPROJ_MODELS (comma-separated HF names), no GPU"]
     fn real_projector_inventories() -> Result<()> {
-        let paths = std::env::var_os("QWEN35_MMPROJ_PATHS").context("set QWEN35_MMPROJ_PATHS")?;
-        for path in std::env::split_paths(&paths) {
+        let models = std::env::var("QWEN35_MMPROJ_MODELS").context("set QWEN35_MMPROJ_MODELS")?;
+        for model in models.split(',') {
+            let path = crate::hfhub::download_mmproj(model.trim())?;
             let config = VisionConfig::from_gguf(&path)?;
             let specs = config.weight_specs(&path)?;
             let actual = crate::checkpoint::tensor_inventory(&path)?;

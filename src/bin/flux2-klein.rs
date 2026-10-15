@@ -11,8 +11,8 @@ struct Args {
     prompt: Option<String>,
     #[arg(long, default_value = "image.png")]
     output: PathBuf,
-    #[arg(long)]
-    model_dir: Option<PathBuf>,
+    #[arg(long, required = true, value_name = "MODEL")]
+    model: String,
     #[arg(long, default_value_t = 0)]
     seed: u64,
     #[arg(long, default_value_t = 1024)]
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         // This single-threaded entry point has not initialized any runtime or worker threads.
         unsafe { std::env::set_var("CATENA_STARTUP_TIMINGS", "1") };
     }
-    let p = config::snapshot(a.model_dir.as_deref())?;
+    let p = config::snapshot(&a.model)?;
     let t: config::TextConfig = config::read(p.join("text_encoder/config.json"))?;
     t.qwen()?;
     let d: config::TransformerConfig = config::read(p.join("transformer/config.json"))?;

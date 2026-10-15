@@ -1,0 +1,140 @@
+# Image rows are F32 vision outputs narrowed to BF16 language activations.
+# MRoPE coordinates are independent of cache offsets.
+
+(def program stdlib.qwen35.image-row : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> 1 =
+ ([image out token-index index.]
+  ({[.token-index] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen3.memory.u64.mul [base.])
+  ({[.base] [.index]} stdlib.qwen3.memory.u64.add [offset.])
+  ({[.image] [.offset]} stdlib.qwen3.memory.ref-read-f32 [raw.])
+  ([.raw] f32.to-bf16 [value.])
+  ({[.out] [.index] [.value]} stdlib.qwen3.memory.write-bf16)
+  (unit.elim)
+  (unit.intro)
+ ))
+(def program stdlib.qwen35.image-row.yes : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([image out token-index pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.image] [.out] [.token-index] [.index]} stdlib.qwen35.image-row)
+
+ ))
+(def program stdlib.qwen35.image-row.no : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([image out token-index pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  [.unit]
+ ))
+(def program stdlib.qwen35.image-row.launch : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([image out token-index count pair.]
+  ([.pair] stdlib.qwen3.memory.thread-index [index.])
+  ({[.index] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+  ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.image] [.out] [.token-index]} partial.stdlib.qwen35.image-row.yes.3 [yes.])
+  ({[.image] [.out] [.token-index]} partial.stdlib.qwen35.image-row.no.3 [no.])
+  ({[.condition] [.index] [.yes] [.no] unit.intro} core.if)
+ ))
+(def program qwen3.mm-image-row : {((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([image token-index.]
+  (const.u64.0x{{HIDDEN_SIZE}} [count.])
+  ([.count] stdlib.qwen3.memory.alloc-bf16 [out.])
+  ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+  ([.blocks] stdlib.qwen3.memory.grid [grid.])
+  ({[.image] [.out] [.token-index] [.count] [.grid]} partial.stdlib.qwen35.image-row.host-step.5 [host-callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [host-end.])
+  ({[.host-end] [.out] [.host-callback] core.truth} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+
+(def program stdlib.qwen35.image-row.host-step : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([image out token-index count grid pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ({[.image] [.out] [.token-index] [.count]} partial.stdlib.qwen35.image-row.launch.4 [kernel.])
+  ({[.grid] [.kernel]} unsafe.launch unit.elim)
+  ({[.value] [.truth]} *.intro)
+ ))
+
+
+(def program stdlib.qwen35.mm-rope : {((cap.ref mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([positions out index.]
+  ({[.index] (const.u64.0x{{ROPE_HALF_DIM}})} stdlib.qwen3.memory.u64.rem [pair.])
+  ({[.pair] (const.u64.0x0000000000000003)} stdlib.qwen3.memory.u64.rem [mod.])
+  ({[.mod] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.equal [height-mod.])
+  ({[.mod] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.equal [width-mod.])
+  ({[.pair] (const.u64.0x{{HEIGHT_END}})} stdlib.qwen3.memory.u64.less [height-range.])
+  ({[.pair] (const.u64.0x{{WIDTH_END}})} stdlib.qwen3.memory.u64.less [width-range.])
+  ({[.height-mod] (const.u64.0x0000000000000001) (const.u64.0x0000000000000000)} stdlib.qwen3.memory.select-u64 [height-axis.])
+  ({[.height-range] [.height-axis] (const.u64.0x0000000000000000)} stdlib.qwen3.memory.select-u64 [axis0.])
+  ({[.width-mod] (const.u64.0x0000000000000002) [.axis0]} stdlib.qwen3.memory.select-u64 [width-axis.])
+  ({[.width-range] [.width-axis] [.axis0]} stdlib.qwen3.memory.select-u64 [axis.])
+  ({[.positions] [.axis]} stdlib.qwen3.memory.ref-read-u64 [coordinate.])
+  ([.coordinate] stdlib.qwen3.memory.fold-count-u32 stdlib.qwen3.memory.u32.to-f32 [position.])
+  ([.pair] qwen3.rope-frequency [frequency.])
+  ({[.position] [.frequency]} stdlib.qwen3.memory.f32.mul [angle.])
+  ([.angle] qwen3.rope-sincos [sine cosine.])
+  ({[.index] (const.u64.0x{{ROPE_HALF_DIM}})} stdlib.qwen3.memory.u64.less [first.])
+  ({[.first] [.cosine] [.sine]} stdlib.qwen3.memory.select-f32 [value.])
+  ({[.out] [.index] [.value]} stdlib.qwen3.memory.write-f32)
+  (unit.elim)
+  (unit.intro)
+ ))
+(def program stdlib.qwen35.mm-rope.yes : {((cap.ref mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([positions out pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.positions] [.out] [.index]} stdlib.qwen35.mm-rope)
+
+ ))
+(def program stdlib.qwen35.mm-rope.no : {((cap.ref mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([positions out pair.]
+  ([.pair] *.elim [index proofs.])
+  ([.proofs] *.elim [proof unit.])
+  ([.proof] unsafe.discard unit.elim)
+  [.unit]
+ ))
+(def program stdlib.qwen35.mm-rope.launch : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([positions out count pair.]
+  ([.pair] stdlib.qwen3.memory.thread-index [index.])
+  ({[.index] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+  ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.positions] [.out]} partial.stdlib.qwen35.mm-rope.yes.2 [yes.])
+  ({[.positions] [.out]} partial.stdlib.qwen35.mm-rope.no.2 [no.])
+  ({[.condition] [.index] [.yes] [.no] unit.intro} core.if)
+ ))
+(def program qwen3.mm-rope-table : {((cap.ref mem) val)} -> ((cap.own mem) val) =
+ ([positions.]
+  (const.u64.0x{{ROPE_DIM}} [count.])
+  ([.count] stdlib.qwen3.memory.alloc-f32 [out.])
+  ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+  ([.blocks] stdlib.qwen3.memory.grid [grid.])
+  ({[.positions] [.out] [.count] [.grid]} partial.stdlib.qwen35.mm-rope.host-step.4 [host-callback.])
+  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [host-end.])
+  ({[.host-end] [.out] [.host-callback] core.truth} core.fold.bounded_u64 [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+(def program stdlib.qwen35.mm-rope.host-step : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([positions out count grid pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ({[.positions] [.out] [.count]} partial.stdlib.qwen35.mm-rope.launch.3 [kernel.])
+  ({[.grid] [.kernel]} unsafe.launch unit.elim)
+  ({[.value] [.truth]} *.intro)
+ ))
+
+
+(def program qwen3.embedding : {((cap.ref mem) val) ((cap.ref mem) val)} -> ((cap.own mem) val) =
+ ([tokens weight.] ({[.tokens] [.weight] (const.u64.0x0000000000000000)} qwen3.embedding-one)
+ ))

@@ -31,8 +31,13 @@ pub struct Model {
 }
 
 impl Model {
-    pub fn load(model_dir: impl AsRef<Path>) -> Result<Self> {
-        Self::load_gguf(model_dir.as_ref().join("model-bf16.gguf"))
+    pub fn load(model: &str) -> Result<Self> {
+        Self::load_hf_with_options(model, InferenceOptions::new(InferencePrecision::Bf16))
+    }
+
+    /// Resolve an HF name through hf-hub, including every GGUF shard.
+    pub fn load_hf_with_options(model: &str, options: InferenceOptions) -> Result<Self> {
+        Self::load_gguf_with_options(crate::hfhub::download_gguf(model)?.primary, options)
     }
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
@@ -96,10 +101,6 @@ impl Model {
         let config = read_gguf_model_config(gguf_path)?;
         if options.codegen == catena_lang::codegen::CodegenKind::Experimental {
             crate::experimental::validate(&config, options, Some(dialect))?;
-            ensure!(
-                !multimodal,
-                "experimental codegen does not yet support image inputs"
-            );
         }
         let experimental_workspace_bytes = crate::experimental::workspace_bytes(&config, options)?;
         let specs = weight_specs(&config)?;
@@ -223,6 +224,25 @@ impl Model {
             capacity,
             next_rope_position: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn session_from_cache_for_test(
+        &self,
+        capacity: usize,
+        position: usize,
+        cache: &[u16],
+    ) -> Result<Session<'_>> {
+        ensure!(
+            self.precision == InferencePrecision::Bf16
+                && cache.len() == self.config.cache_elements(capacity)?
+                && position <= capacity,
+            "invalid test cache"
+        );
+        let mut session = self.session(capacity)?;
+        session.cache = Some(self.runtime.mem_u16(cache)?);
+        session.position = position;
+        Ok(session)
     }
 
     fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
@@ -350,22 +370,34 @@ impl Model {
         start: usize,
         capacity: usize,
         cache: MemOwn,
-    ) -> Result<(MemOwn, MemOwn, u64)> {
+        workspace: Option<MemOwn>,
+        sequence: usize,
+    ) -> Result<(MemOwn, Option<MemOwn>, MemOwn, u64)> {
         let positions = self.runtime.mem_u64(&positions)?;
-        let mut inputs = vec![
-            hidden.into(),
-            positions.as_ref().into(),
-            cache.into(),
-            (capacity as u64).into(),
-            (start as u64).into(),
-        ];
+        let mut inputs = vec![hidden.into(), positions.as_ref().into(), cache.into()];
+        let has_workspace = workspace.is_some();
+        if let Some(workspace) = workspace {
+            inputs.push(workspace.into());
+        }
+        inputs.extend([(capacity as u64).into(), (start as u64).into()]);
+        if has_workspace {
+            inputs.push((sequence as u64).into());
+        }
         for weight in &self.weights {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
-        Self::cached_result(
-            self.artifact.exec_values("qwen3.multimodal", inputs)?,
-            self.config.vocabulary_size,
-        )
+        let mut outputs = self.artifact.exec_values("qwen3.multimodal", inputs)?;
+        let workspace = if has_workspace {
+            ensure!(outputs.len() == 4, "experimental multimodal ABI mismatch");
+            match outputs.remove(1) {
+                Value::MemOwn(m) => Some(m),
+                _ => anyhow::bail!("expected multimodal workspace memory"),
+            }
+        } else {
+            None
+        };
+        let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
+        Ok((cache, workspace, logits, token))
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
@@ -549,7 +581,11 @@ impl Session<'_> {
                 } else {
                     self.model.token_embedding(token)?
                 };
-            result = Some(self.forward_embedding(hidden, prompt.positions[index])?);
+            result = Some(self.forward_embedding(
+                hidden,
+                prompt.positions[index],
+                prompt.tokens.len(),
+            )?);
         }
         self.next_rope_position = Some(prompt.next_rope_position);
         result.context("empty multimodal prefill")
@@ -559,6 +595,7 @@ impl Session<'_> {
         &mut self,
         hidden: MemOwn,
         coordinates: [u64; 3],
+        sequence: usize,
     ) -> Result<(MemOwn, u64)> {
         ensure!(
             self.position < self.capacity,
@@ -568,14 +605,26 @@ impl Session<'_> {
             .cache
             .take()
             .context("session cache unavailable after failed execution")?;
-        let (cache, logits, token) = self.model.cached_embedding_outputs(
+        let workspace = if self.model.experimental_workspace_bytes > 0 {
+            Some(
+                self.workspace
+                    .take()
+                    .context("session workspace unavailable after failed execution")?,
+            )
+        } else {
+            None
+        };
+        let (cache, workspace, logits, token) = self.model.cached_embedding_outputs(
             hidden,
             coordinates,
             self.position,
             self.capacity,
             cache,
+            workspace,
+            sequence,
         )?;
         self.cache = Some(cache);
+        self.workspace = workspace;
         self.position += 1;
         Ok((logits, token))
     }
@@ -599,7 +648,7 @@ impl Session<'_> {
             let mut result = None;
             for &token in tokens {
                 let hidden = self.model.token_embedding(token)?;
-                result = Some(self.forward_embedding(hidden, [rope_position; 3])?);
+                result = Some(self.forward_embedding(hidden, [rope_position; 3], 1)?);
                 rope_position += 1;
             }
             self.next_rope_position = Some(rope_position);
