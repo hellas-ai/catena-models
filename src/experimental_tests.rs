@@ -443,7 +443,12 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
     // registrations exceed the physical-memory pinning limit on this machine.
     let mut prefills = Vec::new();
     {
-        let reference = Model::load_gguf_with_precision(&path, InferencePrecision::Bf16)?;
+        let reference = Model::load_gguf_with_options(
+            &path,
+            InferenceOptions::new(InferencePrecision::Bf16)
+                .with_fused_attention(false)
+                .with_matrix_cores(crate::catena::MatrixCoreMode::Disabled),
+        )?;
         for prompt in [
             "Gravity is".to_owned(),
             "The quick brown fox jumps over the lazy dog. ".repeat(12),
@@ -463,7 +468,8 @@ fn qwen35_checkpoint_parity(variable: &str) -> Result<()> {
         let reference = Model::load_gguf_with_options(
             &path,
             InferenceOptions::new(InferencePrecision::Bf16)
-                .with_fused_attention(variable == "CATENA_QWEN36_EXPERIMENTAL_MODEL"),
+                .with_fused_attention(variable == "CATENA_QWEN36_EXPERIMENTAL_MODEL")
+                .with_matrix_cores(crate::catena::MatrixCoreMode::Disabled),
         )?;
         for (tokens, cache, mut logits) in prefills {
             let mut session =
@@ -843,6 +849,151 @@ fn experimental_qwen35_delta_retains_f32_state_on_gpu() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn experimental_qwen35_register_delta_on_gpu() -> Result<()> {
+    if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
+        return Ok(());
+    }
+    // Real 35B recurrent dimensions, independent of attention/FFN dimensions.
+    let mut c = tiny_moe_config();
+    c.linear_state_size = Some(128);
+    c.linear_group_count = Some(16);
+    c.linear_time_step_rank = Some(32);
+    c.linear_inner_size = Some(4096);
+    let options =
+        InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
+    let mut source = source(&c, options)?;
+    let original = include_str!("catena/experimental/qwen35_fused_delta.hex");
+    let original = &original[original
+        .find("(def program stdlib.qwen35.fused-delta.kernel :")
+        .unwrap()..];
+    let original = original
+        .replace("qwen35.fused-delta", "test.baseline-fused-delta")
+        .replace("{{KEY_DIM}}", "0000000000000080")
+        .replace("{{VALUE_DIM}}", "0000000000000080")
+        .replace("{{KEY_HEADS}}", "0000000000000010")
+        .replace("{{KEY_SIZE}}", "0000000000000800")
+        .replace("{{VALUE_SIZE}}", "0000000000001000")
+        .replace("{{VALUE_BLOCKS}}", "0000000000000200")
+        .replace(
+            "{{DELTA_SCALE_BITS}}",
+            &format!("{:08X}", (128.0f32.sqrt().recip()).to_bits()),
+        );
+    source.push_str(&original);
+    const WRAPPER: &str = r#"
+(def program test.register-delta : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([conv query key alpha beta dt a shadow base.]
+  ({[.conv] [.query] [.key] [.alpha] [.beta] [.dt] [.a] [.shadow] [.base]} qwen35.fused-delta [output.])
+  {[.conv] [.query] [.key] [.alpha] [.beta] [.shadow] [.output]}))
+"#;
+    source.push_str(WRAPPER);
+    source.push_str(
+        &WRAPPER
+            .replace("test.register-delta", "test.baseline-delta")
+            .replace("qwen35.fused-delta", "test.baseline-fused-delta"),
+    );
+    let module = compile(
+        crate::catena::runtime_sources_for_options(&source, options),
+        GpuDialect::Hip,
+    )?;
+    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let artifact = rt.load(module)?;
+    let base = 17usize;
+    let len = 4096 * 128;
+    let initial = (0..base + len + 19)
+        .map(|i| ((i * 17 % 53) as f32 - 26.0) / 137.0)
+        .collect::<Vec<_>>();
+    let dt = rt.mem_f32(&(0..32).map(|i| i as f32 / 113.0 - 0.2).collect::<Vec<_>>())?;
+    let a = rt.mem_f32(&(0..32).map(|i| -0.5 - i as f32 / 97.0).collect::<Vec<_>>())?;
+    let mut inputs = (0..8)
+        .map(|step| -> Result<Vec<MemOwn>> {
+            [8192, 2048, 2048, 32, 32]
+                .into_iter()
+                .enumerate()
+                .map(|(which, n)| {
+                    upload(
+                        &rt,
+                        &(0..n)
+                            .map(|i| {
+                                rounded(
+                                    ((i * (7 + which * 2) + step * 13) % 59) as f32 / 131.0 - 0.2,
+                                )
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let run =
+        |name: &str, input: Vec<MemOwn>, state: MemOwn| -> Result<(Vec<MemOwn>, MemOwn, MemOwn)> {
+            let mut args = input.into_iter().map(Value::MemOwn).collect::<Vec<_>>();
+            args.extend([
+                dt.as_ref().into(),
+                a.as_ref().into(),
+                state.into(),
+                (base as u64).into(),
+            ]);
+            let mut out = memories(&artifact, name, args)?;
+            let output = out.pop().unwrap();
+            let state = out.pop().unwrap();
+            Ok((out, state, output))
+        };
+    let mut reference = rt.mem_f32(&initial)?;
+    let mut actual = rt.mem_f32(&initial)?;
+    for step in 0..inputs.len() {
+        let input = std::mem::take(&mut inputs[step]);
+        let (input, state, expected) = run("test.baseline-delta", input, reference)?;
+        reference = state;
+        let (input, state, output) = run("test.register-delta", input, actual)?;
+        inputs[step] = input;
+        actual = state;
+        assert_eq!(
+            output.try_to_u16_vec()?,
+            expected.try_to_u16_vec()?,
+            "output step {step}"
+        );
+        let got = actual.try_to_f32_vec()?;
+        assert_eq!(
+            got,
+            reference.try_to_f32_vec()?,
+            "F32 recurrent state step {step}"
+        );
+        assert_eq!(&got[..base], &initial[..base]);
+        assert_eq!(&got[base + len..], &initial[base + len..]);
+    }
+    // Interleave timings to avoid interpreting clock/temperature drift as a gain.
+    for repeat in 0..5 {
+        for name in if repeat % 2 == 0 {
+            ["test.baseline-delta", "test.register-delta"]
+        } else {
+            ["test.register-delta", "test.baseline-delta"]
+        } {
+            let mut state = rt.mem_f32(&initial)?;
+            for i in 0..16 {
+                let slot = i % inputs.len();
+                let input = std::mem::take(&mut inputs[slot]);
+                let (input, next, _) = run(name, input, state)?;
+                inputs[slot] = input;
+                state = next;
+            }
+            let started = std::time::Instant::now();
+            for i in 0..256 {
+                let slot = i % inputs.len();
+                let input = std::mem::take(&mut inputs[slot]);
+                let (input, next, _) = run(name, input, state)?;
+                inputs[slot] = input;
+                state = next;
+            }
+            eprintln!(
+                "DeltaNet {name} repeat={repeat} us/step={:.3}",
+                started.elapsed().as_secs_f64() * 1e6 / 256.0
+            );
+        }
+    }
+    Ok(())
+}
+
 fn tiny_moe_config() -> ModelConfig {
     let mut c = ModelConfig::qwen36_35b_a3b();
     c.hidden_size = 32;
@@ -1103,6 +1254,19 @@ fn experimental_qwen35_moe_fused_ffn_on_gpu() -> Result<()> {
 
 #[test]
 fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
+    qwen35_hybrid_sessions_on_gpu(16, false)
+}
+
+#[test]
+fn experimental_qwen35_batched_hybrid_sessions_on_gpu() -> Result<()> {
+    qwen35_hybrid_sessions_on_gpu(128, false)
+}
+
+#[test]
+fn experimental_qwen35_batched_dense_sessions_on_gpu() -> Result<()> {
+    qwen35_hybrid_sessions_on_gpu(128, true)
+}
+fn qwen35_hybrid_sessions_on_gpu(key_dim: usize, dense: bool) -> Result<()> {
     if std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_GPU_TESTS").is_none() {
         return Ok(());
     }
@@ -1111,6 +1275,15 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
     c.num_experts = 4;
     c.experts_per_token = 2;
     c.mrope_sections = [2, 1, 1];
+    c.linear_state_size = Some(key_dim);
+    c.linear_inner_size = Some(2 * key_dim);
+    if dense {
+        c.architecture = ModelArchitecture::Qwen35Dense;
+        c.hidden_size = 96;
+        c.num_experts = 0;
+        c.experts_per_token = 0;
+        c.shared_expert_intermediate_size = None;
+    }
     let specs = weight_specs(&c)?;
     let make = |codegen| -> Result<(Runtime, Artifact, Vec<MemOwn>)> {
         let options = InferenceOptions::new(InferencePrecision::Bf16)
@@ -1218,6 +1391,19 @@ fn experimental_qwen35_moe_hybrid_sessions_on_gpu() -> Result<()> {
             rs = state;
             assert_eq!(cache, expected_cache, "hybrid decode cache {position}");
         }
+    }
+
+    let mut es = init(&experimental)?;
+    let mut rs = init(&reference)?;
+    for (position, tokens) in [(0usize, &[1u64, 2][..]), (2, &[3, 4, 5][..]), (5, &[6][..])] {
+        let (state, actual) = invoke(&rt, &experimental, &ew, tokens, position, es)?;
+        let (state, cache) = snapshot(&experimental, state)?;
+        es = state;
+        let (state, expected) = invoke(&reference_rt, &reference, &rw, tokens, position, rs)?;
+        let (state, reference_cache) = snapshot(&reference, state)?;
+        rs = state;
+        close(&actual, &expected, 0.01);
+        assert_eq!(cache, reference_cache, "chunked prefill at {position}");
     }
 
     // Image rows and token rows use the same public entrypoints as Session.
@@ -1746,3 +1932,6 @@ fn model_owned_session_state_on_gpu() -> Result<()> {
     }
     Ok(())
 }
+
+#[path = "experimental_prefill_tests.rs"]
+mod prefill;

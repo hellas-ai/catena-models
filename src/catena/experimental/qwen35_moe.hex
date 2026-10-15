@@ -1,39 +1,6 @@
 # Fused hybrid MoE FFN. Scratch offsets are byte-aligned and reused per layer.
 # Router F32, selected IDs U64, activations BF16; no new compiler primitives.
 
-(def program stdlib.qwen3.memory.select-ref.yes : {({({((cap.ref mem) val) ((cap.ref mem) val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> ((cap.ref mem) val) =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x0] *.elim [x2 x3.])
-  ([.x1] *.elim [x4 x5.])
-  ([.x4] unsafe.discard unit.elim)
-  ([.x5] unit.elim)
-  [. x2]
- ))
-
-(def program stdlib.qwen3.memory.select-ref.no : {({({((cap.ref mem) val) ((cap.ref mem) val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> ((cap.ref mem) val) =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x0] *.elim [x2 x3.])
-  ([.x1] *.elim [x4 x5.])
-  ([.x4] unsafe.discard unit.elim)
-  ([.x5] unit.elim)
-  [. x3]
- ))
-
-(def program stdlib.qwen3.memory.select-ref : {(bool val) ((cap.ref mem) val) ((cap.ref mem) val)} -> ((cap.ref mem) val) =
- ([condition yes no.]
-  ([.] unit.intro meta.master.predicate [x0.])
-  ([.condition x0] smolcat.value.named_at [x1.])
-  ([.yes no] *.intro [x2.])
-  ([.] name.stdlib.qwen3.memory.select-ref.yes lift [x3.])
-  ([.] name.stdlib.qwen3.memory.select-ref.no lift [x4.])
-  ([.x1] :.forget [x5.])
-  ([.] unit.intro [x6.])
-  ([.x5 x2 x3 x4 x6] core.if [x7.])
-  [. x7]
- ))
-
 (def program stdlib.qwen35.moe.router-load : {((cap.own mem) val) ((cap.ref mem) val) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons) perf.memory perf.block ({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.type.Shared) val) (u64 val) (u64 val) ({(u64 val) perf.phase} *)} -> perf.phase =
  ([input weight shared base tid pair.]
   ([.pair] *.elim [i acc.])
