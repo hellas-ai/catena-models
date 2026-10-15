@@ -59,7 +59,10 @@ Qwen3.5/3.6 images use the existing native vision encoder with the selected
 language compiler. Older Qwen3 MoE uses the default compiler.
 
 Experimental Qwen3.5 MoE combines routed/shared expert gate/up activations and
-down projections, keeps routing scratch per session, and uses parallel argmax.
+down projections, keeps routing and activation scratch per session, and uses parallel argmax.
+Grouped QKV/Z/gate projections, fused convolution/QK normalization, and fused
+head normalization/RoPE/KV append reduce preparation launches. Single-token
+DeltaNet updates read and store BF16 cache directly while computing in F32.
 Its full-attention layers use SIMT online cached attention during decode,
 including context output gating, without score/probability allocations.
 Multi-token prefill retains the validated staged BF16 attention path.
@@ -70,6 +73,14 @@ scalar sum order. DeltaNet
 prediction, recurrent update, and output execute in one kernel without a delta
 allocation. Prefill keeps recurrent state F32 until the call boundary, then
 persists BF16 cache state. Prefill currently processes tokens sequentially.
+
+Session creation calls the selected Hex model's `qwen3.init(capacity)` entrypoint.
+Hex computes the layout and allocates/initializes cache and workspace, including
+persistent activation scratch. Rust retains an opaque collection of owned state
+buffers and passes it through the same text/image invocation code for both
+backends. State results precede logits and the output token; Rust does not know
+which buffers are caches, router workspace, or activations. This uses the pinned
+compiler and introduces no compiler primitives.
 
 [Kernel details, validation, and measurements](docs/experimental-qwen.md).
 

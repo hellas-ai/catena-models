@@ -2,7 +2,7 @@
 use super::*;
 
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
-    let mut text = super::source(
+    let mut text = super::graph_source(
         config,
         options.with_experimental_kernels(ExperimentalKernelKind::Reference),
     )?;

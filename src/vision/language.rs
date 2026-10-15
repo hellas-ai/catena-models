@@ -24,6 +24,8 @@ pub(crate) fn source(
         .replacen("(def program qwen3 :", "(def program qwen3.multimodal :",1)
         .replacen("    (cap.ref mem)\n", "    (cap.own mem)\n    (cap.ref mem)\n",1)
         .replacen("= ([tokens cache token-capacity cache-start embed-weight", "= ([hidden-00 positions cache token-capacity cache-start _embed-weight",1)
+        .replacen("    (u64 val)\n    (u64 val)\n", "    (u64 val)\n    (u64 val)\n    (u64 val)\n", 1)
+        .replacen("cache token-capacity cache-start _embed-weight", "cache token-capacity cache-start _sequence _embed-weight", 1)
         .replace(prologue,"  (const.u64.0x0000000000000001 [sequence-value.])\n  ([.positions] qwen3.mm-rope-table [rope.])\n");
     let mut out = format!(
         r#"
