@@ -74,6 +74,14 @@ prediction, recurrent update, and output execute in one kernel without a delta
 allocation. Prefill keeps recurrent state F32 until the call boundary, then
 persists BF16 cache state. Prefill currently processes tokens sequentially.
 
+Session creation calls the selected Hex model's `qwen3.init(capacity)` entrypoint.
+Hex computes the layout and allocates/initializes cache and workspace, including
+persistent activation scratch. Rust retains an opaque collection of owned state
+buffers and passes it through the same text/image invocation code for both
+backends. State results precede logits and the output token; Rust does not know
+which buffers are caches, router workspace, or activations. This uses the pinned
+compiler and introduces no compiler primitives.
+
 [Kernel details, validation, and measurements](docs/experimental-qwen.md).
 
 ## Benchmarks and validation

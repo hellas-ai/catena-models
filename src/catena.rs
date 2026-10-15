@@ -106,6 +106,62 @@ pub fn runtime_sources_for_options<'a>(model: &'a str, options: InferenceOptions
     }
 }
 
+/// Keep primitive declarations and exported programs, following callback dependencies.
+pub(crate) fn prepare_sources(
+    raw: metacat::theory::RawTheorySet,
+) -> Result<metacat::theory::RawTheorySet> {
+    use std::collections::BTreeSet;
+    let mut raw = raw.with_extensions()?;
+    let program = raw
+        .theories
+        .get_mut(&"program".parse().unwrap())
+        .ok_or_else(|| anyhow::anyhow!("missing program theory"))?;
+    let available = program
+        .arrows
+        .keys()
+        .map(|n| n.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut pending = program
+        .arrows
+        .iter()
+        .filter_map(|(name, arrow)| {
+            (!name.as_str().starts_with("meta.")
+                && (arrow.definition.is_none() || !name.as_str().starts_with("stdlib.")))
+            .then(|| name.as_str().to_owned())
+        })
+        .collect::<Vec<_>>();
+    let mut used = BTreeSet::new();
+    while let Some(name) = pending.pop() {
+        if !used.insert(name.clone()) {
+            continue;
+        }
+        let Some(arrow) = program.arrows.get(&name.parse().unwrap()) else {
+            continue;
+        };
+        for expr in [&arrow.type_maps.0, &arrow.type_maps.1]
+            .into_iter()
+            .chain(arrow.definition.iter())
+        {
+            for token in expr
+                .to_string()
+                .split(|c: char| c.is_whitespace() || "(){}[]^".contains(c))
+            {
+                let token = token.strip_prefix("name.").unwrap_or(token);
+                let token = token
+                    .strip_prefix("partial.")
+                    .and_then(|s| s.rsplit_once('.'))
+                    .filter(|(_, n)| n.parse::<usize>().is_ok())
+                    .map_or(token, |(s, _)| s);
+                if available.contains(token) {
+                    pending.push(token.to_owned());
+                }
+            }
+        }
+    }
+    program.arrows.retain(|n, _| used.contains(n.as_str()));
+    Ok(raw)
+}
+
 /// Compile Catena sources and load an executable artifact into a GPU context.
 pub(crate) fn load_runtime<'a>(
     sources: impl IntoIterator<Item = &'a str>,
@@ -114,16 +170,7 @@ pub(crate) fn load_runtime<'a>(
     catena_lang::runtime::Runtime,
     catena_lang::runtime::Artifact,
 )> {
-    use catena_lang::{
-        codegen::CodegenKind, compile::compile, report::CompileReport, runtime::Runtime,
-    };
-    use metacat::theory::RawTheorySet;
-
-    let mut report = CompileReport::new(RawTheorySet::from_texts(sources)?);
-    let module = compile(&mut report, CodegenKind::Default, dialect)?;
-    let mut runtime = Runtime::new(dialect)?;
-    let artifact = runtime.load(module)?;
-    Ok((runtime, artifact))
+    load_runtime_with_codegen(sources, dialect, CodegenKind::Default)
 }
 
 pub(crate) fn load_runtime_with_codegen<'a>(
@@ -134,10 +181,16 @@ pub(crate) fn load_runtime_with_codegen<'a>(
     catena_lang::runtime::Runtime,
     catena_lang::runtime::Artifact,
 )> {
-    if codegen == CodegenKind::Default {
-        return load_runtime(sources, dialect);
+    let raw = metacat::theory::RawTheorySet::from_texts(sources)?;
+    let raw = prepare_sources(raw)?;
+    let module = catena_lang::compile::compile(
+        &mut catena_lang::report::CompileReport::new(raw),
+        codegen,
+        dialect,
+    )?;
+    if let Some(path) = std::env::var_os("CATENA_QWEN3_EXPERIMENTAL_CPP") {
+        std::fs::write(path, &module.source)?;
     }
-    let module = crate::experimental::compile(sources, dialect)?;
     let mut runtime = catena_lang::runtime::Runtime::new(dialect)?;
     let artifact = runtime.load(module)?;
     Ok((runtime, artifact))
@@ -746,7 +799,9 @@ pub fn generated_model_source_for_options(
     }
     source.push('\n');
     source.push_str(&generated_entrypoint(config, precision)?);
-    Ok(retain_reachable_model_programs(&source))
+    let mut source = retain_reachable_model_programs(&source);
+    crate::session_graph::append(&mut source, config, options);
+    Ok(source)
 }
 
 /// Add a token-at-a-time embedding entrypoint with independent MRoPE coordinates.
@@ -1226,7 +1281,14 @@ mod tests {
             let programs = qwen3_program_references(&source);
             all_programs.extend(programs.keys().cloned());
             let mut reachable = BTreeSet::new();
-            let mut pending = vec!["qwen3".to_owned()];
+            let mut pending = [
+                "qwen3",
+                "qwen3.init",
+                "qwen3.state-export",
+                "qwen3.state-import",
+            ]
+            .map(str::to_owned)
+            .to_vec();
             while let Some(program) = pending.pop() {
                 if !reachable.insert(program.clone()) {
                     continue;

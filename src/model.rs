@@ -27,8 +27,6 @@ pub struct Model {
     precision: InferencePrecision,
     dialect: GpuDialect,
     multimodal: bool,
-    experimental_workspace_bytes: usize,
-    activation_scratch_sizes: Vec<usize>,
 }
 
 impl Model {
@@ -95,17 +93,11 @@ impl Model {
     ) -> Result<Self> {
         ensure!(
             !options.fused_attention || dialect == GpuDialect::Hip,
-            "experimental fused attention currently supports HIP only"
+            "fused attention currently supports HIP only"
         );
         let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
-        if options.codegen == catena_lang::codegen::CodegenKind::Experimental {
-            crate::experimental::validate(&config, options, Some(dialect))?;
-        }
-        let experimental_workspace_bytes = crate::experimental::workspace_bytes(&config, options)?;
-        let activation_scratch_sizes =
-            crate::experimental::activation_scratch_sizes(&config, options);
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
@@ -170,8 +162,6 @@ impl Model {
             precision,
             dialect,
             multimodal,
-            experimental_workspace_bytes,
-            activation_scratch_sizes,
         })
     }
 
@@ -212,27 +202,25 @@ impl Model {
             "cache capacity {capacity} exceeds the model maximum {}",
             self.config.max_position_embeddings
         );
-        self.ensure_execution_supported()?;
         Ok(Session {
             model: self,
-            cache: Some(self.allocate_cache(capacity)?),
-            workspace: if self.experimental_workspace_bytes == 0 {
-                None
-            } else {
-                Some(
-                    self.runtime
-                        .mem_f32(&vec![0.0; self.experimental_workspace_bytes / 4])?,
-                )
-            },
-            activations: self
-                .activation_scratch_sizes
-                .iter()
-                .map(|&n| self.runtime.mem_u16(&vec![0; n]))
-                .collect::<Result<_, _>>()?,
+            state: Some(self.initial_state(capacity)?),
             position: 0,
             capacity,
             next_rope_position: None,
         })
+    }
+
+    fn initial_state(&self, capacity: usize) -> Result<Vec<MemOwn>> {
+        let outputs = self
+            .artifact
+            .exec_values("qwen3.init", vec![(capacity as u64).into()])?;
+        let state = owned_state(outputs)?;
+        ensure!(
+            !state.is_empty(),
+            "model initialization returned no session state"
+        );
+        Ok(state)
     }
 
     #[cfg(test)]
@@ -242,25 +230,16 @@ impl Model {
         position: usize,
         cache: &[u16],
     ) -> Result<Session<'_>> {
-        ensure!(
-            self.precision == InferencePrecision::Bf16
-                && cache.len() == self.config.cache_elements(capacity)?
-                && position <= capacity,
-            "invalid test cache"
-        );
+        ensure!(position <= capacity, "invalid test position");
         let mut session = self.session(capacity)?;
-        session.cache = Some(self.runtime.mem_u16(cache)?);
+        let replacement = self.runtime.mem_u16(cache)?;
+        let mut inputs = vec![replacement.as_ref().into()];
+        inputs.extend(session.state.take().unwrap().into_iter().map(Value::MemOwn));
+        session.state = Some(owned_state(
+            self.artifact.exec_values("qwen3.state-import", inputs)?,
+        )?);
         session.position = position;
         Ok(session)
-    }
-
-    fn allocate_cache(&self, capacity: usize) -> Result<MemOwn> {
-        let elements = self.config.cache_elements(capacity)?;
-        match self.precision {
-            InferencePrecision::F32 => self.runtime.mem_f32(&vec![0.0; elements]),
-            InferencePrecision::Bf16 => self.runtime.mem_u16(&vec![0; elements]),
-        }
-        .context("failed to allocate the model cache")
     }
 
     fn cached_outputs(
@@ -268,11 +247,8 @@ impl Model {
         tokens: &[u64],
         start: usize,
         capacity: usize,
-        cache: MemOwn,
-        workspace: Option<MemOwn>,
-        activations: Vec<MemOwn>,
-    ) -> Result<(MemOwn, Option<MemOwn>, Vec<MemOwn>, MemOwn, u64)> {
-        self.ensure_execution_supported()?;
+        state: Vec<MemOwn>,
+    ) -> Result<(Vec<MemOwn>, MemOwn, u64)> {
         ensure!(!tokens.is_empty(), "the token prefix must not be empty");
         ensure!(
             start
@@ -290,62 +266,32 @@ impl Model {
         );
 
         let token_buffer = self.runtime.mem_u64(tokens)?;
-        let has_workspace = workspace.is_some();
-        ensure!(
-            activations.len() == self.activation_scratch_sizes.len(),
-            "session activation scratch unavailable"
-        );
-        let model_input_count =
-            4 + usize::from(has_workspace) + activations.len() + self.weights.len();
-        let mut inputs = Vec::with_capacity(model_input_count);
-        inputs.extend([token_buffer.as_ref().into(), cache.into()]);
-        if let Some(workspace) = workspace {
-            inputs.push(workspace.into());
-        }
-        inputs.extend(activations.into_iter().map(Value::MemOwn));
+        let state_count = state.len();
+        let mut inputs = vec![token_buffer.as_ref().into()];
+        inputs.extend(state.into_iter().map(Value::MemOwn));
         inputs.extend([(capacity as u64).into(), (start as u64).into()]);
         for weight in &self.weights {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
-        ensure!(
-            inputs.len() == model_input_count,
-            "internal model ABI mismatch"
-        );
-        let mut outputs = self.artifact.exec_values("qwen3", inputs)?;
-        let workspace = if has_workspace {
-            ensure!(
-                outputs.len() == 4 + self.activation_scratch_sizes.len(),
-                "internal experimental output ABI mismatch"
-            );
-            let Value::MemOwn(workspace) = outputs.remove(1) else {
-                anyhow::bail!("experimental artifact returned non-memory workspace");
-            };
-            Some(workspace)
-        } else {
-            None
-        };
-        let activations = outputs
-            .drain(1..1 + self.activation_scratch_sizes.len())
-            .map(|value| match value {
-                Value::MemOwn(m) => Ok(m),
-                _ => anyhow::bail!("expected activation scratch memory"),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
-        Ok((cache, workspace, activations, logits, token))
+        Self::cached_result(
+            self.artifact.exec_values("qwen3", inputs)?,
+            state_count,
+            self.config.vocabulary_size,
+        )
     }
 
     fn cached_result(
         mut outputs: Vec<Value<'_>>,
+        state_count: usize,
         vocabulary_size: usize,
-    ) -> Result<(MemOwn, MemOwn, u64)> {
-        ensure!(outputs.len() == 3, "internal model output ABI mismatch");
+    ) -> Result<(Vec<MemOwn>, MemOwn, u64)> {
+        ensure!(
+            outputs.len() == state_count + 2,
+            "internal model output ABI mismatch"
+        );
         let next_token_output = outputs.pop().expect("output count was validated");
         let logits_output = outputs.pop().expect("output count was validated");
-        let cache_output = outputs.pop().expect("output count was validated");
-        let Value::MemOwn(cache) = cache_output else {
-            anyhow::bail!("qwen3 returned a non-memory cache: {cache_output:?}");
-        };
+        let state = owned_state(outputs)?;
         let Value::MemOwn(logits_output) = logits_output else {
             anyhow::bail!("qwen3 returned non-memory logits: {logits_output:?}");
         };
@@ -363,7 +309,7 @@ impl Model {
             *next_token < vocabulary_size as u64,
             "qwen3 returned next-token ID {next_token} outside the vocabulary"
         );
-        Ok((cache, logits_output, *next_token))
+        Ok((state, logits_output, *next_token))
     }
 
     pub fn gpu_dialect(&self) -> GpuDialect {
@@ -392,67 +338,31 @@ impl Model {
         positions: [u64; 3],
         start: usize,
         capacity: usize,
-        cache: MemOwn,
-        workspace: Option<MemOwn>,
-        activations: Vec<MemOwn>,
+        state: Vec<MemOwn>,
         sequence: usize,
-    ) -> Result<(MemOwn, Option<MemOwn>, Vec<MemOwn>, MemOwn, u64)> {
+    ) -> Result<(Vec<MemOwn>, MemOwn, u64)> {
         let positions = self.runtime.mem_u64(&positions)?;
-        let mut inputs = vec![hidden.into(), positions.as_ref().into(), cache.into()];
-        let has_workspace = workspace.is_some();
-        if let Some(workspace) = workspace {
-            inputs.push(workspace.into());
-        }
-        inputs.extend(activations.into_iter().map(Value::MemOwn));
-        inputs.extend([(capacity as u64).into(), (start as u64).into()]);
-        if has_workspace {
-            inputs.push((sequence as u64).into());
-        }
+        let state_count = state.len();
+        let mut inputs = vec![hidden.into(), positions.as_ref().into()];
+        inputs.extend(state.into_iter().map(Value::MemOwn));
+        inputs.extend([
+            (capacity as u64).into(),
+            (start as u64).into(),
+            (sequence as u64).into(),
+        ]);
         for weight in &self.weights {
             inputs.push(self.checkpoint.gpu_ref(weight)?.into());
         }
-        let mut outputs = self.artifact.exec_values("qwen3.multimodal", inputs)?;
-        let workspace = if has_workspace {
-            ensure!(
-                outputs.len() == 4 + self.activation_scratch_sizes.len(),
-                "experimental multimodal ABI mismatch"
-            );
-            match outputs.remove(1) {
-                Value::MemOwn(m) => Some(m),
-                _ => anyhow::bail!("expected multimodal workspace memory"),
-            }
-        } else {
-            None
-        };
-        let activations = outputs
-            .drain(1..1 + self.activation_scratch_sizes.len())
-            .map(|value| match value {
-                Value::MemOwn(m) => Ok(m),
-                _ => anyhow::bail!("expected activation scratch memory"),
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let (cache, logits, token) = Self::cached_result(outputs, self.config.vocabulary_size)?;
-        Ok((cache, workspace, activations, logits, token))
+        Self::cached_result(
+            self.artifact.exec_values("qwen3.multimodal", inputs)?,
+            state_count,
+            self.config.vocabulary_size,
+        )
     }
 
     pub fn next_token(&self, tokens: &[u64]) -> Result<u64> {
         let mut session = self.session(tokens.len())?;
         session.prefill_next_token(tokens)
-    }
-
-    fn ensure_execution_supported(&self) -> Result<()> {
-        ensure!(
-            matches!(
-                self.config.architecture,
-                ModelArchitecture::Qwen3Dense
-                    | ModelArchitecture::Qwen3Moe
-                    | ModelArchitecture::Qwen35Dense
-                    | ModelArchitecture::Qwen35Moe
-            ),
-            "unsupported model architecture with {} validated tensors",
-            self.weights.len()
-        );
-        Ok(())
     }
 }
 
@@ -470,12 +380,10 @@ pub fn configured_gpu_dialect() -> Result<GpuDialect> {
     }
 }
 
-/// Persistent, append-only KV-cache state for one generation sequence.
+/// Opaque, persistent model state for one generation sequence.
 pub struct Session<'model> {
     model: &'model Model,
-    cache: Option<MemOwn>,
-    workspace: Option<MemOwn>,
-    activations: Vec<MemOwn>,
+    state: Option<Vec<MemOwn>>,
     position: usize,
     capacity: usize,
     next_rope_position: Option<u64>,
@@ -483,12 +391,22 @@ pub struct Session<'model> {
 
 impl Session<'_> {
     #[cfg(test)]
-    pub(crate) fn cache_values_for_test(&self) -> Result<Vec<u16>> {
-        Ok(self
-            .cache
-            .as_ref()
-            .context("missing test cache")?
-            .try_to_u16_vec()?)
+    pub(crate) fn cache_values_for_test(&mut self) -> Result<Vec<u16>> {
+        let inputs = self
+            .state
+            .take()
+            .context("missing test state")?
+            .into_iter()
+            .map(Value::MemOwn)
+            .collect();
+        let mut outputs = owned_state(
+            self.model
+                .artifact
+                .exec_values("qwen3.state-export", inputs)?,
+        )?;
+        let snapshot = outputs.pop().context("missing cache snapshot")?;
+        self.state = Some(outputs);
+        Ok(snapshot.try_to_u16_vec()?)
     }
 
     pub fn position(&self) -> usize {
@@ -637,33 +555,19 @@ impl Session<'_> {
             self.position < self.capacity,
             "token exceeds cache capacity"
         );
-        let cache = self
-            .cache
+        let state = self
+            .state
             .take()
-            .context("session cache unavailable after failed execution")?;
-        let workspace = if self.model.experimental_workspace_bytes > 0 {
-            Some(
-                self.workspace
-                    .take()
-                    .context("session workspace unavailable after failed execution")?,
-            )
-        } else {
-            None
-        };
-        let activations = std::mem::take(&mut self.activations);
-        let (cache, workspace, activations, logits, token) = self.model.cached_embedding_outputs(
+            .context("session state unavailable after failed execution")?;
+        let (state, logits, token) = self.model.cached_embedding_outputs(
             hidden,
             coordinates,
             self.position,
             self.capacity,
-            cache,
-            workspace,
-            activations,
+            state,
             sequence,
         )?;
-        self.cache = Some(cache);
-        self.workspace = workspace;
-        self.activations = activations;
+        self.state = Some(state);
         self.position += 1;
         Ok((logits, token))
     }
@@ -693,31 +597,14 @@ impl Session<'_> {
             self.next_rope_position = Some(rope_position);
             return result.context("empty decode");
         }
-        let cache = self
-            .cache
+        let state = self
+            .state
             .take()
-            .context("the session cache is unavailable after a failed execution")?;
-        let workspace = if self.model.experimental_workspace_bytes == 0 {
-            None
-        } else {
-            Some(
-                self.workspace
-                    .take()
-                    .context("the session workspace is unavailable after a failed execution")?,
-            )
-        };
-        let activations = std::mem::take(&mut self.activations);
-        let (cache, workspace, activations, logits, next_token) = self.model.cached_outputs(
-            tokens,
-            self.position,
-            self.capacity,
-            cache,
-            workspace,
-            activations,
-        )?;
-        self.cache = Some(cache);
-        self.workspace = workspace;
-        self.activations = activations;
+            .context("session state unavailable after failed execution")?;
+        let (state, logits, next_token) =
+            self.model
+                .cached_outputs(tokens, self.position, self.capacity, state)?;
+        self.state = Some(state);
         self.position += tokens.len();
         Ok((logits, next_token))
     }
@@ -746,4 +633,14 @@ fn read_logits(
         "qwen3 returned non-finite logits"
     );
     Ok(logits)
+}
+
+fn owned_state(values: Vec<Value<'_>>) -> Result<Vec<MemOwn>> {
+    values
+        .into_iter()
+        .map(|value| match value {
+            Value::MemOwn(memory) => Ok(memory),
+            _ => anyhow::bail!("expected owned model-state memory"),
+        })
+        .collect()
 }

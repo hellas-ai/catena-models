@@ -1,0 +1,37 @@
+# Default-backend model-owned state buffers.
+
+(def program stdlib.qwen3.state-zero-bf16-at : ([n.] {(u64 val) ([.n] ix val)}) -> ([n.] (bf16 val)) =
+ ([input index.] (const.u32.0x00000000 u32.bitcast-f32 f32.to-bf16)))
+(def program stdlib.qwen3.state-zero-bf16 : {(u64 val)} -> (cap.own mem) =
+ ([count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] (const.u64.0x0000000000000000) (([.n] :.param) name.stdlib.qwen3.state-zero-bf16-at)} materializec)} buf.to-mem))
+
+(def program stdlib.qwen3.state-copy-own-bf16-at : ([n.] {(cap.own mem) ([.n] ix val)}) -> ([n.] (bf16 val)) =
+ ([input index.] ([.input] mem.cast.bf16 [count buffer.]) ([.index] ix.to-u64 [i.]) ({[.count] [.buffer] [.i]} qwen3.bf16-buffer-at)))
+(def program stdlib.qwen3.state-copy-own-bf16 : {(cap.own mem) (u64 val)} -> (cap.own mem) =
+ ([input count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] [.input] (([.n] :.param) name.stdlib.qwen3.state-copy-own-bf16-at)} materializec)} buf.to-mem))
+
+(def program stdlib.qwen3.state-copy-ref-bf16-at : ([n.] {(cap.ref mem) ([.n] ix val)}) -> ([n.] (bf16 val)) =
+ ([input index.] ([.input] mem.cast.bf16 [count buffer.]) ([.index] ix.to-u64 [i.]) ({[.count] [.buffer] [.i]} qwen3.bf16-buffer-at)))
+(def program stdlib.qwen3.state-copy-ref-bf16 : {(cap.ref mem) (u64 val)} -> (cap.own mem) =
+ ([input count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] [.input] (([.n] :.param) name.stdlib.qwen3.state-copy-ref-bf16-at)} materializec)} buf.to-mem))
+
+(def program stdlib.qwen3.state-zero-f32-at : ([n.] {(u64 val) ([.n] ix val)}) -> ([n.] (f32 val)) =
+ ([input index.] (const.u32.0x00000000 u32.bitcast-f32)))
+(def program stdlib.qwen3.state-zero-f32 : {(u64 val)} -> (cap.own mem) =
+ ([count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] (const.u64.0x0000000000000000) (([.n] :.param) name.stdlib.qwen3.state-zero-f32-at)} materializec)} buf.to-mem))
+
+(def program stdlib.qwen3.state-copy-own-f32-at : ([n.] {(cap.own mem) ([.n] ix val)}) -> ([n.] (f32 val)) =
+ ([input index.] ([.input] mem.cast.f32 [count buffer.]) ([.index] ix.to-u64 [i.]) ({[.count] [.buffer] [.i]} qwen3.f32-buffer-at)))
+(def program stdlib.qwen3.state-copy-own-f32 : {(cap.own mem) (u64 val)} -> (cap.own mem) =
+ ([input count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] [.input] (([.n] :.param) name.stdlib.qwen3.state-copy-own-f32-at)} materializec)} buf.to-mem))
+
+(def program stdlib.qwen3.state-copy-ref-f32-at : ([n.] {(cap.ref mem) ([.n] ix val)}) -> ([n.] (f32 val)) =
+ ([input index.] ([.input] mem.cast.f32 [count buffer.]) ([.index] ix.to-u64 [i.]) ({[.count] [.buffer] [.i]} qwen3.f32-buffer-at)))
+(def program stdlib.qwen3.state-copy-ref-f32 : {(cap.ref mem) (u64 val)} -> (cap.own mem) =
+ ([input count.] ([.count] u64.name [n.])
+ {[.n] ({[.n] [.input] (([.n] :.param) name.stdlib.qwen3.state-copy-ref-f32-at)} materializec)} buf.to-mem))

@@ -4,6 +4,7 @@ mod experimental;
 pub mod flux;
 pub mod hfhub;
 pub mod model;
+mod session_graph;
 pub mod spec;
 pub mod tokenizer;
 pub mod tts;

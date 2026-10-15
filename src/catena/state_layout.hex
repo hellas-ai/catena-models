@@ -1,0 +1,87 @@
+# Model-owned session layout. Arithmetic and allocation sizes execute in Hex.
+(def program stdlib.qwen3.state-max : {(u64 val) (u64 val)} -> (u64 val) =
+ ([a b.] ({[.a] [.b]} u64.lt [less.]) ({[.less] [.b] [.a]} u64.select)))
+
+(def program stdlib.qwen3.state-key-size : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{KEY_HEADS}}) (const.u64.0x{{KEY_DIM}})} u64.mul)))
+
+(def program stdlib.qwen3.state-value-dim : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{VALUE_SIZE}}) (const.u64.0x{{VALUE_HEADS}})} u64.div)))
+
+(def program stdlib.qwen3.state-qkv-size : 1 -> (u64 val) =
+ (unit.elim ({({(unit.intro stdlib.qwen3.state-key-size) (const.u64.0x0000000000000002)} u64.mul) (const.u64.0x{{VALUE_SIZE}})} u64.add)))
+
+(def program stdlib.qwen3.state-query-size : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{QUERY_HEADS}}) (const.u64.0x{{HEAD_DIM}})} u64.mul)))
+
+(def program stdlib.qwen3.state-kv-size : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{KV_HEADS}}) (const.u64.0x{{HEAD_DIM}})} u64.mul)))
+
+(def program stdlib.qwen3.state-recurrent : 1 -> (u64 val) =
+ (unit.elim ({({(const.u64.0x{{VALUE_HEADS}}) (const.u64.0x{{KEY_DIM}})} u64.mul) (unit.intro stdlib.qwen3.state-value-dim)} u64.mul)))
+
+(def program stdlib.qwen3.state-shadow : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen3.state-recurrent) (const.u64.0x{{LAYERS}})} u64.mul)))
+
+(def program stdlib.qwen3.state-cache-count : (u64 val) -> (u64 val) =
+ ([capacity.] ({({({({[.capacity] (unit.intro stdlib.qwen3.state-kv-size)} u64.mul) (const.u64.0x0000000000000002)} u64.mul) ({({(unit.intro stdlib.qwen3.state-qkv-size) ({(const.u64.0x{{CONV_KERNEL}}) (const.u64.0x0000000000000001)} u64.sub)} u64.mul) (unit.intro stdlib.qwen3.state-recurrent)} u64.add)} u64.add) (const.u64.0x{{LAYERS}})} u64.mul)))
+
+(def program stdlib.qwen3.state-align8 : (u64 val) -> (u64 val) =
+ ([value.] ({({({[.value] (const.u64.0x0000000000000007)} u64.add) (const.u64.0x0000000000000008)} u64.div) (const.u64.0x0000000000000008)} u64.mul)))
+
+(def program stdlib.qwen3.state-scratch0 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen3.state-qkv-size) ({(unit.intro stdlib.qwen3.state-query-size) (const.u64.0x0000000000000002)} u64.mul)} stdlib.qwen3.state-max)))
+
+(def program stdlib.qwen3.state-scratch1 : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{VALUE_SIZE}}) (unit.intro stdlib.qwen3.state-kv-size)} stdlib.qwen3.state-max)))
+
+(def program stdlib.qwen3.state-scratch2 : 1 -> (u64 val) =
+ (unit.elim ({(const.u64.0x{{VALUE_HEADS}}) (unit.intro stdlib.qwen3.state-kv-size)} stdlib.qwen3.state-max)))
+
+(def program stdlib.qwen3.state-scratch3 : 1 -> (u64 val) =
+ (unit.elim (const.u64.0x{{VALUE_HEADS}})))
+
+(def program stdlib.qwen3.state-scratch4 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen3.state-qkv-size) (unit.intro stdlib.qwen3.state-query-size)} stdlib.qwen3.state-max)))
+
+(def program stdlib.qwen3.state-scratch5 : 1 -> (u64 val) =
+ (unit.elim (unit.intro stdlib.qwen3.state-key-size)))
+
+(def program stdlib.qwen3.state-scratch6 : 1 -> (u64 val) =
+ (unit.elim (unit.intro stdlib.qwen3.state-key-size)))
+
+(def program stdlib.qwen35.layout.router : 1 -> (u64 val) =
+ (unit.elim ({({(unit.intro stdlib.qwen3.state-shadow) (const.u64.0x0000000000000004)} u64.mul)} stdlib.qwen3.state-align8)))
+
+(def program stdlib.qwen35.layout.ids : 1 -> (u64 val) =
+ (unit.elim ({({({({(const.u64.0x{{EXPERTS}}) (const.u64.0x0000000000000001)} u64.add) (const.u64.0x0000000000000004)} u64.mul) (unit.intro stdlib.qwen35.layout.router)} u64.add)} stdlib.qwen3.state-align8)))
+
+(def program stdlib.qwen35.layout.probs : 1 -> (u64 val) =
+ (unit.elim ({({(const.u64.0x{{TOP_K}}) (const.u64.0x0000000000000008)} u64.mul) (unit.intro stdlib.qwen35.layout.ids)} u64.add)))
+
+(def program stdlib.qwen35.layout.active : 1 -> (u64 val) =
+ (unit.elim ({({({(const.u64.0x{{TOP_K}}) (const.u64.0x0000000000000004)} u64.mul) (unit.intro stdlib.qwen35.layout.probs)} u64.add)} stdlib.qwen3.state-align8)))
+
+(def program stdlib.qwen35.layout.workspace-bytes : 1 -> (u64 val) =
+ (unit.elim ({({({({({(const.u64.0x{{TOP_K}}) (const.u64.0x{{INTERMEDIATE}})} u64.mul) (const.u64.0x{{SHARED_INTERMEDIATE}})} u64.add) (const.u64.0x0000000000000002)} u64.mul) (unit.intro stdlib.qwen35.layout.active)} u64.add)} stdlib.qwen3.state-align8)))
+
+(def program stdlib.qwen35.layout.router-f32 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.router) (const.u64.0x0000000000000004)} u64.div)))
+
+(def program stdlib.qwen35.layout.ids-u64 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.ids) (const.u64.0x0000000000000008)} u64.div)))
+
+(def program stdlib.qwen35.layout.probs-f32 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.probs) (const.u64.0x0000000000000004)} u64.div)))
+
+(def program stdlib.qwen35.layout.active-bf16 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.active) (const.u64.0x0000000000000002)} u64.div)))
+
+(def program stdlib.qwen35.layout.active-pairs : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.active) (const.u64.0x0000000000000004)} u64.div)))
+
+(def program stdlib.qwen35.layout.shared-router-f32 : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.router-f32) (const.u64.0x{{EXPERTS}})} u64.add)))
+
+(def program stdlib.qwen35.layout.shared-active-pairs : 1 -> (u64 val) =
+ (unit.elim ({(unit.intro stdlib.qwen35.layout.active-pairs) ({({(const.u64.0x{{TOP_K}}) (const.u64.0x{{INTERMEDIATE}})} u64.mul) (const.u64.0x0000000000000002)} u64.div)} u64.add)))

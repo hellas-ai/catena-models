@@ -44,44 +44,7 @@ fn selector(s: &mut String, layers: &[usize], group: &str, tree: &str, kind: &st
     s.push_str(&selector);
 }
 
-/// Byte offsets; all regions start on an eight-byte boundary. The shadow
-/// remains at offset zero so dense DeltaNet import/persist kernels are unchanged.
-pub(super) struct MoeWorkspace {
-    pub bytes: usize,
-    router: usize,
-    ids: usize,
-    probs: usize,
-    active: usize,
-}
-pub(super) fn moe_workspace(c: &ModelConfig, shadow_bytes: usize) -> Result<MoeWorkspace> {
-    let add = |a: usize, b: usize| {
-        a.checked_add(b)
-            .ok_or_else(|| anyhow::anyhow!("experimental MoE workspace overflow"))
-    };
-    let mul = |a: usize, b: usize| {
-        a.checked_mul(b)
-            .ok_or_else(|| anyhow::anyhow!("experimental MoE workspace overflow"))
-    };
-    let align = |a: usize| add(a, 7).map(|v| v & !7);
-    let router = align(shadow_bytes)?;
-    let ids = align(add(router, mul(add(c.num_experts, 1)?, 4)?)?)?;
-    let probs = add(ids, mul(c.experts_per_token, 8)?)?;
-    let active = align(add(probs, mul(c.experts_per_token, 4)?)?)?;
-    let width = add(
-        mul(c.experts_per_token, c.intermediate_size)?,
-        c.shared_expert_intermediate_size.unwrap(),
-    )?;
-    Ok(MoeWorkspace {
-        bytes: align(add(active, mul(width, 2)?)?)?,
-        router,
-        ids,
-        probs,
-        active,
-    })
-}
-
-fn emit_moe(s: &mut String, c0: &ModelConfig, shadow_bytes: usize) -> Result<()> {
-    let layout = moe_workspace(c0, shadow_bytes)?;
+fn emit_moe(s: &mut String, c0: &ModelConfig, _shadow_bytes: usize) -> Result<()> {
     let active = c0.experts_per_token * c0.intermediate_size;
     let shared = c0.shared_expert_intermediate_size.unwrap();
     let mut hex = include_str!("catena/experimental/qwen35_moe.hex").to_owned();
@@ -98,15 +61,22 @@ fn emit_moe(s: &mut String, c0: &ModelConfig, shadow_bytes: usize) -> Result<()>
         ("TOTAL_ACTIVE_SIZE", active + shared),
         ("SHARED_PAIRS", shared / 2),
         ("ROUTER_ROWS", c0.num_experts + 1),
-        ("ROUTER_F32", layout.router / 4),
-        ("SHARED_ROUTER_F32", layout.router / 4 + c0.num_experts),
-        ("IDS_U64", layout.ids / 8),
-        ("PROBS_F32", layout.probs / 4),
-        ("ACTIVE_BF16", layout.active / 2),
-        ("ACTIVE_PAIRS", layout.active / 4),
-        ("SHARED_ACTIVE_PAIRS", layout.active / 4 + active / 2),
     ] {
         hex = hex.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+    }
+    for (key, operation) in [
+        ("ROUTER_F32", "router-f32"),
+        ("SHARED_ROUTER_F32", "shared-router-f32"),
+        ("IDS_U64", "ids-u64"),
+        ("PROBS_F32", "probs-f32"),
+        ("ACTIVE_BF16", "active-bf16"),
+        ("ACTIVE_PAIRS", "active-pairs"),
+        ("SHARED_ACTIVE_PAIRS", "shared-active-pairs"),
+    ] {
+        hex = hex.replace(
+            &format!("(const.u64.0x{{{{{key}}}}})"),
+            &format!("(unit.intro stdlib.qwen35.layout.{operation})"),
+        );
     }
     ensure!(!hex.contains("{{"), "unresolved MoE kernel constant");
     s.push_str(&hex);
@@ -972,6 +942,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 .join("\n");
         }
     }
+    crate::session_graph::append_layout(&mut s, config, options);
     Ok(s)
 }
 

@@ -4,10 +4,11 @@ use crate::{
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 use anyhow::{Result, ensure};
-use catena_lang::{
-    codegen::{CodegenKind, GpuDialect},
-    runtime::RuntimeModule,
-};
+#[cfg(test)]
+use catena_lang::codegen::CodegenKind;
+use catena_lang::codegen::GpuDialect;
+#[cfg(test)]
+use catena_lang::runtime::RuntimeModule;
 use std::fmt::Write;
 
 #[path = "experimental_fused.rs"]
@@ -136,49 +137,9 @@ pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions)
         config.is_qwen35(),
         "image inputs require Qwen3.5 dense or MoE"
     );
-    qwen35::multimodal_source(config, options)
-}
-
-/// Persistent experimental scratch is returned by the artifact after every call.
-pub(crate) fn workspace_bytes(config: &ModelConfig, options: InferenceOptions) -> Result<usize> {
-    if options.codegen != CodegenKind::Experimental
-        || options.experimental_kernels == ExperimentalKernelKind::Reference
-    {
-        return Ok(0);
-    }
-    if config.architecture == ModelArchitecture::Qwen3Dense {
-        return Ok(4096);
-    }
-    let recurrent = config
-        .num_layers
-        .checked_mul(config.linear_time_step_rank.unwrap())
-        .and_then(|n| n.checked_mul(config.linear_state_size.unwrap()))
-        .and_then(|n| n.checked_mul(config.linear_value_head_size().unwrap()))
-        .and_then(|n| n.checked_mul(4))
-        .ok_or_else(|| anyhow::anyhow!("experimental recurrent workspace overflow"))?;
-    if config.architecture == ModelArchitecture::Qwen35Moe {
-        Ok(qwen35::moe_workspace(config, recurrent)?.bytes)
-    } else {
-        Ok(recurrent)
-    }
-}
-
-/// Independently owned activation buffers reused across every MoE layer/token.
-pub(crate) fn activation_scratch_sizes(c: &ModelConfig, options: InferenceOptions) -> Vec<usize> {
-    if options.codegen != CodegenKind::Experimental
-        || c.architecture != ModelArchitecture::Qwen35Moe
-    {
-        return vec![];
-    }
-    vec![
-        c.linear_qkv_size().unwrap().max(c.query_size() * 2),
-        c.linear_inner_size.unwrap().max(c.key_value_size()),
-        c.linear_time_step_rank.unwrap().max(c.key_value_size()),
-        c.linear_time_step_rank.unwrap(),
-        c.linear_qkv_size().unwrap().max(c.query_size()),
-        c.linear_key_size().unwrap(),
-        c.linear_key_size().unwrap(),
-    ]
+    let mut s = qwen35::multimodal_source(config, options)?;
+    crate::session_graph::append(&mut s, config, options);
+    Ok(s)
 }
 
 fn c(n: usize) -> String {
@@ -311,6 +272,12 @@ fn emit_layer_selector(s: &mut String, layers: usize, group: &str, weights: &str
 }
 
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    let mut s = graph_source(config, options)?;
+    crate::session_graph::append(&mut s, config, options);
+    Ok(s)
+}
+
+fn graph_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     config.validate()?;
     validate(config, options, None)?;
     if matches!(
@@ -588,66 +555,13 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     Ok(s)
 }
 
-/// Keep primitive declarations and exported programs, following callback dependencies.
-fn reachable_sources(raw: metacat::theory::RawTheorySet) -> Result<metacat::theory::RawTheorySet> {
-    use std::collections::BTreeSet;
-    let mut raw = raw.with_extensions()?;
-    let program = raw
-        .theories
-        .get_mut(&"program".parse().unwrap())
-        .ok_or_else(|| anyhow::anyhow!("missing experimental program theory"))?;
-    let available = program
-        .arrows
-        .keys()
-        .map(|n| n.as_str().to_owned())
-        .collect::<BTreeSet<_>>();
-    let mut pending = program
-        .arrows
-        .iter()
-        .filter_map(|(name, arrow)| {
-            (!name.as_str().starts_with("meta.")
-                && (arrow.definition.is_none() || !name.as_str().starts_with("stdlib.")))
-            .then(|| name.as_str().to_owned())
-        })
-        .collect::<Vec<_>>();
-    let mut used = BTreeSet::new();
-    while let Some(name) = pending.pop() {
-        if !used.insert(name.clone()) {
-            continue;
-        }
-        let Some(arrow) = program.arrows.get(&name.parse().unwrap()) else {
-            continue;
-        };
-        for expr in [&arrow.type_maps.0, &arrow.type_maps.1]
-            .into_iter()
-            .chain(arrow.definition.iter())
-        {
-            for token in expr
-                .to_string()
-                .split(|c: char| c.is_whitespace() || "(){}[]^".contains(c))
-            {
-                let token = token.strip_prefix("name.").unwrap_or(token);
-                let token = token
-                    .strip_prefix("partial.")
-                    .and_then(|s| s.rsplit_once('.'))
-                    .filter(|(_, n)| n.parse::<usize>().is_ok())
-                    .map_or(token, |(s, _)| s);
-                if available.contains(token) {
-                    pending.push(token.to_owned());
-                }
-            }
-        }
-    }
-    program.arrows.retain(|n, _| used.contains(n.as_str()));
-    Ok(raw)
-}
-
+#[cfg(test)]
 pub(crate) fn compile<'a>(
     sources: impl IntoIterator<Item = &'a str>,
     dialect: GpuDialect,
 ) -> Result<RuntimeModule> {
     let raw = metacat::theory::RawTheorySet::from_texts(sources)?;
-    let raw = reachable_sources(raw)?;
+    let raw = crate::catena::prepare_sources(raw)?;
     let module = catena_lang::compile::compile(
         &mut catena_lang::report::CompileReport::new(raw),
         CodegenKind::Experimental,
@@ -733,13 +647,34 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn fused_session_entrypoints_compile_once() -> Result<()> {
+        let options = options().with_experimental_kernels(ExperimentalKernelKind::Fused);
+        let source = source(&tiny_config(), options)?;
+        let module = compile(
+            crate::catena::runtime_sources_for_options(&source, options),
+            GpuDialect::Hip,
+        )?;
+        let outputs = |name| {
+            module
+                .functions
+                .iter()
+                .find(|f| f.source_name == name)
+                .unwrap()
+                .outputs
+                .len()
+        };
+        assert_eq!(outputs("qwen3.init"), 2);
+        assert_eq!(outputs("qwen3"), 4);
+        Ok(())
+    }
+
+    #[test]
     fn qwen35_moe_validates_routing_and_workspace() -> Result<()> {
         let options =
             InferenceOptions::new(InferencePrecision::Bf16).with_codegen(CodegenKind::Experimental);
         let config = ModelConfig::qwen36_35b_a3b();
         validate(&config, options, Some(GpuDialect::Hip))?;
-        let bytes = workspace_bytes(&config, options)?;
-        assert_eq!(bytes, 83_896_424);
+        assert!(source(&config, options)?.contains("qwen3.init"));
         for (experts, selected, shared) in [
             (257, 8, Some(512)),
             (256, 9, Some(512)),
@@ -769,9 +704,6 @@ mod tests {
             )
             .is_err()
         );
-        let mut huge = config;
-        huge.num_layers = usize::MAX;
-        assert!(workspace_bytes(&huge, options).is_err());
         Ok(())
     }
     #[test]
