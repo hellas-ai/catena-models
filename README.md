@@ -131,11 +131,24 @@ Their model selection also uses HF names, with compatible architecture/config
 validation before execution:
 
 ```bash
-cargo run -r --bin whisper-asr -- --model openai/whisper-small speech.wav
+cargo run -r --bin whisper-asr -- --codegen experimental speech.wav
 cargo run -r --bin mms-tts -- --model facebook/mms-tts-eng 'Hello, world.'
 cargo run -r --bin flux2-klein -- --model black-forest-labs/FLUX.2-klein-4B \
   --prompt 'A red fox sitting in a snowy forest' --output image.png
 ```
+
+Whisper defaults to `openai/whisper-small`; `--model owner/repo` selects another
+compatible multilingual 80-mel checkpoint. Its experimental kernels are in
+`src/catena/experimental/whisper.hex`, with no additional compiler primitives.
+Both backends share the Rust audio, checkpoint, tokenization, and result harness.
+Encoding, decoding, caches, language detection, token suppression, and stopping
+state execute in Hex. Diagnostic captures also work with `--dump-dir`.
+The transcription entrypoint returns one U64 buffer containing
+`[count, language, status, token...]` for either backend. Rust reads that result
+once; it does not run a token loop or inspect model state during inference.
+The experimental decoder runs a bounded loop on the host with stopping state
+on the GPU. EOS stops token emission; decoder work continues to the configured
+bound, so a smaller `--max-new-tokens` can reduce work for short clips.
 
 [Whisper](docs/whisper-asr.md), [MMS TTS](docs/mms-tts.md),
 [Flux2 Klein](docs/flux2-klein.md).

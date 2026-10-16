@@ -207,8 +207,9 @@ pub fn source(cfg: &Config, model_source: &str, debug: bool) -> String {
     body += &return_state(&nextstate);
     source += &def("decode-next", &args, &st, &body);
     let mut body = unpack_both(Some(&["limit"]));
+    body += &call(&[v("count"), c(3)], "u64.add", &["token-offset".into()]);
     body += &call(
-        &[v("tokens"), v("count"), v("token")],
+        &[v("tokens"), v("token-offset"), v("token")],
         "whisper.write-token",
         &["next-tokens".into()],
     );
@@ -416,7 +417,7 @@ pub fn source(cfg: &Config, model_source: &str, debug: bool) -> String {
         previous = format!("ready-prefix{pos}");
     }
     body += &call(
-        &[c(cfg.max_target_positions - 4)],
+        &[c(cfg.max_target_positions - 4 + 3)],
         "inference.zeros-u64",
         &["tokens".into()],
     );
@@ -524,20 +525,28 @@ pub fn source(cfg: &Config, model_source: &str, debug: bool) -> String {
         );
         result = next;
     }
-    body += &format!(
-        " {{{} [.final-count] [.language] [.final-status]}}\n",
-        v(&result)
-    );
+    // Common output ABI: [count, language, status, token...]. Both backends
+    // return device memory; the shared Rust harness only unpacks the result.
+    for (offset, value) in [(0, "final-count"), (1, "language"), (2, "final-status")] {
+        let next = format!("result-header-{offset}");
+        body += &call(
+            &[v(&result), c(offset), v(value)],
+            "whisper.write-token",
+            std::slice::from_ref(&next),
+        );
+        result = next;
+    }
+    body += &format!(" {{{}}}\n", v(&result));
     if debug {
         body = body.replace(
-            "[.final-status]}",
-            "[.final-status] [.encoder-snapshot] [.final-trace]}",
+            &format!("{{{}}}", v(&result)),
+            &format!("{{{} [.encoder-snapshot] [.final-trace]}}", v(&result)),
         );
     }
     let output_types = if debug {
-        "{(cap.own mem) (u64 val) (u64 val) (u64 val) (cap.own mem) (cap.own mem)}"
+        "{(cap.own mem) (cap.own mem) (cap.own mem)}"
     } else {
-        "{(cap.own mem) (u64 val) (u64 val) (u64 val)}"
+        "{(cap.own mem)}"
     };
     for (prefix, names) in [
         ("ew", graph::encoder_names(cfg)),
