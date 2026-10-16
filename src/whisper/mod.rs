@@ -1,11 +1,14 @@
 pub mod audio;
+mod experimental;
+#[cfg(test)]
+mod experimental_tests;
 mod generation;
 pub mod graph;
 pub mod hub;
 use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{
-    codegen::GpuDialect,
+    codegen::{CodegenKind, GpuDialect},
     runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use serde::Deserialize;
@@ -44,20 +47,23 @@ impl Config {
     pub fn validate(&self) -> Result<()> {
         ensure!(
             self.model_type == "whisper"
-                && self.d_model == 768
+                && self.d_model > 0
+                && self.d_model.is_multiple_of(2)
                 && self.num_mel_bins == 80
-                && self.encoder_layers == 12
-                && self.decoder_layers == 12
-                && self.encoder_attention_heads == 12
-                && self.decoder_attention_heads == 12
-                && self.encoder_ffn_dim == 3072
-                && self.decoder_ffn_dim == 3072
+                && self.encoder_layers > 0
+                && self.decoder_layers > 0
+                && self.encoder_attention_heads > 0
+                && self.encoder_attention_heads == self.decoder_attention_heads
+                && self.d_model.is_multiple_of(self.encoder_attention_heads)
+                && self.encoder_ffn_dim > 0
+                && self.encoder_ffn_dim.is_multiple_of(2)
+                && self.encoder_ffn_dim == self.decoder_ffn_dim
                 && self.max_source_positions == 1500
-                && self.max_target_positions == 448
-                && self.vocab_size == 51865
+                && self.max_target_positions > 4
+                && self.vocab_size > 0
                 && self.activation_function == "gelu"
                 && !self.scale_embedding,
-            "only multilingual openai/whisper-small is supported"
+            "expected an 80-mel Whisper model with matching encoder/decoder head and FFN dimensions, GELU, and a 1500-position encoder (128-mel large-v3 models are unsupported)"
         );
         ensure!(
             (self.decoder_start_token_id as usize) < self.vocab_size
@@ -122,13 +128,19 @@ pub fn validate_weights(w: &Weights, c: &Config) -> Result<()> {
     let d = c.d_model;
     let ff = c.encoder_ffn_dim;
     for (n, shape) in [
-        ("model.encoder.conv1.weight", vec![d, 80, 3]),
+        ("model.encoder.conv1.weight", vec![d, c.num_mel_bins, 3]),
         ("model.encoder.conv1.bias", vec![d]),
         ("model.encoder.conv2.weight", vec![d, d, 3]),
         ("model.encoder.conv2.bias", vec![d]),
-        ("model.encoder.embed_positions.weight", vec![1500, d]),
+        (
+            "model.encoder.embed_positions.weight",
+            vec![c.max_source_positions, d],
+        ),
         ("model.decoder.embed_tokens.weight", vec![c.vocab_size, d]),
-        ("model.decoder.embed_positions.weight", vec![448, d]),
+        (
+            "model.decoder.embed_positions.weight",
+            vec![c.max_target_positions, d],
+        ),
     ] {
         w.validate(n, &shape)?;
     }
@@ -211,6 +223,14 @@ impl Whisper {
         Self::load_with_debug(dir, timings, false)
     }
     pub fn load_with_debug(dir: &Path, timings: bool, debug: bool) -> Result<Self> {
+        Self::load_with_codegen(dir, timings, debug, CodegenKind::Default)
+    }
+    pub fn load_with_codegen(
+        dir: &Path,
+        timings: bool,
+        debug: bool,
+        codegen: CodegenKind,
+    ) -> Result<Self> {
         let start = Instant::now();
         let config = Config::read(dir)?;
         let mut checkpoint = Weights::open(&dir.join("model.safetensors"))?;
@@ -241,19 +261,20 @@ impl Whisper {
             tokenizer.get_vocab_size(true) == config.vocab_size,
             "tokenizer vocabulary does not match model"
         );
-        let source = graph::source_with_debug(&config, debug)?;
-        let (runtime, artifact) = crate::catena::load_runtime(
-            catena_lang::stdlib::sources()
+        let source = graph::bundle_with_codegen(&config, debug, codegen)?;
+        let sources = match codegen {
+            CodegenKind::Default => catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
-                .chain([
-                    crate::catena::BF16_HELPER_SOURCE,
-                    graph::HELPERS,
-                    include_str!("../catena/inference_helpers.hex"),
-                    source.as_str(),
-                ]),
-            GpuDialect::Hip,
-        )
-        .context("compiling Whisper Hex graphs")?;
+                .chain([source.as_str()])
+                .collect::<Vec<_>>(),
+            CodegenKind::Experimental => catena_lang::stdlib::experimental_core_sources()
+                .map(|s| -> &str { s })
+                .chain([source.as_str()])
+                .collect(),
+        };
+        let (runtime, artifact) =
+            crate::catena::load_runtime_with_codegen(sources, GpuDialect::Hip, codegen)
+                .context("compiling Whisper Hex graphs")?;
         let names: BTreeSet<_> = graph::encoder_names(&config)
             .into_iter()
             .chain(graph::cross_names(&config))
@@ -391,15 +412,9 @@ impl Whisper {
         let Some(Value::MemOwn(tokens)) = outputs.next() else {
             bail!("missing generated token buffer")
         };
-        let Some(Value::U64(count)) = outputs.next() else {
-            bail!("missing token count")
-        };
-        let Some(Value::U64(language)) = outputs.next() else {
-            bail!("missing selected language")
-        };
-        let Some(Value::U64(status)) = outputs.next() else {
-            bail!("missing termination status")
-        };
+        let result = tokens.try_to_u64_vec()?;
+        ensure!(result.len() >= 3, "missing transcription result header");
+        let (count, language, status) = (result[0], result[1], result[2]);
         ensure!(
             status != 2,
             "model produced nonfinite or entirely suppressed logits"
@@ -429,7 +444,7 @@ impl Whisper {
                 )?;
             }
         }
-        let tokens = tokens.try_to_u64_vec()?;
+        let tokens = &result[3..];
         ensure!(
             count as usize <= tokens.len(),
             "invalid generated token count"
@@ -516,5 +531,35 @@ mod tests {
             bf16(&[f32::from_bits(0x3f808000), f32::from_bits(0x3f818000)]),
             [0x3f80, 0x3f82]
         );
+    }
+    #[test]
+    fn compatible_model_dimensions_come_from_metadata() {
+        let mut config = Config {
+            model_type: "whisper".into(),
+            d_model: 384,
+            num_mel_bins: 80,
+            encoder_layers: 4,
+            decoder_layers: 4,
+            encoder_attention_heads: 6,
+            decoder_attention_heads: 6,
+            encoder_ffn_dim: 1536,
+            decoder_ffn_dim: 1536,
+            max_source_positions: 1500,
+            max_target_positions: 448,
+            vocab_size: 51865,
+            decoder_start_token_id: 50258,
+            eos_token_id: 50257,
+            activation_function: "gelu".into(),
+            scale_embedding: false,
+        };
+        assert!(config.validate().is_ok());
+        config.d_model = 768;
+        config.encoder_attention_heads = 12;
+        config.decoder_attention_heads = 12;
+        config.encoder_ffn_dim = 3072;
+        config.decoder_ffn_dim = 3072;
+        assert!(config.validate().is_ok());
+        config.num_mel_bins = 128;
+        assert!(config.validate().is_err());
     }
 }

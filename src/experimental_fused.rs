@@ -143,7 +143,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     Ok(text)
 }
 
-fn append_hex(text: &mut String, source: &str) {
+pub(crate) fn append_hex(text: &mut String, source: &str) {
     let mut source = source.to_owned();
     for declaration in ["(theory type nat {", "(theory program type {"] {
         if let Some(start) = source.find(declaration) {
