@@ -4,6 +4,7 @@ use super::{
 };
 use crate::weights::Weights;
 use anyhow::Result;
+use catena_lang::codegen::CodegenKind;
 use catena_lang::runtime::MemOwn;
 use std::path::Path;
 pub struct VaeDecoder {
@@ -21,6 +22,23 @@ impl VaeDecoder {
         width: usize,
         debug: bool,
         backend: super::ops::Backend,
+    ) -> Result<Self> {
+        Self::load_with_codegen(
+            snapshot,
+            height,
+            width,
+            debug,
+            backend,
+            CodegenKind::Default,
+        )
+    }
+    pub fn load_with_codegen(
+        snapshot: &Path,
+        height: usize,
+        width: usize,
+        debug: bool,
+        backend: super::ops::Backend,
+        codegen: CodegenKind,
     ) -> Result<Self> {
         let config: VaeConfig = read(snapshot.join("vae/config.json"))?;
         config.validate()?;
@@ -78,8 +96,11 @@ impl VaeDecoder {
                 &[512],
             )?;
         }
-        let program = super::graph::vae(&config, height, width, debug)?;
-        let ops = Ops::with_backend(Some(&program.source), backend)?;
+        let mut program = super::graph::vae(&config, height, width, debug)?;
+        if codegen == CodegenKind::Experimental {
+            program.source = super::experimental::graph(&program.source)?;
+        }
+        let ops = Ops::with_codegen(Some(&program.source), backend, codegen)?;
         weights.prepare(&ops.runtime, &program.weights, true)?;
         Ok(Self {
             ops,

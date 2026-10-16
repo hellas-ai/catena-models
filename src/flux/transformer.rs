@@ -4,6 +4,7 @@ use super::{
 };
 use crate::weights::Weights;
 use anyhow::Result;
+use catena_lang::codegen::CodegenKind;
 use catena_lang::runtime::{MemOwn, MemRef};
 use std::path::Path;
 pub struct Transformer {
@@ -29,6 +30,25 @@ impl Transformer {
         steps: usize,
         debug: bool,
         backend: super::ops::Backend,
+    ) -> Result<Self> {
+        Self::load_with_codegen(
+            snapshot,
+            height,
+            width,
+            steps,
+            debug,
+            backend,
+            CodegenKind::Default,
+        )
+    }
+    pub fn load_with_codegen(
+        snapshot: &Path,
+        height: usize,
+        width: usize,
+        steps: usize,
+        debug: bool,
+        backend: super::ops::Backend,
+        codegen: CodegenKind,
     ) -> Result<Self> {
         let config: TransformerConfig = read(snapshot.join("transformer/config.json"))?;
         config.validate()?;
@@ -83,8 +103,11 @@ impl Transformer {
                 )?;
             }
         }
-        let program = super::graph::transformer(&config, height, width, steps, debug)?;
-        let ops = Ops::with_backend(Some(&program.source), backend)?;
+        let mut program = super::graph::transformer(&config, height, width, steps, debug)?;
+        if codegen == CodegenKind::Experimental {
+            program.source = super::experimental::graph(&program.source)?;
+        }
+        let ops = Ops::with_codegen(Some(&program.source), backend, codegen)?;
         weights.prepare(&ops.runtime, &program.weights, false)?;
         Ok(Self {
             ops,
