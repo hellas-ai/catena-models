@@ -240,7 +240,12 @@ fn main() -> Result<()> {
         load_started.elapsed()
     );
     let multimodal = if let Some(path) = projector {
-        let vision = VisionModel::load_gguf(&path, model.gpu_dialect(), args.image_max_pixels)?;
+        let vision = VisionModel::load_gguf_with_codegen(
+            &path,
+            model.gpu_dialect(),
+            args.image_max_pixels,
+            options.codegen,
+        )?;
         let images = args
             .image
             .iter()

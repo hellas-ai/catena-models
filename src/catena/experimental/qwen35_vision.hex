@@ -1,0 +1,1264 @@
+# Qwen3.5 vision: F32 activations and generic experimental GPU kernels.
+# No materializec or compiler-specific model operations. Buffers and scheduling stay in Hex.
+
+(def program stdlib.vision.dot-ref : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([input weight ibase wbase pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.ibase] [.i]} stdlib.qwen3.memory.u64.add [ii.])
+ ({[.wbase] [.i]} stdlib.qwen3.memory.u64.add [wi.])
+ ({[.input] [.ii]} stdlib.qwen3.memory.ref-read-f32 [x.])
+ ({[.weight] [.wi]} stdlib.qwen3.memory.ref-read-f32 [w.])
+ ({[.x] [.w]} stdlib.qwen3.memory.f32.mul [product.])
+ ({[.acc] [.product]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.linear-ref.element : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input weight bias ci co out element.]
+ ({[.element] [.co]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.co]} stdlib.qwen3.memory.u64.rem [col.])
+ ({[.row] [.ci]} stdlib.qwen3.memory.u64.mul [ibase.])
+ ({[.col] [.ci]} stdlib.qwen3.memory.u64.mul [wbase.])
+ ({[.input] [.weight] [.ibase] [.wbase]} partial.stdlib.vision.dot-ref.4 [callback-sum.])
+ ({[.ci] (unit.intro meta.master.end)} smolcat.value.named_at [end-sum.])
+ ({[.end-sum] (const.u32.0x00000000 u32.bitcast-f32) [.callback-sum] core.truth} core.fold.bounded_u64 [sum proof-sum.])
+ ([.proof-sum] unsafe.discard unit.elim)
+ ({[.bias] [.col]} stdlib.qwen3.memory.ref-read-f32 [bias-value.])
+ ({[.sum] [.bias-value]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.linear-ref.yes : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input weight bias ci co out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.element]} stdlib.vision.linear-ref.element)
+ ))
+
+(def program stdlib.vision.linear-ref.no : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input weight bias ci co out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.linear-ref.launch : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input weight bias ci co out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out]} partial.stdlib.vision.linear-ref.yes.6 [yes.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out]} partial.stdlib.vision.linear-ref.no.6 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.linear-ref.host : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input weight bias ci co out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.count]} partial.stdlib.vision.linear-ref.launch.7 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.linear-ref.run : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight bias ci co count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.count] [.grid]} partial.stdlib.vision.linear-ref.host.8 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.linear-ref : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight bias rows ci co.]
+ ({[.rows] [.co]} stdlib.qwen3.memory.u64.mul [count.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.count] [.count]} stdlib.vision.linear-ref.run)
+ ))
+
+(def program stdlib.vision.dot-own : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([input weight ibase wbase pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.ibase] [.i]} stdlib.qwen3.memory.u64.add [ii.])
+ ({[.wbase] [.i]} stdlib.qwen3.memory.u64.add [wi.])
+ ({[.input] [.ii]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.weight] [.wi]} stdlib.qwen3.memory.ref-read-f32 [w.])
+ ({[.x] [.w]} stdlib.qwen3.memory.f32.mul [product.])
+ ({[.acc] [.product]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.linear-own.element : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input weight bias ci co out element.]
+ ({[.element] [.co]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.co]} stdlib.qwen3.memory.u64.rem [col.])
+ ({[.row] [.ci]} stdlib.qwen3.memory.u64.mul [ibase.])
+ ({[.col] [.ci]} stdlib.qwen3.memory.u64.mul [wbase.])
+ ({[.input] [.weight] [.ibase] [.wbase]} partial.stdlib.vision.dot-own.4 [callback-sum.])
+ ({[.ci] (unit.intro meta.master.end)} smolcat.value.named_at [end-sum.])
+ ({[.end-sum] (const.u32.0x00000000 u32.bitcast-f32) [.callback-sum] core.truth} core.fold.bounded_u64 [sum proof-sum.])
+ ([.proof-sum] unsafe.discard unit.elim)
+ ({[.bias] [.col]} stdlib.qwen3.memory.ref-read-f32 [bias-value.])
+ ({[.sum] [.bias-value]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.linear-own.yes : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input weight bias ci co out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.element]} stdlib.vision.linear-own.element)
+ ))
+
+(def program stdlib.vision.linear-own.no : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input weight bias ci co out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.linear-own.launch : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input weight bias ci co out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out]} partial.stdlib.vision.linear-own.yes.6 [yes.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out]} partial.stdlib.vision.linear-own.no.6 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.linear-own.host : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input weight bias ci co out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.count]} partial.stdlib.vision.linear-own.launch.7 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.linear-own.run : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight bias ci co count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.out] [.count] [.grid]} partial.stdlib.vision.linear-own.host.8 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.linear-own : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight bias rows ci co.]
+ ({[.rows] [.co]} stdlib.qwen3.memory.u64.mul [count.])
+ ({[.input] [.weight] [.bias] [.ci] [.co] [.count] [.count]} stdlib.vision.linear-own.run)
+ ))
+
+(def program stdlib.vision.widen.element : {((cap.ref mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input out element.]
+ ({[.input] [.element]} stdlib.qwen3.memory.ref-read-bf16 [bf.])
+ ([.bf] bf16.to-f32 [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.widen.yes : {((cap.ref mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.out] [.element]} stdlib.vision.widen.element)
+ ))
+
+(def program stdlib.vision.widen.no : {((cap.ref mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.widen.launch : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.out]} partial.stdlib.vision.widen.yes.2 [yes.])
+ ({[.input] [.out]} partial.stdlib.vision.widen.no.2 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.widen.host : {((cap.ref mem) val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.out] [.count]} partial.stdlib.vision.widen.launch.3 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.widen.run : {((cap.ref mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.out] [.count] [.grid]} partial.stdlib.vision.widen.host.4 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program vision.widen-bf16 : {((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count.]
+ ({[.input] [.count] [.count]} stdlib.vision.widen.run)
+ ))
+
+(def program stdlib.vision.add.element : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([a b out element.]
+ ({[.a] [.element]} stdlib.qwen3.memory.own-read-f32 [av.])
+ ({[.b] [.element]} stdlib.qwen3.memory.own-read-f32 [bv.])
+ ({[.av] [.bv]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.add.yes : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([a b out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.a] [.b] [.out] [.element]} stdlib.vision.add.element)
+ ))
+
+(def program stdlib.vision.add.no : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([a b out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.add.launch : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([a b out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.a] [.b] [.out]} partial.stdlib.vision.add.yes.3 [yes.])
+ ({[.a] [.b] [.out]} partial.stdlib.vision.add.no.3 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.add.host : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([a b out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.a] [.b] [.out] [.count]} partial.stdlib.vision.add.launch.4 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.add.run : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([a b count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.a] [.b] [.out] [.count] [.grid]} partial.stdlib.vision.add.host.5 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.add : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([a b count.]
+ ({[.a] [.b] [.count] [.count]} stdlib.vision.add.run)
+ ))
+
+(def program stdlib.vision.slice.element : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input stride width offset out element.]
+ ({[.element] [.width]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.width]} stdlib.qwen3.memory.u64.rem [col.])
+ ({[.row] [.stride]} stdlib.qwen3.memory.u64.mul [base.])
+ ({[.base] [.offset]} stdlib.qwen3.memory.u64.add [shift.])
+ ({[.shift] [.col]} stdlib.qwen3.memory.u64.add [ix.])
+ ({[.input] [.ix]} stdlib.qwen3.memory.own-read-f32 [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.slice.yes : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input stride width offset out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.stride] [.width] [.offset] [.out] [.element]} stdlib.vision.slice.element)
+ ))
+
+(def program stdlib.vision.slice.no : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input stride width offset out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.slice.launch : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input stride width offset out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.stride] [.width] [.offset] [.out]} partial.stdlib.vision.slice.yes.5 [yes.])
+ ({[.input] [.stride] [.width] [.offset] [.out]} partial.stdlib.vision.slice.no.5 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.slice.host : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input stride width offset out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.stride] [.width] [.offset] [.out] [.count]} partial.stdlib.vision.slice.launch.6 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.slice.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input stride width offset count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.stride] [.width] [.offset] [.out] [.count] [.grid]} partial.stdlib.vision.slice.host.7 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.slice : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count stride width offset.]
+ ({[.input] [.stride] [.width] [.offset] [.count] [.count]} stdlib.vision.slice.run)
+ ))
+
+(def program stdlib.vision.sum : {((cap.own mem) val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([input base pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.base] [.i]} stdlib.qwen3.memory.u64.add [ix.])
+ ({[.input] [.ix]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.acc] [.x]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.variance : {((cap.own mem) val) (u64 val) (f32 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([input base mean pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.base] [.i]} stdlib.qwen3.memory.u64.add [ix.])
+ ({[.input] [.ix]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.x] [.mean]} stdlib.qwen3.memory.f32.sub [delta.])
+ ({[.delta] [.delta]} stdlib.qwen3.memory.f32.mul [square.])
+ ({[.acc] [.square]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.norm-stats.element : {((cap.own mem) val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input cols eps out element.]
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.mul [base.])
+ ([.cols] stdlib.qwen3.memory.fold-count-u32 stdlib.qwen3.memory.u32.to-f32 [columns.])
+ ({[.input] [.base]} partial.stdlib.vision.sum.2 [callback-sum.])
+ ({[.cols] (unit.intro meta.master.end)} smolcat.value.named_at [end-sum.])
+ ({[.end-sum] (const.u32.0x00000000 u32.bitcast-f32) [.callback-sum] core.truth} core.fold.bounded_u64 [sum proof-sum.])
+ ([.proof-sum] unsafe.discard unit.elim)
+ ({[.sum] [.columns]} stdlib.qwen3.memory.f32.div [mean.])
+ ({[.input] [.base] [.mean]} partial.stdlib.vision.variance.3 [callback-variance.])
+ ({[.cols] (unit.intro meta.master.end)} smolcat.value.named_at [end-variance.])
+ ({[.end-variance] (const.u32.0x00000000 u32.bitcast-f32) [.callback-variance] core.truth} core.fold.bounded_u64 [variance proof-variance.])
+ ([.proof-variance] unsafe.discard unit.elim)
+ ({[.variance] [.columns]} stdlib.qwen3.memory.f32.div [average.])
+ ({[.average] [.eps]} stdlib.qwen3.memory.f32.add [epsilon.])
+ ([.epsilon] qwen3.sqrt [root.])
+ ({(const.u32.0x3F800000 u32.bitcast-f32) [.root]} stdlib.qwen3.memory.f32.div [inverse.])
+ ({[.element] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [mi.])
+ ({[.mi] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [vi.])
+ ({[.out] [.mi] [.mean]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ ({[.out] [.vi] [.inverse]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.norm-stats.yes : {((cap.own mem) val) (u64 val) (f32 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input cols eps out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.cols] [.eps] [.out] [.element]} stdlib.vision.norm-stats.element)
+ ))
+
+(def program stdlib.vision.norm-stats.no : {((cap.own mem) val) (u64 val) (f32 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input cols eps out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.norm-stats.launch : {((cap.own mem) val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input cols eps out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.cols] [.eps] [.out]} partial.stdlib.vision.norm-stats.yes.4 [yes.])
+ ({[.input] [.cols] [.eps] [.out]} partial.stdlib.vision.norm-stats.no.4 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.norm-stats.host : {((cap.own mem) val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input cols eps out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.cols] [.eps] [.out] [.count]} partial.stdlib.vision.norm-stats.launch.5 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.norm-stats.run : {((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input cols eps count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.cols] [.eps] [.out] [.count] [.grid]} partial.stdlib.vision.norm-stats.host.6 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.norm.element : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input weight bias stats cols out element.]
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.rem [col.])
+ ({[.row] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [mi.])
+ ({[.mi] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [vi.])
+ ({[.stats] [.mi]} stdlib.qwen3.memory.own-read-f32 [mean.])
+ ({[.stats] [.vi]} stdlib.qwen3.memory.own-read-f32 [inverse.])
+ ({[.input] [.element]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.weight] [.col]} stdlib.qwen3.memory.ref-read-f32 [w.])
+ ({[.bias] [.col]} stdlib.qwen3.memory.ref-read-f32 [b.])
+ ({[.x] [.mean]} stdlib.qwen3.memory.f32.sub [centered.])
+ ({[.centered] [.inverse]} stdlib.qwen3.memory.f32.mul [normal.])
+ ({[.normal] [.w]} stdlib.qwen3.memory.f32.mul [scaled.])
+ ({[.scaled] [.b]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.norm.yes : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input weight bias stats cols out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.out] [.element]} stdlib.vision.norm.element)
+ ))
+
+(def program stdlib.vision.norm.no : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input weight bias stats cols out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.norm.launch : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input weight bias stats cols out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.out]} partial.stdlib.vision.norm.yes.6 [yes.])
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.out]} partial.stdlib.vision.norm.no.6 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.norm.host : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input weight bias stats cols out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.out] [.count]} partial.stdlib.vision.norm.launch.7 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.norm.run : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input weight bias stats cols count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.out] [.count] [.grid]} partial.stdlib.vision.norm.host.8 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.norm : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (f32 val)} -> ((cap.own mem) val) =
+ ([input weight bias rows cols groups rms mode eps.]
+ ({[.rows] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [stat-count.])
+ ({[.input] [.cols] [.eps] [.rows] [.stat-count]} stdlib.vision.norm-stats.run [stats.])
+ ({[.rows] [.cols]} stdlib.qwen3.memory.u64.mul [count.])
+ ({[.input] [.weight] [.bias] [.stats] [.cols] [.count] [.count]} stdlib.vision.norm.run [normalized.])
+ ({[.stats] [.normalized]} qwen3.free-f32-before)
+ ))
+
+(def program stdlib.vision.position.element : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([embedding indices coefficients cols out element.]
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.rem [col.])
+ ({[.row] (const.u64.0x0000000000000004)} stdlib.qwen3.memory.u64.mul [base.])
+ ({[.base] (const.u64.0x0000000000000000)} stdlib.qwen3.memory.u64.add [j0.])
+ ({[.indices] [.j0]} stdlib.qwen3.memory.ref-read-u64 [pos0.])
+ ({[.pos0] [.cols]} stdlib.qwen3.memory.u64.mul [pc0.])
+ ({[.pc0] [.col]} stdlib.qwen3.memory.u64.add [ix0.])
+ ({[.embedding] [.ix0]} stdlib.qwen3.memory.ref-read-f32 [v0.])
+ ({[.coefficients] [.j0]} stdlib.qwen3.memory.ref-read-f32 [w0.])
+ ({[.v0] [.w0]} stdlib.qwen3.memory.f32.mul [t0.])
+ ({[.base] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [j1.])
+ ({[.indices] [.j1]} stdlib.qwen3.memory.ref-read-u64 [pos1.])
+ ({[.pos1] [.cols]} stdlib.qwen3.memory.u64.mul [pc1.])
+ ({[.pc1] [.col]} stdlib.qwen3.memory.u64.add [ix1.])
+ ({[.embedding] [.ix1]} stdlib.qwen3.memory.ref-read-f32 [v1.])
+ ({[.coefficients] [.j1]} stdlib.qwen3.memory.ref-read-f32 [w1.])
+ ({[.v1] [.w1]} stdlib.qwen3.memory.f32.mul [t1.])
+ ({[.base] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.add [j2.])
+ ({[.indices] [.j2]} stdlib.qwen3.memory.ref-read-u64 [pos2.])
+ ({[.pos2] [.cols]} stdlib.qwen3.memory.u64.mul [pc2.])
+ ({[.pc2] [.col]} stdlib.qwen3.memory.u64.add [ix2.])
+ ({[.embedding] [.ix2]} stdlib.qwen3.memory.ref-read-f32 [v2.])
+ ({[.coefficients] [.j2]} stdlib.qwen3.memory.ref-read-f32 [w2.])
+ ({[.v2] [.w2]} stdlib.qwen3.memory.f32.mul [t2.])
+ ({[.base] (const.u64.0x0000000000000003)} stdlib.qwen3.memory.u64.add [j3.])
+ ({[.indices] [.j3]} stdlib.qwen3.memory.ref-read-u64 [pos3.])
+ ({[.pos3] [.cols]} stdlib.qwen3.memory.u64.mul [pc3.])
+ ({[.pc3] [.col]} stdlib.qwen3.memory.u64.add [ix3.])
+ ({[.embedding] [.ix3]} stdlib.qwen3.memory.ref-read-f32 [v3.])
+ ({[.coefficients] [.j3]} stdlib.qwen3.memory.ref-read-f32 [w3.])
+ ({[.v3] [.w3]} stdlib.qwen3.memory.f32.mul [t3.])
+ ({[.t0] [.t1]} stdlib.qwen3.memory.f32.add [s01.])
+ ({[.t2] [.t3]} stdlib.qwen3.memory.f32.add [s23.])
+ ({[.s01] [.s23]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.position.yes : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([embedding indices coefficients cols out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.out] [.element]} stdlib.vision.position.element)
+ ))
+
+(def program stdlib.vision.position.no : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([embedding indices coefficients cols out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.position.launch : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([embedding indices coefficients cols out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.out]} partial.stdlib.vision.position.yes.5 [yes.])
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.out]} partial.stdlib.vision.position.no.5 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.position.host : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([embedding indices coefficients cols out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.out] [.count]} partial.stdlib.vision.position.launch.6 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.position.run : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([embedding indices coefficients cols count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.out] [.count] [.grid]} partial.stdlib.vision.position.host.7 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.position : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([embedding indices coefficients count cols.]
+ ({[.embedding] [.indices] [.coefficients] [.cols] [.count] [.count]} stdlib.vision.position.run)
+ ))
+
+(def program stdlib.vision.rope.element : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input positions frequencies cols dim out element.]
+ ({[.element] [.cols]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.element] [.dim]} stdlib.qwen3.memory.u64.rem [channel.])
+ ({[.dim] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.div [half.])
+ ({[.dim] (const.u64.0x0000000000000004)} stdlib.qwen3.memory.u64.div [quarter.])
+ ({[.channel] [.half]} stdlib.qwen3.memory.u64.rem [pair.])
+ ({[.pair] [.quarter]} stdlib.qwen3.memory.u64.div [axis.])
+ ({[.pair] [.quarter]} stdlib.qwen3.memory.u64.rem [freq-index.])
+ ({[.row] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [pbase.])
+ ({[.pbase] [.axis]} stdlib.qwen3.memory.u64.add [pi.])
+ ({[.positions] [.pi]} stdlib.qwen3.memory.ref-read-u64 [pos-u64.])
+ ([.pos-u64] stdlib.qwen3.memory.fold-count-u32 stdlib.qwen3.memory.u32.to-f32 [pos.])
+ ({[.frequencies] [.freq-index]} stdlib.qwen3.memory.ref-read-f32 [frequency.])
+ ({[.pos] [.frequency]} stdlib.qwen3.memory.f32.mul [angle.])
+ ([.angle] qwen3.rope-sincos [sine cosine.])
+ ({[.channel] [.half]} stdlib.qwen3.memory.u64.less [lower.])
+ ({[.element] [.half]} stdlib.qwen3.memory.u64.add [plus.])
+ ({[.element] [.half]} stdlib.qwen3.memory.u64.sub [minus.])
+ ({[.lower] [.plus] [.minus]} stdlib.qwen3.memory.select-u64 [other-index.])
+ ({[.input] [.element]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.input] [.other-index]} stdlib.qwen3.memory.own-read-f32 [other.])
+ ({[.other]} stdlib.qwen3.memory.f32.negate [negative.])
+ ({[.lower] [.negative] [.other]} stdlib.qwen3.memory.select-f32 [rotated.])
+ ({[.x] [.cosine]} stdlib.qwen3.memory.f32.mul [xc.])
+ ({[.rotated] [.sine]} stdlib.qwen3.memory.f32.mul [rs.])
+ ({[.xc] [.rs]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.rope.yes : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input positions frequencies cols dim out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.out] [.element]} stdlib.vision.rope.element)
+ ))
+
+(def program stdlib.vision.rope.no : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input positions frequencies cols dim out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.rope.launch : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input positions frequencies cols dim out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.out]} partial.stdlib.vision.rope.yes.6 [yes.])
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.out]} partial.stdlib.vision.rope.no.6 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.rope.host : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input positions frequencies cols dim out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.out] [.count]} partial.stdlib.vision.rope.launch.7 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.rope.run : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input positions frequencies cols dim count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.out] [.count] [.grid]} partial.stdlib.vision.rope.host.8 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.rope : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input positions frequencies count cols dim.]
+ ({[.input] [.positions] [.frequencies] [.cols] [.dim] [.count] [.count]} stdlib.vision.rope.run)
+ ))
+
+(def program stdlib.vision.gelu-tanh.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input out element.]
+ 
+ ({[.input] [.element]} stdlib.qwen3.memory.own-read-f32 [v.])
+ ([.v v] stdlib.qwen3.memory.f32.mul [v2.]) ([.v2 v] stdlib.qwen3.memory.f32.mul [v3.])
+({[.v3] (const.u32.0x3D372713 u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [cubic.]) ([.v cubic] stdlib.qwen3.memory.f32.add [sum.])
+({[.sum] (const.u32.0x3FCC422A u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul qwen3.sigmoid [sig.]) ([.v sig] stdlib.qwen3.memory.f32.mul [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.gelu-tanh.yes : {((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.out] [.element]} stdlib.vision.gelu-tanh.element)
+ ))
+
+(def program stdlib.vision.gelu-tanh.no : {((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.gelu-tanh.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.out]} partial.stdlib.vision.gelu-tanh.yes.2 [yes.])
+ ({[.input] [.out]} partial.stdlib.vision.gelu-tanh.no.2 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.gelu-tanh.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.out] [.count]} partial.stdlib.vision.gelu-tanh.launch.3 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.gelu-tanh.run : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.out] [.count] [.grid]} partial.stdlib.vision.gelu-tanh.host.4 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.gelu-tanh : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count.]
+ ({[.input] [.count] [.count]} stdlib.vision.gelu-tanh.run)
+ ))
+
+(def program stdlib.vision.gelu-erf.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([input out element.]
+ 
+ ({[.input] [.element]} stdlib.qwen3.memory.own-read-f32 [v.])
+ ({[.v] (const.u32.0x3F3504F3 u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [z.])
+({[.z] (const.u32.0x00000000 u32.bitcast-f32)} stdlib.qwen3.memory.f32.less [z-negative.]) ([.z] stdlib.qwen3.memory.f32.negate [z-neg.]) ([.z-negative z-neg z] stdlib.qwen3.memory.select-f32 [a.]) ({[.a] (const.u32.0x3EA7BA05 u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [pa.])
+({(const.u32.0x3F800000 u32.bitcast-f32) [.pa]} stdlib.qwen3.memory.f32.add [den.]) ({(const.u32.0x3F800000 u32.bitcast-f32) [.den]} stdlib.qwen3.memory.f32.div [t.])
+({[.t] (const.u32.0x3F87DC22 u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [p5.]) ({[.p5] (const.u32.0xBFBA00E3 u32.bitcast-f32)} stdlib.qwen3.memory.f32.add [p4.])
+([.p4 t] stdlib.qwen3.memory.f32.mul [p4t.]) ({[.p4t] (const.u32.0x3FB5F0E3 u32.bitcast-f32)} stdlib.qwen3.memory.f32.add [p3.])
+([.p3 t] stdlib.qwen3.memory.f32.mul [p3t.]) ({[.p3t] (const.u32.0xBE91A98E u32.bitcast-f32)} stdlib.qwen3.memory.f32.add [p2.])
+([.p2 t] stdlib.qwen3.memory.f32.mul [p2t.]) ({[.p2t] (const.u32.0x3E827906 u32.bitcast-f32)} stdlib.qwen3.memory.f32.add [p1.])
+([.p1 t] stdlib.qwen3.memory.f32.mul [poly.]) ([.a a] stdlib.qwen3.memory.f32.mul stdlib.qwen3.memory.f32.negate qwen3.exp [e.])
+([.poly e] stdlib.qwen3.memory.f32.mul [tail.]) ({(const.u32.0x3F800000 u32.bitcast-f32) [.tail]} stdlib.qwen3.memory.f32.sub [erf-abs.])
+({[.z] (const.u32.0x00000000 u32.bitcast-f32)} stdlib.qwen3.memory.f32.less [negative.]) ([.erf-abs] stdlib.qwen3.memory.f32.negate [erf-neg.])
+([.negative erf-neg erf-abs] stdlib.qwen3.memory.select-f32 [erf.]) ({(const.u32.0x3F800000 u32.bitcast-f32) [.erf]} stdlib.qwen3.memory.f32.add [one-erf.])
+([.v one-erf] stdlib.qwen3.memory.f32.mul [twice.]) ({[.twice] (const.u32.0x3F000000 u32.bitcast-f32)} stdlib.qwen3.memory.f32.mul [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.gelu-erf.yes : {((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.input] [.out] [.element]} stdlib.vision.gelu-erf.element)
+ ))
+
+(def program stdlib.vision.gelu-erf.no : {((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([input out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.gelu-erf.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([input out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.input] [.out]} partial.stdlib.vision.gelu-erf.yes.2 [yes.])
+ ({[.input] [.out]} partial.stdlib.vision.gelu-erf.no.2 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.gelu-erf.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([input out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.input] [.out] [.count]} partial.stdlib.vision.gelu-erf.launch.3 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.gelu-erf.run : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.input] [.out] [.count] [.grid]} partial.stdlib.vision.gelu-erf.host.4 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.gelu-erf : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count.]
+ ({[.input] [.count] [.count]} stdlib.vision.gelu-erf.run)
+ ))
+
+(def program stdlib.vision.qk : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([q k qbase kbase pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.qbase] [.i]} stdlib.qwen3.memory.u64.add [qi.])
+ ({[.kbase] [.i]} stdlib.qwen3.memory.u64.add [ki.])
+ ({[.q] [.qi]} stdlib.qwen3.memory.own-read-f32 [qv.])
+ ({[.k] [.ki]} stdlib.qwen3.memory.own-read-f32 [kv.])
+ ({[.qv] [.kv]} stdlib.qwen3.memory.f32.mul [p.])
+ ({[.acc] [.p]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.scores.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([q k rows heads dim scale out element.]
+ ({[.element] [.rows]} stdlib.qwen3.memory.u64.rem [key.])
+ ({[.element] [.rows]} stdlib.qwen3.memory.u64.div [qh.])
+ ({[.qh] [.heads]} stdlib.qwen3.memory.u64.rem [head.])
+ ({[.key] [.heads]} stdlib.qwen3.memory.u64.mul [kh0.])
+ ({[.kh0] [.head]} stdlib.qwen3.memory.u64.add [kh.])
+ ({[.qh] [.dim]} stdlib.qwen3.memory.u64.mul [qbase.])
+ ({[.kh] [.dim]} stdlib.qwen3.memory.u64.mul [kbase.])
+ ({[.q] [.k] [.qbase] [.kbase]} partial.stdlib.vision.qk.4 [callback-dot.])
+ ({[.dim] (unit.intro meta.master.end)} smolcat.value.named_at [end-dot.])
+ ({[.end-dot] (const.u32.0x00000000 u32.bitcast-f32) [.callback-dot] core.truth} core.fold.bounded_u64 [dot proof-dot.])
+ ([.proof-dot] unsafe.discard unit.elim)
+ ({[.dot] [.scale]} stdlib.qwen3.memory.f32.mul [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.scores.yes : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([q k rows heads dim scale out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.out] [.element]} stdlib.vision.scores.element)
+ ))
+
+(def program stdlib.vision.scores.no : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([q k rows heads dim scale out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.scores.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([q k rows heads dim scale out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.out]} partial.stdlib.vision.scores.yes.7 [yes.])
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.out]} partial.stdlib.vision.scores.no.7 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.scores.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([q k rows heads dim scale out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.out] [.count]} partial.stdlib.vision.scores.launch.8 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.scores.run : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([q k rows heads dim scale count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.out] [.count] [.grid]} partial.stdlib.vision.scores.host.9 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.maximum : {((cap.own mem) val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([scores base pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.base] [.i]} stdlib.qwen3.memory.u64.add [ix.])
+ ({[.scores] [.ix]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.acc] [.x]} stdlib.qwen3.memory.f32.max [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.denominator : {((cap.own mem) val) (u64 val) (f32 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([scores base maximum pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.base] [.i]} stdlib.qwen3.memory.u64.add [ix.])
+ ({[.scores] [.ix]} stdlib.qwen3.memory.own-read-f32 [x.])
+ ({[.x] [.maximum]} stdlib.qwen3.memory.f32.sub [shift.])
+ ([.shift] qwen3.exp [e.])
+ ({[.acc] [.e]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.softmax-stats.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([scores rows out element.]
+ ({[.element] [.rows]} stdlib.qwen3.memory.u64.mul [base.])
+ ({[.scores] [.base]} partial.stdlib.vision.maximum.2 [callback-maximum.])
+ ({[.rows] (unit.intro meta.master.end)} smolcat.value.named_at [end-maximum.])
+ ({[.end-maximum] (const.u32.0xFF7FFFFF u32.bitcast-f32) [.callback-maximum] core.truth} core.fold.bounded_u64 [maximum proof-maximum.])
+ ([.proof-maximum] unsafe.discard unit.elim)
+ ({[.scores] [.base] [.maximum]} partial.stdlib.vision.denominator.3 [callback-denominator.])
+ ({[.rows] (unit.intro meta.master.end)} smolcat.value.named_at [end-denominator.])
+ ({[.end-denominator] (const.u32.0x00000000 u32.bitcast-f32) [.callback-denominator] core.truth} core.fold.bounded_u64 [denominator proof-denominator.])
+ ([.proof-denominator] unsafe.discard unit.elim)
+ ({[.element] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [mi.])
+ ({[.mi] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [di.])
+ ({[.out] [.mi] [.maximum]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ ({[.out] [.di] [.denominator]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.softmax-stats.yes : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([scores rows out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.scores] [.rows] [.out] [.element]} stdlib.vision.softmax-stats.element)
+ ))
+
+(def program stdlib.vision.softmax-stats.no : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([scores rows out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.softmax-stats.launch : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([scores rows out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.scores] [.rows] [.out]} partial.stdlib.vision.softmax-stats.yes.3 [yes.])
+ ({[.scores] [.rows] [.out]} partial.stdlib.vision.softmax-stats.no.3 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.softmax-stats.host : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([scores rows out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.scores] [.rows] [.out] [.count]} partial.stdlib.vision.softmax-stats.launch.4 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.softmax-stats.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([scores rows count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.scores] [.rows] [.out] [.count] [.grid]} partial.stdlib.vision.softmax-stats.host.5 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.softmax.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([scores stats rows out element.]
+ ({[.element] [.rows]} stdlib.qwen3.memory.u64.div [row.])
+ ({[.row] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [mi.])
+ ({[.mi] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [di.])
+ ({[.stats] [.mi]} stdlib.qwen3.memory.own-read-f32 [maximum.])
+ ({[.stats] [.di]} stdlib.qwen3.memory.own-read-f32 [denominator.])
+ ({[.scores] [.element]} stdlib.qwen3.memory.own-read-f32 [score.])
+ ({[.score] [.maximum]} stdlib.qwen3.memory.f32.sub [shift.])
+ ([.shift] qwen3.exp [e.])
+ ({[.e] [.denominator]} stdlib.qwen3.memory.f32.div [value.])
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.softmax.yes : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([scores stats rows out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.scores] [.stats] [.rows] [.out] [.element]} stdlib.vision.softmax.element)
+ ))
+
+(def program stdlib.vision.softmax.no : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([scores stats rows out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.softmax.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([scores stats rows out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.scores] [.stats] [.rows] [.out]} partial.stdlib.vision.softmax.yes.4 [yes.])
+ ({[.scores] [.stats] [.rows] [.out]} partial.stdlib.vision.softmax.no.4 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.softmax.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([scores stats rows out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.scores] [.stats] [.rows] [.out] [.count]} partial.stdlib.vision.softmax.launch.5 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.softmax.run : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([scores stats rows count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.scores] [.stats] [.rows] [.out] [.count] [.grid]} partial.stdlib.vision.softmax.host.6 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.weighted-value : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([probabilities v pbase heads dim head channel pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [acc proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ([.step] :.forget [i.])
+ ({[.pbase] [.i]} stdlib.qwen3.memory.u64.add [pi.])
+ ({[.i] [.heads]} stdlib.qwen3.memory.u64.mul [vh0.])
+ ({[.vh0] [.head]} stdlib.qwen3.memory.u64.add [vh.])
+ ({[.vh] [.dim]} stdlib.qwen3.memory.u64.mul [vb.])
+ ({[.vb] [.channel]} stdlib.qwen3.memory.u64.add [vi.])
+ ({[.probabilities] [.pi]} stdlib.qwen3.memory.own-read-f32 [p.])
+ ({[.v] [.vi]} stdlib.qwen3.memory.own-read-f32 [vvalue.])
+ ({[.p] [.vvalue]} stdlib.qwen3.memory.f32.mul [product.])
+ ({[.acc] [.product]} stdlib.qwen3.memory.f32.add [value.])
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.context.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([probabilities v rows heads dim out element.]
+ ({[.element] [.dim]} stdlib.qwen3.memory.u64.div [qh.])
+ ({[.qh] [.heads]} stdlib.qwen3.memory.u64.rem [head.])
+ ({[.element] [.dim]} stdlib.qwen3.memory.u64.rem [channel.])
+ ({[.qh] [.rows]} stdlib.qwen3.memory.u64.mul [pbase.])
+ ({[.probabilities] [.v] [.pbase] [.heads] [.dim] [.head] [.channel]} partial.stdlib.vision.weighted-value.7 [callback-value.])
+ ({[.rows] (unit.intro meta.master.end)} smolcat.value.named_at [end-value.])
+ ({[.end-value] (const.u32.0x00000000 u32.bitcast-f32) [.callback-value] core.truth} core.fold.bounded_u64 [value proof-value.])
+ ([.proof-value] unsafe.discard unit.elim)
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.vision.context.yes : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([probabilities v rows heads dim out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.probabilities] [.v] [.rows] [.heads] [.dim] [.out] [.element]} stdlib.vision.context.element)
+ ))
+
+(def program stdlib.vision.context.no : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([probabilities v rows heads dim out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.vision.context.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([probabilities v rows heads dim out count thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.count]} stdlib.qwen3.memory.u64.less [valid.])
+ ({[.valid] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.probabilities] [.v] [.rows] [.heads] [.dim] [.out]} partial.stdlib.vision.context.yes.6 [yes.])
+ ({[.probabilities] [.v] [.rows] [.heads] [.dim] [.out]} partial.stdlib.vision.context.no.6 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.vision.context.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([probabilities v rows heads dim out count grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.probabilities] [.v] [.rows] [.heads] [.dim] [.out] [.count]} partial.stdlib.vision.context.launch.7 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.vision.context.run : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([probabilities v rows heads dim count elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.count] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.probabilities] [.v] [.rows] [.heads] [.dim] [.out] [.count] [.grid]} partial.stdlib.vision.context.host.8 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.vision.attention : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (f32 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([q k v rows keys heads kvheads dim scale causal valid.]
+ ({[.rows] [.heads]} stdlib.qwen3.memory.u64.mul [query-heads.])
+ ({[.query-heads] [.rows]} stdlib.qwen3.memory.u64.mul [score-count.])
+ ({[.q] [.k] [.rows] [.heads] [.dim] [.scale] [.score-count] [.score-count]} stdlib.vision.scores.run [scores.])
+ ({[.query-heads] (const.u64.0x0000000000000002)} stdlib.qwen3.memory.u64.mul [stat-count.])
+ ({[.scores] [.rows] [.query-heads] [.stat-count]} stdlib.vision.softmax-stats.run [stats.])
+ ({[.scores] [.stats] [.rows] [.score-count] [.score-count]} stdlib.vision.softmax.run [probabilities.])
+ ({[.scores] [.probabilities]} qwen3.free-f32-before [probabilities1.])
+ ({[.stats] [.probabilities1]} qwen3.free-f32-before [probabilities2.])
+ ({[.query-heads] [.dim]} stdlib.qwen3.memory.u64.mul [count.])
+ ({[.probabilities2] [.v] [.rows] [.heads] [.dim] [.count] [.count]} stdlib.vision.context.run [context.])
+ ({[.probabilities2] [.context]} qwen3.free-f32-before)
+ ))
