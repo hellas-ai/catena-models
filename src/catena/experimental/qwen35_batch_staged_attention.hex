@@ -1,0 +1,47 @@
+# Batched full-layer preparation/FFNs with unchanged staged BF16 attention arithmetic.
+(def program stdlib.qwen35.batch.staged.row : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([input width token.]
+  ({[.width]} stdlib.qwen3.memory.alloc-bf16 [out.])
+  ({[.token] [.width]} stdlib.qwen3.memory.u64.mul [base.])
+  ({[.input] [.out] [.base] (const.u64.0x0000000000000000) [.width]} stdlib.qwen35.prefill.copy-range [ready.])
+  [.ready]
+ ))
+
+(def program stdlib.qwen35.batch.staged.token : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({({master.index32 u32} :) ({((cap.own mem) val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([query cache qg start key-base value-base pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [value proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.qwen3.memory.u32.to-u64 [iteration.])
+  ({[.query] (const.u64.0x{{QUERY_SIZE}}) [.iteration]} stdlib.qwen35.batch.staged.row [q-row.])
+  ({[.qg] (const.u64.0x{{DOUBLE_QUERY_SIZE}}) [.iteration]} stdlib.qwen35.batch.staged.row [gate-row.])
+  ({[.start] [.iteration]} stdlib.qwen3.memory.u64.add [position.])
+  ({[.position] (const.u64.0x0000000000000001)} stdlib.qwen3.memory.u64.add [keys.])
+  ({[.q-row] [.cache] [.keys] [.key-base]} qwen3.scores [scores.])
+  ({[.q-row] [.scores]} qwen3.free-bf16-before [scores-ready.])
+  ({[.scores-ready] [.keys]} qwen35.softmax [probabilities.])
+  ({[.scores-ready] [.probabilities]} qwen3.free-f32-before [prob-ready.])
+  ({[.prob-ready] [.cache] [.keys] [.value-base]} qwen35.context [context.])
+  ({[.prob-ready] [.context]} qwen3.free-bf16-before [ctx-ready.])
+  ({[.gate-row] [.ctx-ready]} qwen35.gate-context [gated.])
+  ({[.gate-row] [.gated]} qwen3.free-bf16-before [gated-ready.])
+  ({[.ctx-ready] [.gated-ready]} qwen3.free-bf16-before [result-row.])
+  ({[.iteration] (const.u64.0x{{QUERY_SIZE}})} stdlib.qwen3.memory.u64.mul [output-base.])
+  ({[.result-row] [.value] (const.u64.0x0000000000000000) [.output-base] (const.u64.0x{{QUERY_SIZE}})} stdlib.qwen35.prefill.copy-range [stored.])
+  ({[.result-row] [.stored]} qwen3.free-bf16-before [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen35.batch.staged : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([query cache qg start key-base value-base.]
+  ({[.query]} stdlib.qwen3.memory.own-count-bf16 [elements.])
+  ({[.elements] (const.u64.0x{{QUERY_SIZE}})} stdlib.qwen3.memory.u64.div [sequence.])
+  ({[.elements]} stdlib.qwen3.memory.alloc-bf16 [out.])
+  ({[.query] [.cache] [.qg] [.start] [.key-base] [.value-base]} partial.stdlib.qwen35.batch.staged.token.6 [callback.])
+  ({([.sequence] stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] [.out] [.callback] (core.truth)} core.fold.bounded [complete proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.complete]
+ ))
+

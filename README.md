@@ -65,14 +65,25 @@ head normalization/RoPE/KV append reduce preparation launches. Single-token
 DeltaNet updates read and store BF16 cache directly while computing in F32.
 Its full-attention layers use SIMT online cached attention during decode,
 including context output gating, without score/probability allocations.
-Multi-token prefill retains the validated staged BF16 attention path.
+For 128-wide recurrent keys, multi-token prefill batches projections, head
+preparation and FFNs across the prompt. Eight input rows
+share each projection weight load. A GPU DeltaNet scan retains F32 state across
+tokens and writes it once; MoE routing and experts use compact per-token
+workspace. Full attention retains the existing staged BF16 score/probability
+rounding. Single-token calls retain the existing decode path.
 Dense Qwen3.5 also supports non-power-of-two widths, including 4B
 with its 2,560-wide hidden state.
 Cooperative per-head L2 and gated RMS normalization preserve the existing
 scalar sum order. DeltaNet
 prediction, recurrent update, and output execute in one kernel without a delta
 allocation. Prefill keeps recurrent state F32 until the call boundary, then
-persists BF16 cache state. Prefill currently processes tokens sequentially.
+persists BF16 cache state. For 128-wide recurrent keys, the F32-shadow kernel
+retains each lane's four state/key values in registers between prediction and
+update, avoiding a second load and the intervening block barrier. Dense models
+use the same fused kernel; other key widths retain their existing implementation.
+Other recurrent key widths retain sequential prefill. All allocation, scheduling,
+state transitions, and GPU execution remain in Hex; Rust runtime support is
+shared with the default backend. See [prefill measurements](PREFILL_BENCHMARKS.md).
 
 Session creation calls the selected Hex model's `qwen3.init(capacity)` entrypoint.
 Hex computes the layout and allocates/initializes cache and workspace, including

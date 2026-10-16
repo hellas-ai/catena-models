@@ -1,6 +1,9 @@
 //! Dense and MoE Qwen3.5/3.6 hybrid graphs for the experimental compiler.
 use super::*;
 use crate::spec::LayerType;
+#[path = "experimental_qwen35_prefill.rs"]
+mod prefill;
+
 const SCRATCH: [&str; 7] = [
     "scratch0", "scratch1", "scratch2", "scratch3", "scratch4", "scratch5", "scratch6",
 ];
@@ -47,7 +50,11 @@ fn selector(s: &mut String, layers: &[usize], group: &str, tree: &str, kind: &st
 fn emit_moe(s: &mut String, c0: &ModelConfig, _shadow_bytes: usize) -> Result<()> {
     let active = c0.experts_per_token * c0.intermediate_size;
     let shared = c0.shared_expert_intermediate_size.unwrap();
-    let mut hex = include_str!("catena/experimental/qwen35_moe.hex").to_owned();
+    let mut hex = [
+        include_str!("catena/experimental/qwen35_moe.hex"),
+        include_str!("catena/experimental/qwen35_batch_moe.hex"),
+    ]
+    .join("\n");
     for (key, value) in [
         ("EXPERT_COUNT", c0.num_experts),
         ("TOP_K", c0.experts_per_token),
@@ -522,12 +529,31 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     let conv = qkv_size
         .checked_mul(3)
         .ok_or_else(|| anyhow::anyhow!("convolution workspace overflow"))?;
+    let mut fused_delta = include_str!("catena/experimental/qwen35_fused_delta.hex").to_owned();
+    if key_dim == 128 {
+        let start = fused_delta
+            .find("(def program stdlib.qwen35.fused-delta.kernel :")
+            .unwrap();
+        let end = fused_delta
+            .find("(def program stdlib.qwen35.fused-delta.host :")
+            .unwrap();
+        fused_delta.replace_range(
+            start..end,
+            include_str!("catena/experimental/qwen35_register_delta.hex"),
+        );
+    }
     let mut kernels = [
         include_str!("catena/experimental/qwen35.hex"),
+        include_str!("catena/experimental/qwen35_batch_projection.hex"),
+        include_str!("catena/experimental/qwen35_batch_prepare.hex"),
+        include_str!("catena/experimental/qwen35_batch_gated.hex"),
+        include_str!("catena/experimental/qwen35_batch_scan.hex"),
+        include_str!("catena/experimental/qwen35_batch_full_prepare.hex"),
+        include_str!("catena/experimental/qwen35_batch_staged_attention.hex"),
         include_str!("catena/experimental/qwen35_attention.hex"),
         include_str!("catena/experimental/qwen35_online.hex"),
         include_str!("catena/experimental/qwen35_cooperative_norm.hex"),
-        include_str!("catena/experimental/qwen35_fused_delta.hex"),
+        fused_delta.as_str(),
         include_str!("catena/experimental/qwen35_cached_delta.hex"),
     ]
     .join("\n");
@@ -696,6 +722,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             .replace("} qwen35.l2 [", "} qwen35.coop-l2 [")
             .replace("} qwen35.gated-norm [", "} qwen35.coop-gated [")
             .replace("} qwen35.delta [", "} qwen35.fused-delta [");
+    }
+    if !moe && key_dim == 128 {
+        s = s.replace("} qwen35.delta [", "} qwen35.fused-delta [");
     }
     let full_count = if moe { 16 } else { 11 };
     let linear_count = if moe { 19 } else { 14 };
@@ -941,6 +970,12 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
                 .collect::<Vec<_>>()
                 .join("\n");
         }
+    }
+    if key_dim == 128 {
+        let mut batch = String::new();
+        prefill::emit(&mut batch, config, &full_tree, &linear_tree);
+        let entry = s.rfind("(def program qwen3 :").unwrap();
+        s.insert_str(entry, &batch);
     }
     crate::session_graph::append_layout(&mut s, config, options);
     Ok(s)
@@ -1307,26 +1342,46 @@ fn emit_entry(
         &names(&["cache", "shadow-ready", "initial-hidden"]),
         "initial-state",
     );
-    call(
-        s,
-        &[
-            "tokens",
-            "w0",
-            "full-weights",
-            "linear-weights",
-            "capacity",
-            "start",
-        ]
-        .into_iter()
-        .chain(if moe { SCRATCH.to_vec() } else { vec![] })
-        .collect::<Vec<_>>(),
-        &format!(
-            "partial.stdlib.qwen35.token.fold.{}",
-            if moe { 13 } else { 6 }
-        ),
-        "token-callback",
-    );
-    s.push_str("  ({([.tokens] stdlib.qwen3.memory.ref-count-u64 stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [token-end.])\n  ({[.token-end] [.initial-state] [.token-callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
+    if config.linear_state_size == Some(128) {
+        call(
+            s,
+            &[
+                "tokens",
+                "w0",
+                "full-weights",
+                "linear-weights",
+                "capacity",
+                "start",
+            ]
+            .into_iter()
+            .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+            .chain(["initial-state"])
+            .collect::<Vec<_>>(),
+            "stdlib.qwen35.text-dispatch",
+            "final-state",
+        );
+    } else {
+        call(
+            s,
+            &[
+                "tokens",
+                "w0",
+                "full-weights",
+                "linear-weights",
+                "capacity",
+                "start",
+            ]
+            .into_iter()
+            .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+            .collect::<Vec<_>>(),
+            &format!(
+                "partial.stdlib.qwen35.token.fold.{}",
+                if moe { 13 } else { 6 }
+            ),
+            "token-callback",
+        );
+        s.push_str("  ({([.tokens] stdlib.qwen3.memory.ref-count-u64 stdlib.qwen3.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [token-end.])\n  ({[.token-end] [.initial-state] [.token-callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
+    }
     unpack(
         s,
         "final-state",
