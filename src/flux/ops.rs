@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
-    codegen::GpuDialect,
+    codegen::{CodegenKind, GpuDialect},
     runtime::{Artifact, MemOwn, MemRef, Runtime, Value},
 };
 pub const SOURCE: &str = include_str!("../catena/flux_helpers.hex");
@@ -21,6 +21,34 @@ impl Ops {
         Self::with_backend(extra, Backend::Fast)
     }
     pub fn with_backend(extra: Option<&str>, backend: Backend) -> Result<Self> {
+        Self::with_codegen(extra, backend, CodegenKind::Default)
+    }
+    pub fn with_codegen(
+        extra: Option<&str>,
+        backend: Backend,
+        codegen: CodegenKind,
+    ) -> Result<Self> {
+        if codegen == CodegenKind::Experimental {
+            ensure!(
+                !matches!(backend, Backend::Legacy),
+                "--backend legacy requires --codegen default"
+            );
+            let source = super::experimental::bundle(extra.unwrap_or(""));
+            let (runtime, artifact) = crate::catena::load_runtime_with_codegen(
+                catena_lang::stdlib::experimental_core_sources()
+                    .map(|s| -> &str { s })
+                    .chain([source.as_str()]),
+                GpuDialect::Hip,
+                codegen,
+            )
+            .context("compiling experimental Flux kernels")?;
+            let zero = runtime.mem_f32(&[0.])?;
+            return Ok(Self {
+                runtime,
+                artifact,
+                zero,
+            });
+        }
         let source = match backend {
             Backend::Fast => SOURCE,
             Backend::Legacy => include_str!("../catena/flux_legacy_helpers.hex"),

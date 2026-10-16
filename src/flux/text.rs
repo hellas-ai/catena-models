@@ -8,9 +8,23 @@ use crate::catena::{
 };
 use crate::weights::Weights;
 use anyhow::{Context, Result, ensure};
+use catena_lang::codegen::CodegenKind;
 use catena_lang::runtime::MemOwn;
 use std::path::Path;
 use tokenizers::Tokenizer;
+pub(super) const LAYER_NAMES: [&str; 11] = [
+    "input_layernorm.weight",
+    "self_attn.q_proj.weight",
+    "self_attn.k_proj.weight",
+    "self_attn.v_proj.weight",
+    "self_attn.o_proj.weight",
+    "self_attn.q_norm.weight",
+    "self_attn.k_norm.weight",
+    "post_attention_layernorm.weight",
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
+];
 pub const SEQUENCE: usize = 512;
 pub const CAPTURES: [usize; 3] = [9, 18, 27];
 pub struct PromptTokens {
@@ -56,25 +70,21 @@ impl TextEncoder {
         debug: bool,
         backend: super::ops::Backend,
     ) -> Result<Self> {
+        Self::load_with_codegen(snapshot, _valid, debug, backend, CodegenKind::Default)
+    }
+    pub fn load_with_codegen(
+        snapshot: &Path,
+        _valid: usize,
+        debug: bool,
+        backend: super::ops::Backend,
+        codegen: CodegenKind,
+    ) -> Result<Self> {
         let tc: TextConfig = read(snapshot.join("text_encoder/config.json"))?;
         let config = tc.qwen()?;
         let mut weights =
             Weights::open(&snapshot.join("text_encoder/model.safetensors.index.json"))?;
         let mut names = vec!["model.embed_tokens.weight".to_owned()];
         weights.validate(&names[0], &[config.vocabulary_size, config.hidden_size])?;
-        let layer_names = [
-            "input_layernorm.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_norm.weight",
-            "self_attn.k_norm.weight",
-            "post_attention_layernorm.weight",
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "mlp.down_proj.weight",
-        ];
         let h = config.hidden_size;
         let q = config.num_attention_heads * config.head_dim;
         let kv = config.num_key_value_heads * config.head_dim;
@@ -93,16 +103,16 @@ impl TextEncoder {
             vec![h, ff],
         ];
         for layer in 0..27 {
-            for (suffix, shape) in layer_names.iter().zip(&shapes) {
+            for (suffix, shape) in LAYER_NAMES.iter().zip(&shapes) {
                 let name = format!("model.layers.{layer}.{suffix}");
                 weights.validate(&name, shape)?;
                 names.push(name);
             }
         }
         let source_start = std::time::Instant::now();
-        let source = generated_source_with_debug(&config, debug)?;
+        let source = generated_source_with_codegen(&config, debug, codegen)?;
         super::ops::startup_timing("text source assembly", source_start);
-        let ops = Ops::with_backend(Some(&source), backend)?;
+        let ops = Ops::with_codegen(Some(&source), backend, codegen)?;
         weights.prepare(&ops.runtime, &names, false)?;
         let norms = names
             .iter()
@@ -276,26 +286,37 @@ pub fn generated_source_with_debug(
     } else {
         "(cap.own mem)"
     };
-    source.push_str(
-        "\n# Safetensors arguments for flux.encode-text:\n# w0: model.embed_tokens.weight (BF16)\n",
+    source += &weight_comments();
+    let weights = (0..1 + 27 * 11)
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>();
+    source += &format!(
+        "\n(def program flux.encode-text : {{(cap.ref mem) (u64 val) {}}} -> {output_types}\n= ([ids valid {}.]\n{body}))\n",
+        vec!["(cap.ref mem)"; weights.len()].join(" "),
+        weights.join(" ")
     );
+    Ok(source)
+}
+
+/// Select kernels at source-generation time; the runtime stage ABI is identical.
+pub fn generated_source_with_codegen(
+    config: &crate::spec::ModelConfig,
+    debug: bool,
+    codegen: CodegenKind,
+) -> Result<String> {
+    if codegen == CodegenKind::Default {
+        return generated_source_with_debug(config, debug);
+    }
+    super::experimental::text(config, debug)
+}
+
+/// Shared checkpoint argument order for standalone Hex assets.
+pub(super) fn weight_comments() -> String {
+    let mut source =
+        "\n# Safetensors arguments for flux.encode-text:\n# w0: model.embed_tokens.weight (BF16)\n"
+            .to_owned();
     for l in 0..27 {
-        for (i, suffix) in [
-            "input_layernorm.weight",
-            "self_attn.q_proj.weight",
-            "self_attn.k_proj.weight",
-            "self_attn.v_proj.weight",
-            "self_attn.o_proj.weight",
-            "self_attn.q_norm.weight",
-            "self_attn.k_norm.weight",
-            "post_attention_layernorm.weight",
-            "mlp.gate_proj.weight",
-            "mlp.up_proj.weight",
-            "mlp.down_proj.weight",
-        ]
-        .iter()
-        .enumerate()
-        {
+        for (i, suffix) in LAYER_NAMES.iter().enumerate() {
             let dtype = if suffix.ends_with("norm.weight") {
                 "F32"
             } else {
@@ -307,13 +328,5 @@ pub fn generated_source_with_debug(
             ));
         }
     }
-    let weights = (0..1 + 27 * 11)
-        .map(|i| format!("w{i}"))
-        .collect::<Vec<_>>();
-    source += &format!(
-        "\n(def program flux.encode-text : {{(cap.ref mem) (u64 val) {}}} -> {output_types}\n= ([ids valid {}.]\n{body}))\n",
-        vec!["(cap.ref mem)"; weights.len()].join(" "),
-        weights.join(" ")
-    );
-    Ok(source)
+    source
 }

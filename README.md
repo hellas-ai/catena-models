@@ -153,6 +153,30 @@ bound, so a smaller `--max-new-tokens` can reduce work for short clips.
 [Whisper](docs/whisper-asr.md), [MMS TTS](docs/mms-tts.md),
 [Flux2 Klein](docs/flux2-klein.md).
 
+Flux2 Klein also supports `--codegen experimental` for all three stages:
+
+```bash
+cargo run -r --bin flux2-klein -- --model black-forest-labs/FLUX.2-klein-4B \
+  --codegen experimental --prompt 'A red fox sitting in a snowy forest' \
+  --width 256 --height 256 --output fox.png
+```
+
+The experimental path uses BF16 text/transformer kernels and an F32 VAE, with
+SIMT projections and attention implemented in Hex using existing compiler
+primitives. Attention processes 32 query rows at a time to bound scratch memory.
+Rust uses the same checkpoint loader, tokenizer, noise generation, three stage
+calls, and PNG writer as default codegen; all layers, diffusion steps, tensor
+operations, allocations and frees execute in Hex. `--backend legacy` applies
+only to default codegen. `--generate-entrypoint DIR --codegen experimental`
+exports the three standalone stage assets without initializing a GPU.
+Compile exported experimental assets with the compiler’s experimental core stdlib.
+Regenerate the experimental helpers with `python3 tools/generate-flux-experimental.py`.
+
+BF16 reduction order can change images across backends. The isolated F32 VAE
+matches the default legacy backend within approximately 0.000052% normalized RMS
+error on the fixed-input rectangular validation fixture. Run GPU kernel checks
+with `cargo test -r --lib flux::experimental_tests::kernels_match_independent_cpu -- --ignored`.
+
 The Transformers comparison runner takes `--model owner/repo`.
 `setup-llama-cpp.sh owner/repo output.gguf` resolves its source on the Hub before
 converting it. `evict-gguf-cache.sh owner/repo:variant` operates on resolved Hub

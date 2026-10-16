@@ -1165,3 +1165,18 @@ pub fn bundle(source: &str, backend: super::ops::Backend) -> String {
     ]
     .join("\n")
 }
+
+/// Select experimental helpers without changing the model topology.
+pub fn experimental_source(source: &str) -> Result<String> {
+    super::experimental::graph(source)
+}
+pub fn bundle_with_codegen(
+    source: &str,
+    backend: super::ops::Backend,
+    codegen: catena_lang::codegen::CodegenKind,
+) -> String {
+    match codegen {
+        catena_lang::codegen::CodegenKind::Default => bundle(source, backend),
+        catena_lang::codegen::CodegenKind::Experimental => super::experimental::bundle(source),
+    }
+}
