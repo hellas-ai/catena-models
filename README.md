@@ -55,8 +55,10 @@ MoE text inference on HIP gfx11. It uses Hex kernels under
 `src/catena/experimental`, with no new compiler primitives. Its CLI automatically
 disables legacy matrix-core, BLAS, and attention switches. `--kernels fused`
 is the default; `--kernels reference` is available for Qwen3 dense only.
-Qwen3.5/3.6 images use the existing native vision encoder with the selected
-language compiler. Older Qwen3 MoE uses the default compiler.
+Qwen3.5/3.6 images use the selected compiler for both the vision encoder and
+language model. Experimental vision kernels live in
+`src/catena/experimental/qwen35_vision.hex` and use only core GPU primitives.
+Older Qwen3 MoE uses the default compiler.
 
 Experimental Qwen3.5 MoE combines routed/shared expert gate/up activations and
 down projections, keeps routing and activation scratch per session, and uses parallel argmax.

@@ -1,5 +1,8 @@
 //! Native Qwen3.5 still-image encoding and single-turn prompt preparation.
 mod config;
+mod experimental;
+#[cfg(test)]
+mod experimental_tests;
 mod graph;
 pub mod image;
 pub(crate) mod language;
@@ -11,7 +14,7 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
-    codegen::GpuDialect,
+    codegen::{CodegenKind, GpuDialect},
     runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use std::{collections::BTreeMap, path::Path, time::Instant};
@@ -59,6 +62,15 @@ impl VisionModel {
         dialect: GpuDialect,
         max_pixels: Option<usize>,
     ) -> Result<Self> {
+        Self::load_gguf_with_codegen(path, dialect, max_pixels, CodegenKind::Default)
+    }
+
+    pub fn load_gguf_with_codegen(
+        path: impl AsRef<Path>,
+        dialect: GpuDialect,
+        max_pixels: Option<usize>,
+        codegen: CodegenKind,
+    ) -> Result<Self> {
         let path = path.as_ref();
         let mut config = VisionConfig::from_gguf(path)?;
         if let Some(max) = max_pixels {
@@ -70,25 +82,34 @@ impl VisionModel {
             .context("loading vision/projector GGUF (convert F16/quantized projectors with --mmproj --outtype bf16)")?;
         let mut names: Vec<_> = specs.iter().map(|s| s.gguf_name.clone()).collect();
         names.push("__zero".into());
-        let source = graph::source(&config, &names);
-        let (runtime, artifact) = crate::catena::load_runtime(
-            catena_lang::stdlib::sources()
+        let source = match codegen {
+            CodegenKind::Default => graph::source(&config, &names),
+            CodegenKind::Experimental => experimental::source(&config, &names),
+        };
+        let sources = match codegen {
+            CodegenKind::Default => catena_lang::stdlib::sources()
                 .map(|s| -> &str { s })
                 .chain([
                     crate::catena::BF16_HELPER_SOURCE,
                     crate::flux::ops::SOURCE,
                     HELPERS,
                     &source,
-                ]),
-            dialect,
-        )
-        .context("compiling Qwen3.5 vision graph")?;
+                ])
+                .collect::<Vec<_>>(),
+            CodegenKind::Experimental => catena_lang::stdlib::experimental_core_sources()
+                .map(|s| -> &str { s })
+                .chain([source.as_str()])
+                .collect(),
+        };
+        let (runtime, artifact) =
+            crate::catena::load_runtime_with_codegen(sources, dialect, codegen)
+                .context("compiling Qwen3.5 vision graph")?;
         let weights = specs
             .iter()
             .map(|s| checkpoint.tensor_view(s))
             .collect::<Result<Vec<_>>>()?;
         let mut converted = BTreeMap::new();
-        // Existing F32 GEMM kernels accept F32 matrices. Widen BF16 once on the GPU;
+        // Vision kernels accept F32 matrices. Widen BF16 once on the GPU;
         // keep the immutable GGUF mapping alive for native F32 tensors.
         for (i, tensor) in weights.iter().enumerate() {
             if tensor.dtype == GgufDtype::Bf16 {
