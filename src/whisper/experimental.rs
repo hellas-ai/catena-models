@@ -548,6 +548,22 @@ mod tests {
                         crate::catena::BF16_HELPER_SOURCE,
                         include_str!("../catena/inference_helpers.hex"),
                         graph::HELPERS,
+                        // Removed default-backend operations need only their types
+                        // here; this test checks the generated shared-result ABI.
+                        "(theory program type {
+                          (arr materializec.into : {[x capacity n t.]
+                            ({cap.own [.capacity t]} buf val)
+                            ({[.capacity] u64} :) (u64 val) ({[.n] u64} :) ([.x])
+                            ({({[.x] ([.n] ix val)} *) ([.t] val)} -> val)
+                          } -> {[x capacity n t.] ({cap.own [.capacity t]} buf val)})
+                          (arr materializec.borrow-argmax-f32 : {[n one.]
+                            ({cap.own [.n] f32} buf val)
+                            ({[.n] u64} :) ({[.one] u64} :)
+                          } -> {[n one.] {
+                            ({cap.own [.n] f32} buf val)
+                            ({cap.own [.one] u64} buf val)
+                          }})
+                        })",
                         &model,
                     ]),
             )?;
