@@ -104,9 +104,18 @@ impl GraphRuntime<'_> {
         let mut body = String::new();
         body.push_str(&format!("{} [value0.]\n", f(values[0])));
         for (i, value) in values.iter().enumerate().skip(1) {
-            body.push_str(&format!("({{{} [.i]}} u64.lte [p{i}.])\n ({{[.p{i}] {} [.value{}]}} f32.select [value{i}.])\n", c(i as u64), f(*value),i-1));
+            body.push_str(&format!("({{{} [.i]}} stdlib.qwen3.memory.u64.less_equal [p{i}.])\n ({{[.p{i}] {} [.value{}]}} stdlib.qwen3.memory.select-f32 [value{i}.])\n", c(i as u64), f(*value),i-1));
         }
-        b.extra.push_str(&format!("\n(def program {op}-at : ([n.] {{(u64 val) ([.n] ix val)}}) -> ([n.] (f32 val))\n= ([ignored index.] ([.index] ix.to-u64 [i.])\n{body} [.value{}]))\n(def program {op} : {{}} -> (cap.own mem)\n= ({} u64.name [n.] {{[.n] ({{[.n] (const.u64.0x0000000000000000) (([.n] :.param) name.{op}-at)}} materializec)}} buf.to-mem))\n", values.len()-1,c(values.len() as u64)));
+        let body = format!(
+            " ([.element] [i.])\n ({body} [.value{}] [value.])\n",
+            values.len() - 1
+        );
+        b.extra.push_str(
+            &include_str!("../catena/flux_constant.hex")
+                .replace("{{VALUE_BODY}}", &body)
+                .replace("CONSTANT-NAME", op.strip_prefix("flux.").unwrap())
+                .replace("{{COUNT}}", &format!("{:016X}", values.len())),
+        );
         let out = Memory {
             name: format!("m{id}"),
             bytes: values.len() * 4,
@@ -739,7 +748,7 @@ fn owned_network(source: &str, activation_inputs: usize) -> String {
     let header = lines.next().unwrap();
     let mut header = header.replacen(" :", "-owned :", 1);
     for _ in 0..activation_inputs {
-        header = header.replacen("(cap.ref mem)", "(cap.own mem)", 1);
+        header = header.replacen("((cap.ref mem) val)", "((cap.own mem) val)", 1);
     }
     let params = lines.next().unwrap();
     let names = params
@@ -869,12 +878,12 @@ fn finish(
             .weights
             .iter()
             .enumerate()
-            .map(|(i, _)| (format!("w{i}"), "(cap.ref mem)")),
+            .map(|(i, _)| (format!("w{i}"), "((cap.ref mem) val)")),
     );
     source += &format!(
         "\n(def program flux.{name} : {{{}}} -> {{{}}}\n= ([{}.]\n{body}))\n",
         args.iter().map(|(_, t)| *t).collect::<Vec<_>>().join(" "),
-        vec!["(cap.own mem)"; outputs.len()].join(" "),
+        vec!["((cap.own mem) val)"; outputs.len()].join(" "),
         args.iter()
             .map(|(n, _)| n.as_str())
             .collect::<Vec<_>>()
@@ -991,12 +1000,12 @@ pub fn transformer(
             inner.into_inner(),
             "velocity",
             &[
-                ("latents".into(), "(cap.own mem)"),
-                ("conditioning".into(), "(cap.ref mem)"),
-                ("time-freq".into(), "(cap.own mem)"),
-                ("rope".into(), "(cap.own mem)"),
+                ("latents".into(), "((cap.own mem) val)"),
+                ("conditioning".into(), "((cap.ref mem) val)"),
+                ("time-freq".into(), "((cap.own mem) val)"),
+                ("rope".into(), "((cap.own mem) val)"),
                 ("time".into(), "(f32 val)"),
-                ("zero".into(), "(cap.own mem)"),
+                ("zero".into(), "((cap.own mem) val)"),
             ],
             out,
             "",
@@ -1067,8 +1076,8 @@ pub fn transformer(
         b.into_inner(),
         "denoise",
         &[
-            ("noise".into(), "(cap.ref mem)"),
-            ("conditioning".into(), "(cap.ref mem)"),
+            ("noise".into(), "((cap.ref mem) val)"),
+            ("conditioning".into(), "((cap.ref mem) val)"),
         ],
         latents,
         &extra,
@@ -1117,7 +1126,7 @@ pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Resu
     Ok(finish(
         b.into_inner(),
         "decode-image",
-        &[("latents".into(), "(cap.ref mem)")],
+        &[("latents".into(), "((cap.ref mem) val)")],
         image,
         &extra,
     ))
@@ -1152,31 +1161,6 @@ pub(crate) fn execute<'a>(
 
 /// Assemble a deployable stage asset. Nodes supply the compiler stdlib and bind
 /// the safetensors weights listed in the generated source comments.
-pub fn bundle(source: &str, backend: super::ops::Backend) -> String {
-    let helpers = match backend {
-        super::ops::Backend::Fast => super::ops::SOURCE,
-        super::ops::Backend::Legacy => include_str!("../catena/flux_legacy_helpers.hex"),
-    };
-    [
-        crate::catena::BF16_HELPER_SOURCE,
-        include_str!("../catena/inference_helpers.hex"),
-        helpers,
-        source,
-    ]
-    .join("\n")
-}
-
-/// Select experimental helpers without changing the model topology.
-pub fn experimental_source(source: &str) -> Result<String> {
-    super::experimental::graph(source)
-}
-pub fn bundle_with_codegen(
-    source: &str,
-    backend: super::ops::Backend,
-    codegen: catena_lang::codegen::CodegenKind,
-) -> String {
-    match codegen {
-        catena_lang::codegen::CodegenKind::Default => bundle(source, backend),
-        catena_lang::codegen::CodegenKind::Experimental => super::experimental::bundle(source),
-    }
+pub fn bundle(source: &str) -> String {
+    super::kernels::bundle(source)
 }

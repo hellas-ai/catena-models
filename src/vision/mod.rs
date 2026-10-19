@@ -1,11 +1,10 @@
 //! Native Qwen3.5 still-image encoding and single-turn prompt preparation.
 mod config;
-mod experimental;
-#[cfg(test)]
-mod experimental_tests;
 mod graph;
 pub mod image;
-pub(crate) mod language;
+#[cfg(test)]
+mod kernel_tests;
+mod kernels;
 pub use config::VisionConfig;
 
 use crate::{
@@ -14,12 +13,10 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
-    codegen::{CodegenKind, GpuDialect},
+    codegen::GpuDialect,
     runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use std::{collections::BTreeMap, path::Path, time::Instant};
-
-pub(crate) const HELPERS: &str = include_str!("../catena/vision_helpers.hex");
 
 pub struct VisionModel {
     runtime: Runtime,
@@ -62,15 +59,6 @@ impl VisionModel {
         dialect: GpuDialect,
         max_pixels: Option<usize>,
     ) -> Result<Self> {
-        Self::load_gguf_with_codegen(path, dialect, max_pixels, CodegenKind::Default)
-    }
-
-    pub fn load_gguf_with_codegen(
-        path: impl AsRef<Path>,
-        dialect: GpuDialect,
-        max_pixels: Option<usize>,
-        codegen: CodegenKind,
-    ) -> Result<Self> {
         let path = path.as_ref();
         let mut config = VisionConfig::from_gguf(path)?;
         if let Some(max) = max_pixels {
@@ -82,27 +70,9 @@ impl VisionModel {
             .context("loading vision/projector GGUF (convert F16/quantized projectors with --mmproj --outtype bf16)")?;
         let mut names: Vec<_> = specs.iter().map(|s| s.gguf_name.clone()).collect();
         names.push("__zero".into());
-        let source = match codegen {
-            CodegenKind::Default => graph::source(&config, &names),
-            CodegenKind::Experimental => experimental::source(&config, &names),
-        };
-        let sources = match codegen {
-            CodegenKind::Default => catena_lang::stdlib::sources()
-                .map(|s| -> &str { s })
-                .chain([
-                    crate::catena::BF16_HELPER_SOURCE,
-                    crate::flux::ops::SOURCE,
-                    HELPERS,
-                    &source,
-                ])
-                .collect::<Vec<_>>(),
-            CodegenKind::Experimental => catena_lang::stdlib::experimental_core_sources()
-                .map(|s| -> &str { s })
-                .chain([source.as_str()])
-                .collect(),
-        };
+        let source = kernels::source(&config, &names);
         let (runtime, artifact) =
-            crate::catena::load_runtime_with_codegen(sources, dialect, codegen)
+            crate::catena::load_runtime(crate::catena::runtime_sources(&source), dialect)
                 .context("compiling Qwen3.5 vision graph")?;
         let weights = specs
             .iter()
@@ -399,7 +369,7 @@ mod tests {
     }
     #[test]
     fn multimodal_language_graphs_compile_without_gpu() -> Result<()> {
-        // The current compiler supports these graphs through experimental BF16/HIP;
+        // The current compiler supports these graphs through BF16/HIP;
         // the default backend's fused model operations have been removed.
         for mut config in [
             crate::spec::ModelConfig::qwen35_0_8b(),
@@ -424,19 +394,12 @@ mod tests {
             config.linear_group_count = Some(1);
             config.linear_time_step_rank = Some(2);
             config.linear_inner_size = Some(32);
-            let options =
-                crate::catena::InferenceOptions::new(crate::catena::InferencePrecision::Bf16)
-                    .with_codegen(CodegenKind::Experimental);
+            let options = crate::catena::InferenceOptions::default();
             let source = crate::catena::generated_multimodal_source(&config, options)?;
-            let raw = metacat::theory::RawTheorySet::from_texts(
-                crate::catena::runtime_sources_for_options(&source, options),
-            )?;
+            let raw =
+                metacat::theory::RawTheorySet::from_texts(crate::catena::runtime_sources(&source))?;
             let raw = crate::catena::prepare_sources(raw)?;
-            let module = catena_lang::compile::compile(
-                &mut catena_lang::report::CompileReport::new(raw),
-                CodegenKind::Experimental,
-                GpuDialect::Hip,
-            )?;
+            let module = crate::catena::compile(raw, GpuDialect::Hip)?;
             ensure!(
                 module
                     .functions
@@ -494,17 +457,16 @@ mod tests {
             }
         }
         names.push("__zero".into());
-        let source = experimental::source(&config, &names);
+        let source = kernels::source(&config, &names);
         let raw = metacat::theory::RawTheorySet::from_texts(
-            catena_lang::stdlib::experimental_core_sources()
+            crate::catena::core_sources()
                 .map(|s| -> &str { s })
                 .chain([source.as_str()]),
         )?;
         let raw = crate::catena::prepare_sources(raw)?;
-        let mut report = catena_lang::report::CompileReport::new(raw);
+
         for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-            let module =
-                catena_lang::compile::compile(&mut report, CodegenKind::Experimental, dialect)?;
+            let module = crate::catena::compile(raw.clone(), dialect)?;
             ensure!(
                 module
                     .functions

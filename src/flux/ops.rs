@@ -1,16 +1,9 @@
+pub(crate) use crate::weights::startup_timing;
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
-    codegen::{CodegenKind, GpuDialect},
+    codegen::GpuDialect,
     runtime::{Artifact, MemOwn, MemRef, Runtime, Value},
 };
-pub const SOURCE: &str = include_str!("../catena/flux_helpers.hex");
-pub(crate) use crate::weights::startup_timing;
-#[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
-pub enum Backend {
-    #[default]
-    Fast,
-    Legacy,
-}
 pub struct Ops {
     pub runtime: Runtime,
     pub artifact: Artifact,
@@ -18,53 +11,10 @@ pub struct Ops {
 }
 impl Ops {
     pub fn new(extra: Option<&str>) -> Result<Self> {
-        Self::with_backend(extra, Backend::Fast)
-    }
-    pub fn with_backend(extra: Option<&str>, backend: Backend) -> Result<Self> {
-        Self::with_codegen(extra, backend, CodegenKind::Default)
-    }
-    pub fn with_codegen(
-        extra: Option<&str>,
-        backend: Backend,
-        codegen: CodegenKind,
-    ) -> Result<Self> {
-        if codegen == CodegenKind::Experimental {
-            ensure!(
-                !matches!(backend, Backend::Legacy),
-                "--backend legacy requires --codegen default"
-            );
-            let source = super::experimental::bundle(extra.unwrap_or(""));
-            let (runtime, artifact) = crate::catena::load_runtime_with_codegen(
-                catena_lang::stdlib::experimental_core_sources()
-                    .map(|s| -> &str { s })
-                    .chain([source.as_str()]),
-                GpuDialect::Hip,
-                codegen,
-            )
-            .context("compiling experimental Flux kernels")?;
-            let zero = runtime.mem_f32(&[0.])?;
-            return Ok(Self {
-                runtime,
-                artifact,
-                zero,
-            });
-        }
-        let source = match backend {
-            Backend::Fast => SOURCE,
-            Backend::Legacy => include_str!("../catena/flux_legacy_helpers.hex"),
-        };
-        let (runtime, artifact) = crate::catena::load_runtime(
-            catena_lang::stdlib::sources()
-                .map(|s| -> &str { s })
-                .chain([
-                    crate::catena::BF16_HELPER_SOURCE,
-                    include_str!("../catena/inference_helpers.hex"),
-                    source,
-                ])
-                .chain(extra),
-            GpuDialect::Hip,
-        )
-        .context("compiling Flux Catena kernels")?;
+        let source = super::kernels::bundle(extra.unwrap_or(""));
+        let (runtime, artifact) =
+            crate::catena::load_runtime(crate::catena::runtime_sources(&source), GpuDialect::Hip)
+                .context("compiling Flux kernels")?;
         let zero = runtime.mem_f32(&[0.])?;
         Ok(Self {
             runtime,

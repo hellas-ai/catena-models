@@ -154,7 +154,7 @@ execute the specified adjacent-pair tree with a whole-block barrier at every
 level. Qwen's 2,048- and 6,144-term expert projections therefore use roughly
 12 to 14 block barriers per output row.
 
-### Experimental implementation
+### Prototype implementation
 
 The compiler experiment divided the input into block-sized, power-of-two
 chunks. It attempted to preserve the original adjacent-pair parenthesization
@@ -224,7 +224,7 @@ microseconds, about 9.6 times faster. Three end-to-end runs with this path had a
 The MoE down projection accounted for 23.93% of traced kernel time. Its
 6,144-term `materializec.borrow-reduce-f32` allocates 24 KiB of shared memory
 per block, limiting the number of resident blocks. The physical width for
-reductions above 4,096 terms is experimentally increased from 256 to 512
+reductions above 4,096 terms is prototypely increased from 256 to 512
 threads to expose more memory operations from each resident block.
 
 This does not change reduction semantics: every term is still written to the
@@ -342,7 +342,7 @@ so this variant was reverted.
 
 ## Serial canonical attention-context reduction (rejected and reverted)
 
-An experimental `materializec.borrow-reduce-f32-serial` assigned one output to
+An prototype `materializec.borrow-reduce-f32-serial` assigned one output to
 each thread. A 16-level binary-carry accumulator reproduced the canonical
 adjacent-pair tree while allowing a 128-thread block to cover one attention
 head, making value-cache channel reads contiguous. The first implementation

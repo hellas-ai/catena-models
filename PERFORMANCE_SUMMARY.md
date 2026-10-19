@@ -1,6 +1,6 @@
 # Language features added to achieve performance
 
-## Experimental Catena dependency delta
+## Prototype Catena dependency delta
 
 `Cargo.toml` is pinned to compiler commit `21bb780`, which is also the current
 compiler `origin/master`. The development `.cargo/config.toml` overrides it
@@ -91,7 +91,7 @@ measured:
 | Qwen3-4B | pp512 | 11.81 tok/s | 24.01 tok/s | +103.3% |
 | Qwen3-4B | tg128 | 9.91 tok/s | 20.30 tok/s | +104.8% |
 
-## Experimental BF16 accelerated prefill
+## Prototype BF16 accelerated prefill
 
 Native BF16, matrix cores, and fused attention are enabled by default.
 The matrix-core mode selects `materializec.bf16-gemm-wmma` for ordinary dense
@@ -227,7 +227,7 @@ entry for every decoded token; the primitive removes avoidable layout and
 reduction overhead but does not change the linear per-token dependence on
 context length.
 
-## Experimental fused BF16 cached attention
+## Prototype fused BF16 cached attention
 
 The default BF16 fused-attention mode selects the HIP-only
 `materializec.borrow-cached-attention-bf16` path for Qwen3 and Qwen3.5/3.6

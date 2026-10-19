@@ -7,6 +7,6 @@ pub mod text;
 pub mod transformer;
 pub mod vae;
 
-mod experimental;
 #[cfg(test)]
-mod experimental_tests;
+mod kernel_tests;
+mod kernels;

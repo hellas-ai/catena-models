@@ -10,8 +10,6 @@ use rand_distr::{Distribution, StandardNormal};
 use std::{fs::File, io::BufWriter, path::PathBuf, time::Instant};
 #[derive(Clone, Debug)]
 pub struct GenerationOptions {
-    pub backend: super::ops::Backend,
-    pub codegen: catena_lang::codegen::CodegenKind,
     pub prompt: String,
     pub output: PathBuf,
     pub seed: u64,
@@ -28,23 +26,6 @@ impl GenerationOptions {
             "image dimensions must be positive multiples of 16"
         );
         ensure!(self.steps > 0, "steps must be positive");
-        ensure!(
-            self.codegen != catena_lang::codegen::CodegenKind::Experimental
-                || !matches!(self.backend, super::ops::Backend::Legacy),
-            "--backend legacy requires --codegen default"
-        );
-        if matches!(self.backend, super::ops::Backend::Legacy) {
-            ensure!(
-                self.width
-                    .checked_mul(self.height)
-                    .is_some_and(|area| area <= 1024 * 1024),
-                "legacy backend supports at most 1,048,576 pixels (existing softmax limit: 16,384 keys)"
-            );
-        }
-        self.width
-            .checked_mul(self.height)
-            .and_then(|v| v.checked_mul(128))
-            .context("image size overflow")?;
         Ok(())
     }
 }
@@ -93,27 +74,19 @@ impl FluxPipeline {
             )?;
         }
         let t = Instant::now();
-        let encoder = TextEncoder::load_with_codegen(
-            &self.snapshot,
-            tokens.valid,
-            dump.is_some(),
-            o.backend,
-            o.codegen,
-        )?;
+        let encoder = TextEncoder::load_with_debug(&self.snapshot, tokens.valid, dump.is_some())?;
         eprintln!("text load/compile: {:.2}s", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let conditioning = encoder.encode(&tokens, dump)?;
         eprintln!("text encode: {:.2}s", t.elapsed().as_secs_f64());
         drop(encoder);
         let t = Instant::now();
-        let transformer = Transformer::load_with_codegen(
+        let transformer = Transformer::load_with_debug(
             &self.snapshot,
             o.height,
             o.width,
             o.steps,
             dump.is_some(),
-            o.backend,
-            o.codegen,
         )?;
         eprintln!(
             "transformer load/compile: {:.2}s",
@@ -136,14 +109,7 @@ impl FluxPipeline {
         drop(transformer);
         drop(conditioning);
         let t = Instant::now();
-        let vae = VaeDecoder::load_with_codegen(
-            &self.snapshot,
-            o.height,
-            o.width,
-            dump.is_some(),
-            o.backend,
-            o.codegen,
-        )?;
+        let vae = VaeDecoder::load_with_debug(&self.snapshot, o.height, o.width, dump.is_some())?;
         eprintln!("VAE load/compile: {:.2}s", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let rgb = vae.decode(&latents, dump)?;

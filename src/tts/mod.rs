@@ -38,8 +38,8 @@ impl Config {
         c.validate()?;
         Ok(c)
     }
-    pub fn validate(&self) -> Result<()> {
-        let expected = serde_json::json!({
+    fn expected() -> serde_json::Value {
+        serde_json::json!({
             "model_type":"vits", "hidden_size":192, "flow_size":192, "vocab_size":38,
             "num_hidden_layers":6, "num_attention_heads":2, "ffn_dim":768,
             "ffn_kernel_size":3, "hidden_act":"relu", "window_size":4,
@@ -53,7 +53,10 @@ impl Config {
             "upsample_initial_channel":512, "upsample_rates":[8,8,2,2],
             "upsample_kernel_sizes":[16,16,4,4], "resblock_kernel_sizes":[3,7,11],
             "resblock_dilation_sizes":[[1,3,5],[1,3,5],[1,3,5]], "leaky_relu_slope":0.1
-        });
+        })
+    }
+    pub fn validate(&self) -> Result<()> {
+        let expected = Self::expected();
         for (key, value) in expected.as_object().unwrap() {
             ensure!(
                 self.0.get(key) == Some(value),
@@ -210,7 +213,7 @@ impl Tts {
         let tokenizer = tokenizer::Tokenizer::read(dir)?;
         let source = graph::bundle(&config)?;
         let (runtime, artifact) = crate::catena::load_runtime(
-            catena_lang::stdlib::sources()
+            crate::catena::core_sources()
                 .map(|s| -> &str { s })
                 .chain([source.as_str()]),
             GpuDialect::Hip,
@@ -250,23 +253,33 @@ impl Tts {
         options.validate()?;
         let ids = self.tokenizer.encode(text)?;
         let input = self.runtime.mem_u64(&ids)?;
-        let mut args = vec![
-            input.as_ref().into(),
-            (ids.len() as u64).into(),
-            (options.seed as u32).into(),
-            ((options.seed >> 32) as u32).into(),
-            options.noise_scale_duration.into(),
-            options.noise_scale.into(),
-            options.speaking_rate.into(),
-        ];
-        for (name, _) in bindings() {
-            args.push(if let Some(weight) = self.weights.get(&name) {
-                weight.as_ref().into()
-            } else {
-                self.checkpoint.gpu_ref(&name)?.into()
-            });
-        }
+        let inputs = || -> Result<Vec<Value<'_>>> {
+            let mut args = vec![
+                input.as_ref().into(),
+                (ids.len() as u64).into(),
+                (options.seed as u32).into(),
+                ((options.seed >> 32) as u32).into(),
+                options.noise_scale_duration.into(),
+                options.noise_scale.into(),
+                options.speaking_rate.into(),
+            ];
+            for (name, _) in bindings() {
+                args.push(if let Some(weight) = self.weights.get(&name) {
+                    weight.as_ref().into()
+                } else {
+                    self.checkpoint.gpu_ref(&name)?.into()
+                });
+            }
+            Ok(args)
+        };
         let start = Instant::now();
+        let mut prepared = self.artifact.exec_values("tts.prepare", inputs()?)?;
+        ensure!(prepared.len() == 5, "invalid TTS preparation ABI");
+        let header = memory(prepared.pop())?.try_to_f32_vec()?;
+        let frames = checked_frame_count(&header)?;
+        let mut args = inputs()?;
+        args.extend(prepared);
+        args.push((frames as u64).into());
         let debug = options.dump_dir.is_some();
         let outputs = self.artifact.exec_values(
             if debug {
@@ -355,4 +368,29 @@ fn dump(dir: &Path, name: &str, values: &[f32], shape: &[usize]) -> Result<()> {
         serde_json::to_vec(shape)?,
     )?;
     Ok(())
+}
+
+fn checked_frame_count(header: &[f32]) -> Result<usize> {
+    ensure!(header.len() == 1, "invalid TTS length header");
+    let frames = header[0];
+    ensure!(
+        frames.is_finite() && frames >= 1. && frames <= 1875. && frames.fract() == 0.,
+        "predicted audio exceeds 30 seconds or has invalid durations"
+    );
+    Ok(frames as usize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn checks_device_predicted_length_before_decoder_allocation() {
+        assert_eq!(checked_frame_count(&[1.]).unwrap(), 1);
+        assert_eq!(checked_frame_count(&[1875.]).unwrap(), 1875);
+        for value in [0., -1., 1.5, 1876., f32::NAN, f32::INFINITY] {
+            assert!(checked_frame_count(&[value]).is_err());
+        }
+        assert!(checked_frame_count(&[]).is_err());
+        assert!(checked_frame_count(&[1., 2.]).is_err());
+    }
 }

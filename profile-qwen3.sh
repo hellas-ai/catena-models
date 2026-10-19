@@ -61,7 +61,6 @@ profiler_library_path="$profiler_root/lib"
 runner=(
   target/release/catena-qwen3
   --model "$model"
-  --bf16
   --bench
   --pp 0
 )

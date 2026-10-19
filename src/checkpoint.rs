@@ -445,13 +445,10 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     let architecture_name = architecture.context("GGUF is missing general.architecture")?;
     let architecture = match architecture_name.as_str() {
         "qwen3" => ModelArchitecture::Qwen3Dense,
-        "qwen3moe" => ModelArchitecture::Qwen3Moe,
         "qwen35" => ModelArchitecture::Qwen35Dense,
         "qwen35moe" => ModelArchitecture::Qwen35Moe,
         other => {
-            bail!(
-                "unsupported GGUF architecture {other:?}; expected qwen3, qwen3moe, qwen35, or qwen35moe"
-            )
+            bail!("unsupported GGUF architecture {other:?}; expected qwen3, qwen35, or qwen35moe")
         }
     };
     let prefix = architecture_name.as_str();
@@ -1515,6 +1512,18 @@ mod tests {
     }
 
     #[test]
+    fn rejects_the_removed_qwen3_moe_architecture() {
+        let mut bytes = Vec::new();
+        push_u32(&mut bytes, GGUF_MAGIC);
+        push_u32(&mut bytes, GGUF_VERSION);
+        push_u64(&mut bytes, 0);
+        push_u64(&mut bytes, 1);
+        push_string_metadata(&mut bytes, "general.architecture", "qwen3moe");
+        let error = parse_gguf_model_config(&bytes).unwrap_err().to_string();
+        assert!(error.contains("unsupported GGUF architecture"));
+    }
+
+    #[test]
     fn parses_dense_qwen3_configuration() -> Result<()> {
         let mut bytes = Vec::new();
         push_u32(&mut bytes, GGUF_MAGIC);
@@ -1554,18 +1563,10 @@ mod tests {
         if let Ok(selector) = std::env::var("CATENA_QWEN3_MODEL") {
             let path = crate::hfhub::download_gguf(&selector)?.primary;
             let file = GgufFile::open(&path)?;
-            assert_eq!(file.tensors.len(), 579);
-            assert_eq!(file.data_start, 5_969_472);
-            let specs = weight_specs(&ModelConfig::qwen3_30b())?;
-            for spec in &specs {
-                file.tensor_view(spec, 0)?;
+            let config = read_gguf_model_config(&path)?;
+            for spec in weight_specs(&config)? {
+                file.tensor_view(&spec, 0)?;
             }
-            let embedding = file.tensor_view(&specs[0], 0)?;
-            assert_eq!(embedding.dtype, GgufDtype::Bf16);
-            assert_eq!(embedding.byte_len, 151_936 * 2_048 * 2);
-            let norm = file.tensor_view(&specs[1], 0)?;
-            assert_eq!(norm.dtype, GgufDtype::F32);
-            assert_eq!(norm.byte_len, 2_048 * 4);
         }
         Ok(())
     }

@@ -1,4 +1,4 @@
-# Experimental Qwen3.5 prefill experiments
+# Prototype Qwen3.5 prefill experiments
 
 Model: `unsloth/Qwen3.6-35B-A3B-GGUF:BF16`, loaded through `hf_hub`.
 Compiler: the existing Cargo.lock revision `af89a96`; HIP `gfx1151`, BF16,

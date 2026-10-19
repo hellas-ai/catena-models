@@ -1,14 +1,13 @@
 pub mod audio;
-mod experimental;
-#[cfg(test)]
-mod experimental_tests;
-mod generation;
 pub mod graph;
 pub mod hub;
+#[cfg(test)]
+mod kernel_tests;
+mod kernels;
 use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
 use catena_lang::{
-    codegen::{CodegenKind, GpuDialect},
+    codegen::GpuDialect,
     runtime::{Artifact, MemOwn, Runtime, Value},
 };
 use serde::Deserialize;
@@ -223,14 +222,6 @@ impl Whisper {
         Self::load_with_debug(dir, timings, false)
     }
     pub fn load_with_debug(dir: &Path, timings: bool, debug: bool) -> Result<Self> {
-        Self::load_with_codegen(dir, timings, debug, CodegenKind::Default)
-    }
-    pub fn load_with_codegen(
-        dir: &Path,
-        timings: bool,
-        debug: bool,
-        codegen: CodegenKind,
-    ) -> Result<Self> {
         let start = Instant::now();
         let config = Config::read(dir)?;
         let mut checkpoint = Weights::open(&dir.join("model.safetensors"))?;
@@ -261,19 +252,9 @@ impl Whisper {
             tokenizer.get_vocab_size(true) == config.vocab_size,
             "tokenizer vocabulary does not match model"
         );
-        let source = graph::bundle_with_codegen(&config, debug, codegen)?;
-        let sources = match codegen {
-            CodegenKind::Default => catena_lang::stdlib::sources()
-                .map(|s| -> &str { s })
-                .chain([source.as_str()])
-                .collect::<Vec<_>>(),
-            CodegenKind::Experimental => catena_lang::stdlib::experimental_core_sources()
-                .map(|s| -> &str { s })
-                .chain([source.as_str()])
-                .collect(),
-        };
+        let source = graph::bundle(&config, debug)?;
         let (runtime, artifact) =
-            crate::catena::load_runtime_with_codegen(sources, GpuDialect::Hip, codegen)
+            crate::catena::load_runtime(crate::catena::runtime_sources(&source), GpuDialect::Hip)
                 .context("compiling Whisper Hex graphs")?;
         let names: BTreeSet<_> = graph::encoder_names(&config)
             .into_iter()

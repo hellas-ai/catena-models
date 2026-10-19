@@ -5,7 +5,6 @@ use anyhow::{Result, ensure};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelArchitecture {
     Qwen3Dense,
-    Qwen3Moe,
     Qwen35Dense,
     Qwen35Moe,
 }
@@ -62,19 +61,34 @@ impl ModelConfig {
     }
 
     pub fn qwen3_0_6b() -> Self {
-        let mut config = Self::qwen3_30b();
-        config.model_name = Some("Qwen3-0.6B".into());
-        config.architecture = ModelArchitecture::Qwen3Dense;
-        config.hidden_size = 1_024;
-        config.intermediate_size = 3_072;
-        config.num_layers = 28;
-        config.num_attention_heads = 16;
-        config.num_key_value_heads = 8;
-        config.max_position_embeddings = 40_960;
-        config.num_experts = 0;
-        config.experts_per_token = 0;
-        config.output_weight_tied = true;
-        config
+        Self {
+            model_name: Some("Qwen3-0.6B".into()),
+            architecture: ModelArchitecture::Qwen3Dense,
+            vocabulary_size: 151_936,
+            hidden_size: 1_024,
+            intermediate_size: 3_072,
+            num_layers: 28,
+            num_nextn_layers: 0,
+            num_attention_heads: 16,
+            num_key_value_heads: 8,
+            head_dim: 128,
+            max_position_embeddings: 40_960,
+            rms_norm_eps: 1.0e-6,
+            rope_theta: 1_000_000.0,
+            rope_dimension_count: 128,
+            mrope_sections: [0; 3],
+            num_experts: 0,
+            experts_per_token: 0,
+            shared_expert_intermediate_size: None,
+            full_attention_interval: None,
+            linear_conv_kernel: None,
+            linear_state_size: None,
+            linear_group_count: None,
+            linear_time_step_rank: None,
+            linear_inner_size: None,
+            output_weight_tied: true,
+            eos_token_id: Some(151_643),
+        }
     }
 
     pub fn qwen3_1_7b() -> Self {
@@ -83,37 +97,6 @@ impl ModelConfig {
         config.hidden_size = 2_048;
         config.intermediate_size = 6_144;
         config
-    }
-
-    pub fn qwen3_30b() -> Self {
-        Self {
-            model_name: Some("Qwen3-30B-A3B-Base".into()),
-            architecture: ModelArchitecture::Qwen3Moe,
-            vocabulary_size: 151_936,
-            hidden_size: 2_048,
-            intermediate_size: 768,
-            num_layers: 48,
-            num_nextn_layers: 0,
-            num_attention_heads: 32,
-            num_key_value_heads: 4,
-            head_dim: 128,
-            max_position_embeddings: 32_768,
-            rms_norm_eps: 1.0e-6,
-            rope_theta: 1_000_000.0,
-            rope_dimension_count: 128,
-            mrope_sections: [0; 3],
-            num_experts: 128,
-            experts_per_token: 8,
-            shared_expert_intermediate_size: None,
-            full_attention_interval: None,
-            linear_conv_kernel: None,
-            linear_state_size: None,
-            linear_group_count: None,
-            linear_time_step_rank: None,
-            linear_inner_size: None,
-            output_weight_tied: false,
-            eos_token_id: Some(151_643),
-        }
     }
 
     pub fn qwen35_0_8b() -> Self {
@@ -201,7 +184,7 @@ impl ModelConfig {
                 self.num_experts == 0 && self.experts_per_token == 0,
                 "dense Qwen metadata must not define routed experts"
             ),
-            ModelArchitecture::Qwen3Moe | ModelArchitecture::Qwen35Moe => {
+            ModelArchitecture::Qwen35Moe => {
                 ensure!(self.num_experts > 0, "GGUF expert count must be non-zero");
                 ensure!(
                     self.experts_per_token > 0,
@@ -407,7 +390,6 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
         ));
         match (c.architecture, c.layer_type(l)) {
             (ModelArchitecture::Qwen3Dense, _)
-            | (ModelArchitecture::Qwen3Moe, _)
             | (ModelArchitecture::Qwen35Dense, LayerType::FullAttention)
             | (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
                 let q = c.query_size() * if c.is_qwen35() { 2 } else { 1 };
@@ -669,18 +651,6 @@ mod tests {
 
     fn qwen35() -> ModelConfig {
         ModelConfig::qwen36_35b_a3b()
-    }
-    #[test]
-    fn qwen3_inventory() -> Result<()> {
-        let config = ModelConfig::qwen3_30b();
-        let s = weight_specs(&config)?;
-        assert_eq!(s.len(), 579);
-        assert_eq!(
-            s.iter().map(TensorSpec::element_count).sum::<usize>(),
-            30_532_122_624
-        );
-        assert_eq!(config.kv_cache_elements_per_token()?, 49_152);
-        Ok(())
     }
 
     #[test]

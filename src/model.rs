@@ -8,8 +8,8 @@ use catena_lang::{
 
 use crate::{
     catena::{
-        InferenceOptions, InferencePrecision, generated_model_source_for_options,
-        generated_multimodal_source, runtime_sources_for_options,
+        InferenceOptions, generated_model_source_for_options, generated_multimodal_source,
+        runtime_sources,
     },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     spec::{ModelArchitecture, ModelConfig, weight_specs},
@@ -24,14 +24,13 @@ pub struct Model {
     config: ModelConfig,
     parameter_count: usize,
     weight_byte_len: usize,
-    precision: InferencePrecision,
     dialect: GpuDialect,
     multimodal: bool,
 }
 
 impl Model {
     pub fn load(model: &str) -> Result<Self> {
-        Self::load_hf_with_options(model, InferenceOptions::new(InferencePrecision::Bf16))
+        Self::load_hf_with_options(model, InferenceOptions::default())
     }
 
     /// Resolve an HF name through hf-hub, including every GGUF shard.
@@ -40,14 +39,7 @@ impl Model {
     }
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
-        Self::load_gguf_with_precision(gguf_path, InferencePrecision::F32)
-    }
-
-    pub fn load_gguf_with_precision(
-        gguf_path: impl AsRef<Path>,
-        precision: InferencePrecision,
-    ) -> Result<Self> {
-        Self::load_gguf_with_options(gguf_path, InferenceOptions::new(precision))
+        Self::load_gguf_with_options(gguf_path, InferenceOptions::default())
     }
 
     pub fn load_gguf_with_options(
@@ -91,13 +83,9 @@ impl Model {
         dialect: GpuDialect,
         multimodal: bool,
     ) -> Result<Self> {
-        ensure!(
-            !options.fused_attention || dialect == GpuDialect::Hip,
-            "fused attention currently supports HIP only"
-        );
-        let precision = options.precision;
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
+        crate::qwen::validate(&config, options, Some(dialect))?;
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
@@ -113,12 +101,9 @@ impl Model {
         } else {
             generated_model_source_for_options(&config, options)?
         };
-        let (runtime, artifact) = crate::catena::load_runtime_with_codegen(
-            runtime_sources_for_options(&model_source, options),
-            dialect,
-            options.codegen,
-        )
-        .context("failed to compile the Qwen3 Catena GPU program")?;
+        let (runtime, artifact) =
+            crate::catena::load_runtime(runtime_sources(&model_source), dialect)
+                .context("failed to compile the Qwen3 Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
@@ -159,7 +144,6 @@ impl Model {
             config,
             parameter_count,
             weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
-            precision,
             dialect,
             multimodal,
         })
@@ -175,7 +159,6 @@ impl Model {
             .as_deref()
             .unwrap_or(match self.config.architecture {
                 ModelArchitecture::Qwen3Dense => "Qwen3 dense",
-                ModelArchitecture::Qwen3Moe => "Qwen3 MoE",
                 ModelArchitecture::Qwen35Dense => "Qwen3.5 dense",
                 ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
             })
@@ -420,21 +403,13 @@ impl Session<'_> {
     pub fn prefill_logits(&mut self, tokens: &[u64]) -> Result<Vec<f32>> {
         ensure!(self.position == 0, "a session can only be prefilled once");
         let (logits, _next_token) = self.forward(tokens)?;
-        read_logits(
-            logits,
-            self.model.config.vocabulary_size,
-            self.model.precision,
-        )
+        read_logits(logits, self.model.config.vocabulary_size)
     }
 
     pub fn decode_logits(&mut self, token: u64) -> Result<Vec<f32>> {
         ensure!(self.position > 0, "decode requires a completed prefill");
         let (logits, _next_token) = self.forward(std::slice::from_ref(&token))?;
-        read_logits(
-            logits,
-            self.model.config.vocabulary_size,
-            self.model.precision,
-        )
+        read_logits(logits, self.model.config.vocabulary_size)
     }
 
     pub fn prefill_next_token(&mut self, tokens: &[u64]) -> Result<u64> {
@@ -454,11 +429,7 @@ impl Session<'_> {
         prompt: &crate::vision::PreparedMultimodalPrompt,
     ) -> Result<Vec<f32>> {
         let (logits, _) = self.prefill_multimodal(prompt)?;
-        read_logits(
-            logits,
-            self.model.config.vocabulary_size,
-            self.model.precision,
-        )
+        read_logits(logits, self.model.config.vocabulary_size)
     }
 
     pub fn prefill_multimodal_next_token(
@@ -610,19 +581,12 @@ impl Session<'_> {
     }
 }
 
-fn read_logits(
-    logits_output: MemOwn,
-    vocabulary_size: usize,
-    precision: InferencePrecision,
-) -> Result<Vec<f32>> {
-    let logits = match precision {
-        InferencePrecision::F32 => logits_output.try_to_f32_vec()?,
-        InferencePrecision::Bf16 => logits_output
-            .try_to_u16_vec()?
-            .into_iter()
-            .map(|bits| f32::from_bits(u32::from(bits) << 16))
-            .collect(),
-    };
+fn read_logits(logits_output: MemOwn, vocabulary_size: usize) -> Result<Vec<f32>> {
+    let logits: Vec<f32> = logits_output
+        .try_to_u16_vec()?
+        .into_iter()
+        .map(|bits| f32::from_bits(u32::from(bits) << 16))
+        .collect();
     ensure!(
         logits.len() == vocabulary_size,
         "qwen3 returned {} logits, expected {vocabulary_size}",
