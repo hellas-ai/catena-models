@@ -35,7 +35,7 @@ impl Builder {
     }
     fn linear(&mut self, x: &str, prefix: &str, rows: &str, ci: usize, co: usize) -> String {
         self.op(
-            "flux.linear-f32-orr",
+            "stdlib.vision.linear-own",
             vec![
                 w(x),
                 self.weight(&format!("{prefix}.weight")),
@@ -48,7 +48,7 @@ impl Builder {
     }
     fn norm(&mut self, x: &str, prefix: &str, rows: &str, cols: usize, eps: f32) -> String {
         self.op(
-            "flux.norm-f32-orr",
+            "stdlib.vision.norm",
             vec![
                 w(x),
                 self.weight(&format!("{prefix}.weight")),
@@ -63,7 +63,7 @@ impl Builder {
         )
     }
     fn add(&mut self, x: &str, y: &str) -> String {
-        self.op("flux.add-f32-oo", vec![w(x), w(y), w("hidden-count")])
+        self.op("stdlib.vision.add", vec![w(x), w(y), w("hidden-count")])
     }
     fn render(self, result: &str, names: &[String]) -> String {
         let mut last = BTreeMap::new();
@@ -108,10 +108,10 @@ impl Builder {
             aliases.insert(op.out.clone(), continuation);
         }
         body += &w(aliases.get(result).map(String::as_str).unwrap_or(result));
-        let types = vec!["(cap.ref mem)"; 5 + names.len()].join(" ");
+        let types = vec!["((cap.ref mem) val)"; 5 + names.len()].join(" ");
         let weight_args: Vec<_> = (0..names.len()).map(|i| format!("w{i}")).collect();
         format!(
-            "\n(def program vision.encode : {{{types}}} -> (cap.own mem)\n= ([patches positions indices coefficients frequencies {}.]\n{body}))\n",
+            "\n(def program vision.encode : {{{types}}} -> ((cap.own mem) val)\n= ([patches positions indices coefficients frequencies {}.]\n{body}))\n",
             weight_args.join(" ")
         )
     }
@@ -128,7 +128,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
     };
     // Shape scalars come from the patch buffer at runtime; they do not trigger recompilation.
     let mut prelude = format!(
-        " ([.patches] mem.cast.f32 [patch-elements _patch-buffer.])\n ([.patch-elements] :.forget [elements.])\n ({{[.elements] {}}} u64.div [rows.])\n ({{[.rows] {}}} u64.div [merged-rows.])\n ({{[.rows] {}}} u64.mul [hidden-count.])\n ({{[.rows] {}}} u64.mul [ff-count.])\n",
+        " ([.patches] stdlib.qwen3.memory.ref-count-f32 [elements.])\n ({{[.elements] {}}} stdlib.qwen3.memory.u64.div [rows.])\n ({{[.rows] {}}} stdlib.qwen3.memory.u64.div [merged-rows.])\n ({{[.rows] {}}} stdlib.qwen3.memory.u64.mul [hidden-count.])\n ({{[.rows] {}}} stdlib.qwen3.memory.u64.mul [ff-count.])\n",
         c(3 * config.patch_size * config.patch_size),
         c(config.merge_size * config.merge_size),
         c(h),
@@ -137,7 +137,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
     let ci = 3 * config.patch_size * config.patch_size;
     // Both temporal slices see the same patch for a still image; add the bias once.
     let p0 = b.op(
-        "flux.linear-f32",
+        "stdlib.vision.linear-ref",
         vec![
             w("patches"),
             b.weight("v.patch_embd.weight"),
@@ -149,7 +149,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
     );
     // Zero bias supplied as an external prepared weight.
     let p1 = b.op(
-        "flux.linear-f32",
+        "stdlib.vision.linear-ref",
         vec![
             w("patches"),
             b.weight("v.patch_embd.weight.1"),
@@ -161,7 +161,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
     );
     let patches = b.add(&p0, &p1);
     let pos = b.op(
-        "vision.position",
+        "stdlib.vision.position",
         vec![
             b.weight("v.position_embd.weight"),
             w("indices"),
@@ -176,20 +176,20 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
         let n = b.norm(&x, &format!("{prefix}.ln1"), "rows", h, config.eps);
         let qkv = b.linear(&n, &format!("{prefix}.attn_qkv"), "rows", h, 3 * h);
         let q = b.op(
-            "flux.slice-f32-o",
+            "stdlib.vision.slice",
             vec![w(&qkv), w("hidden-count"), c(3 * h), c(h), c(0)],
         );
         let k = b.op(
-            "flux.slice-f32-o",
+            "stdlib.vision.slice",
             vec![w(&qkv), w("hidden-count"), c(3 * h), c(h), c(h)],
         );
         let v = b.op(
-            "flux.slice-f32-o",
+            "stdlib.vision.slice",
             vec![w(&qkv), w("hidden-count"), c(3 * h), c(h), c(2 * h)],
         );
         let dim = h / config.heads;
         let q = b.op(
-            "vision.rope-orr",
+            "stdlib.vision.rope",
             vec![
                 w(&q),
                 w("positions"),
@@ -200,7 +200,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
             ],
         );
         let k = b.op(
-            "vision.rope-orr",
+            "stdlib.vision.rope",
             vec![
                 w(&k),
                 w("positions"),
@@ -211,7 +211,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
             ],
         );
         let a = b.op(
-            "flux.attention-f32-ooo",
+            "stdlib.vision.attention",
             vec![
                 w(&q),
                 w(&k),
@@ -236,7 +236,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
             h,
             config.intermediate_size,
         );
-        let up = b.op("vision.gelu-tanh-o", vec![w(&up), w("ff-count")]);
+        let up = b.op("stdlib.vision.gelu-tanh", vec![w(&up), w("ff-count")]);
         let down = b.linear(
             &up,
             &format!("{prefix}.ffn_down"),
@@ -250,7 +250,7 @@ pub(crate) fn source(config: &VisionConfig, names: &[String]) -> String {
     x = b.norm(&x, "v.post_ln", "rows", h, 1e-6);
     let merged = h * config.merge_size * config.merge_size;
     x = b.linear(&x, "mm.0", "merged-rows", merged, merged);
-    x = b.op("vision.gelu-erf-o", vec![w(&x), w("hidden-count")]);
+    x = b.op("stdlib.vision.gelu-erf", vec![w(&x), w("hidden-count")]);
     x = b.linear(&x, "mm.2", "merged-rows", merged, config.output_size);
     let source = b.render(&x, names);
     let marker = format!(

@@ -4,7 +4,6 @@ use super::{
 };
 use crate::weights::Weights;
 use anyhow::Result;
-use catena_lang::codegen::CodegenKind;
 use catena_lang::runtime::MemOwn;
 use std::path::Path;
 pub struct VaeDecoder {
@@ -14,31 +13,13 @@ pub struct VaeDecoder {
 }
 impl VaeDecoder {
     pub fn load(snapshot: &Path, height: usize, width: usize) -> Result<Self> {
-        Self::load_with_backend(snapshot, height, width, false, super::ops::Backend::Fast)
+        Self::load_with_debug(snapshot, height, width, false)
     }
-    pub fn load_with_backend(
+    pub fn load_with_debug(
         snapshot: &Path,
         height: usize,
         width: usize,
         debug: bool,
-        backend: super::ops::Backend,
-    ) -> Result<Self> {
-        Self::load_with_codegen(
-            snapshot,
-            height,
-            width,
-            debug,
-            backend,
-            CodegenKind::Default,
-        )
-    }
-    pub fn load_with_codegen(
-        snapshot: &Path,
-        height: usize,
-        width: usize,
-        debug: bool,
-        backend: super::ops::Backend,
-        codegen: CodegenKind,
     ) -> Result<Self> {
         let config: VaeConfig = read(snapshot.join("vae/config.json"))?;
         config.validate()?;
@@ -96,11 +77,8 @@ impl VaeDecoder {
                 &[512],
             )?;
         }
-        let mut program = super::graph::vae(&config, height, width, debug)?;
-        if codegen == CodegenKind::Experimental {
-            program.source = super::experimental::graph(&program.source)?;
-        }
-        let ops = Ops::with_codegen(Some(&program.source), backend, codegen)?;
+        let program = super::graph::vae(&config, height, width, debug)?;
+        let ops = Ops::new(Some(&program.source))?;
         weights.prepare(&ops.runtime, &program.weights, true)?;
         Ok(Self {
             ops,

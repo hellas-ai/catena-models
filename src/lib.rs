@@ -1,9 +1,9 @@
 pub mod catena;
 pub mod checkpoint;
-mod experimental;
 pub mod flux;
 pub mod hfhub;
 pub mod model;
+mod qwen;
 mod session_graph;
 pub mod spec;
 pub mod tokenizer;

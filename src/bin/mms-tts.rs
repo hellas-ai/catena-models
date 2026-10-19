@@ -11,7 +11,7 @@ struct Args {
     text: Option<String>,
     #[arg(long, default_value = "speech.wav")]
     output: PathBuf,
-    #[arg(long, required = true, value_name = "MODEL")]
+    #[arg(long, default_value = "facebook/mms-tts-eng", value_name = "MODEL")]
     model: String,
     #[arg(long, default_value_t = 0)]
     seed: u64,

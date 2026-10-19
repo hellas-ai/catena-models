@@ -1,6 +1,5 @@
 use super::Config;
 use anyhow::Result;
-pub const HELPERS: &str = include_str!("../catena/whisper_helpers.hex");
 const MODEL: &str = include_str!("../catena/whisper_model.hex");
 pub const ATTN: &[&str] = &[
     "self_attn_layer_norm.weight",
@@ -111,13 +110,10 @@ pub fn source(cfg: &Config) -> Result<String> {
     source_with_debug(cfg, false)
 }
 pub fn source_with_debug(cfg: &Config, debug: bool) -> Result<String> {
-    cfg.validate()?;
-    let mut s = model_source(cfg);
-    s += &super::generation::source(cfg, &s, debug);
-    Ok(s)
+    super::kernels::source(cfg, debug)
 }
 
-/// Metadata-derived model composition shared by both compiler backends.
+/// Metadata-derived model composition using typed core memory values.
 pub(crate) fn model_source(cfg: &Config) -> String {
     let mut s = MODEL.to_string();
     for (k, n) in [
@@ -130,8 +126,8 @@ pub(crate) fn model_source(cfg: &Config) -> String {
     ] {
         s = s.replace(&format!("{{{{{k}}}}}"), &format!("{n:016X}"));
     }
-    let own = "(cap.own mem)";
-    let borrowed = "(cap.ref mem)";
+    let own = "((cap.own mem) val)";
+    let borrowed = "((cap.ref mem) val)";
     let scalar = "(u64 val)";
     let mut inputs = vec![("mel".into(), own)];
     inputs.extend((0..encoder_names(cfg).len()).map(|i| (format!("w{i}"), borrowed)));
@@ -167,7 +163,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
     );
     b += &call(
         &[v("conv2"), v("w4"), c(0), c(rows * d)],
-        "whisper.position",
+        "stdlib.whisper.position",
         &["h0"],
     );
     b += &call(&[v("conv2"), v("h0")], "qwen3.free-bf16-before", &["start"]);
@@ -189,7 +185,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
             c(rows),
             c(d),
         ],
-        "whisper.norm",
+        "stdlib.whisper.norm",
         &["normalized"],
     );
     b += &call(
@@ -209,7 +205,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
         let vv = format!("v{l}");
         b += &call(
             &[v("encoder"), v(&format!("w{}", l * 3)), c(rows), c(d), c(d)],
-            "whisper.linear",
+            "stdlib.whisper.linear",
             &[&k],
         );
         b += &call(
@@ -220,7 +216,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
                 c(d),
                 c(d),
             ],
-            "whisper.linear",
+            "stdlib.whisper.linear",
             &[&vr],
         );
         b += &call(
@@ -231,7 +227,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
                 c(0),
                 c(rows * d),
             ],
-            "whisper.bias-gelu",
+            "stdlib.whisper.bias-gelu",
             &[&vv],
         );
         let ready = format!("vready{l}");
@@ -263,7 +259,7 @@ pub(crate) fn model_source(cfg: &Config) -> String {
     inputs.extend((0..decoder_names(cfg).len()).map(|i| (format!("w{i}"), borrowed)));
     let mut b = call(
         &[v("w0"), v("w1"), v("token"), v("pos"), c(d)],
-        "whisper.embedding",
+        "stdlib.whisper.embedding",
         &["h0"],
     );
     let mut wi = 2;
@@ -296,12 +292,12 @@ pub(crate) fn model_source(cfg: &Config) -> String {
             c(1),
             c(d),
         ],
-        "whisper.norm",
+        "stdlib.whisper.norm",
         &["normalized"],
     );
     b += &call(
         &[v("normalized"), v("w0"), c(1), c(d), c(cfg.vocab_size)],
-        "whisper.linear",
+        "stdlib.whisper.linear",
         &["logits"],
     );
     b += &call(
@@ -324,22 +320,5 @@ pub(crate) fn model_source(cfg: &Config) -> String {
 
 /// Full deployable model asset; the receiving node supplies only compiler stdlib.
 pub fn bundle(cfg: &Config, debug: bool) -> Result<String> {
-    Ok([
-        crate::catena::BF16_HELPER_SOURCE,
-        include_str!("../catena/inference_helpers.hex"),
-        HELPERS,
-        &source_with_debug(cfg, debug)?,
-    ]
-    .join("\n"))
-}
-
-pub fn bundle_with_codegen(
-    cfg: &Config,
-    debug: bool,
-    codegen: catena_lang::codegen::CodegenKind,
-) -> Result<String> {
-    match codegen {
-        catena_lang::codegen::CodegenKind::Default => bundle(cfg, debug),
-        catena_lang::codegen::CodegenKind::Experimental => super::experimental::source(cfg, debug),
-    }
+    source_with_debug(cfg, debug)
 }

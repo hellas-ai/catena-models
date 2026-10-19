@@ -4,3 +4,6 @@
 /nixos
 /profiles/
 /target/
+
+# Python generator caches
+__pycache__/

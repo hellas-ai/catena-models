@@ -1,5 +1,4 @@
 use anyhow::{Result, ensure};
-use catena_lang::codegen::CodegenKind;
 use catena_qwen3::whisper::{self, Config, Options, Whisper};
 use clap::Parser;
 use std::path::PathBuf;
@@ -11,9 +10,6 @@ struct Args {
     wav: Option<PathBuf>,
     #[arg(long, default_value = "openai/whisper-small", value_name = "MODEL")]
     model: String,
-    /// Compiler backend; experimental uses only generic GPU primitives.
-    #[arg(long, value_enum, default_value = "default")]
-    codegen: CodegenArg,
     #[arg(long)]
     language: Option<String>,
     #[arg(long, default_value_t = 256)]
@@ -32,19 +28,6 @@ struct Args {
     #[arg(long)]
     features_only: bool,
 }
-#[derive(Clone, Copy, clap::ValueEnum)]
-enum CodegenArg {
-    Default,
-    Experimental,
-}
-impl From<CodegenArg> for CodegenKind {
-    fn from(value: CodegenArg) -> Self {
-        match value {
-            CodegenArg::Default => Self::Default,
-            CodegenArg::Experimental => Self::Experimental,
-        }
-    }
-}
 fn main() -> Result<()> {
     let a = Args::parse();
     let model_dir = whisper::hub::snapshot(&a.model)?;
@@ -53,10 +36,7 @@ fn main() -> Result<()> {
         eprintln!("Whisper snapshot: {}", model_dir.display());
     }
     if let Some(path) = a.generate_entrypoint {
-        std::fs::write(
-            path,
-            whisper::graph::bundle_with_codegen(&config, a.dump_dir.is_some(), a.codegen.into())?,
-        )?;
+        std::fs::write(path, whisper::graph::bundle(&config, a.dump_dir.is_some())?)?;
         return Ok(());
     }
     if a.inspect {
@@ -80,12 +60,7 @@ fn main() -> Result<()> {
         whisper::dump_f32(a.dump_dir.as_deref(), "log_mel", &mel, &[3000, 80])?;
         return Ok(());
     }
-    let model = Whisper::load_with_codegen(
-        &model_dir,
-        a.timings,
-        a.dump_dir.is_some(),
-        a.codegen.into(),
-    )?;
+    let model = Whisper::load_with_debug(&model_dir, a.timings, a.dump_dir.is_some())?;
     let text = model.transcribe(
         &samples,
         &Options {
@@ -97,19 +72,4 @@ fn main() -> Result<()> {
     )?;
     println!("{text}");
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn defaults_to_whisper_small_and_selects_experimental() {
-        let args = Args::try_parse_from(["whisper-asr", "--codegen", "experimental", "speech.wav"])
-            .unwrap();
-        assert_eq!(args.model, "openai/whisper-small");
-        assert!(matches!(args.codegen, CodegenArg::Experimental));
-        let args = Args::try_parse_from(["whisper-asr", "--model", "owner/whisper", "speech.wav"])
-            .unwrap();
-        assert_eq!(args.model, "owner/whisper");
-    }
 }

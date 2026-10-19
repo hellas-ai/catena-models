@@ -1,0 +1,14 @@
+# Model-owned session initialization. Called once per session.
+(def program qwen3.init : (u64 val) -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
+ ([capacity.]
+  ([.capacity] stdlib.qwen3.state-cache-count stdlib.qwen3.state-zero-{{DTYPE}} [cache.])
+  ({(unit.intro stdlib.qwen35.layout.workspace-bytes) (const.u64.0x0000000000000004)} stdlib.qwen3.memory.u64.div stdlib.qwen3.state-zero-f32 [workspace.])
+  (unit.intro stdlib.qwen3.state-scratch0 stdlib.qwen3.memory.alloc-bf16 [scratch0.])
+  (unit.intro stdlib.qwen3.state-scratch1 stdlib.qwen3.memory.alloc-bf16 [scratch1.])
+  (unit.intro stdlib.qwen3.state-scratch2 stdlib.qwen3.memory.alloc-bf16 [scratch2.])
+  (unit.intro stdlib.qwen3.state-scratch3 stdlib.qwen3.memory.alloc-bf16 [scratch3.])
+  (unit.intro stdlib.qwen3.state-scratch4 stdlib.qwen3.memory.alloc-bf16 [scratch4.])
+  (unit.intro stdlib.qwen3.state-scratch5 stdlib.qwen3.memory.alloc-bf16 [scratch5.])
+  (unit.intro stdlib.qwen3.state-scratch6 stdlib.qwen3.memory.alloc-bf16 [scratch6.])
+  {[.cache] [.workspace] [.scratch0] [.scratch1] [.scratch2] [.scratch3] [.scratch4] [.scratch5] [.scratch6]}
+ ))

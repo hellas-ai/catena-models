@@ -1,0 +1,79 @@
+# Generated constant-table template; edit tools/generate-flux-kernels.py.
+
+(def program stdlib.flux.CONSTANT-NAME.element : {((cap.own mem) val) (u64 val)} -> 1 =
+ ([out element.]
+{{VALUE_BODY}}
+ ({[.out] [.element] [.value]} stdlib.qwen3.memory.write-f32)
+ (unit.elim)
+ (unit.intro)
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.yes : {((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.out] [.element]} stdlib.flux.CONSTANT-NAME.element)
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.no : {((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.launch : {((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([out work thread.]
+ ([.thread] stdlib.qwen3.memory.thread-index [element.])
+ ({[.element] [.work]} stdlib.qwen3.memory.u64.less [in-bounds.])
+ ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.out]} partial.stdlib.flux.CONSTANT-NAME.yes.1 [yes.])
+ ({[.out]} partial.stdlib.flux.CONSTANT-NAME.no.1 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.host : {((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([out work grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.out] [.work]} partial.stdlib.flux.CONSTANT-NAME.launch.2 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.run : {(u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([work elements.]
+ ([.elements] stdlib.qwen3.memory.alloc-f32 [out.])
+ ({[.work] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.out] [.work] [.grid]} partial.stdlib.flux.CONSTANT-NAME.host.3 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.flux.CONSTANT-NAME.into : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([out work.]
+ ({[.work] (const.u64.0x00000000000000FF)} stdlib.qwen3.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.qwen3.memory.u64.div [blocks.])
+ ({[.blocks]} stdlib.qwen3.memory.grid [grid.])
+ ({[.out] [.work] [.grid]} partial.stdlib.flux.CONSTANT-NAME.host.3 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program flux.CONSTANT-NAME : {} -> ((cap.own mem) val) =
+ ([.]
+ ({} const.u64.0x{{COUNT}} [count.])
+ ({[.count] [.count]} stdlib.flux.CONSTANT-NAME.run)
+ ))

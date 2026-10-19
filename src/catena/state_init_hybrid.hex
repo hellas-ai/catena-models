@@ -1,0 +1,7 @@
+# Model-owned session initialization. Called once per session.
+(def program qwen3.init : (u64 val) -> {((cap.own mem) val) ((cap.own mem) val)} =
+ ([capacity.]
+  ([.capacity] stdlib.qwen3.state-cache-count stdlib.qwen3.state-zero-{{DTYPE}} [cache.])
+  (unit.intro stdlib.qwen3.state-shadow stdlib.qwen3.state-zero-f32 [workspace.])
+  {[.cache] [.workspace]}
+ ))
