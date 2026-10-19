@@ -399,6 +399,8 @@ mod tests {
     }
     #[test]
     fn multimodal_language_graphs_compile_without_gpu() -> Result<()> {
+        // The current compiler supports these graphs through experimental BF16/HIP;
+        // the default backend's fused model operations have been removed.
         for mut config in [
             crate::spec::ModelConfig::qwen35_0_8b(),
             crate::spec::ModelConfig::qwen36_35b_a3b(),
@@ -415,41 +417,41 @@ mod tests {
             if !config.is_dense() {
                 config.shared_expert_intermediate_size = Some(64);
             }
-            for precision in [
-                crate::catena::InferencePrecision::F32,
-                crate::catena::InferencePrecision::Bf16,
-            ] {
-                let source = crate::catena::generated_multimodal_source(
-                    &config,
-                    crate::catena::InferenceOptions::new(precision),
+            config.rope_dimension_count = 8;
+            config.mrope_sections = [2, 1, 1];
+            config.vocabulary_size = 33;
+            config.linear_state_size = Some(16);
+            config.linear_group_count = Some(1);
+            config.linear_time_step_rank = Some(2);
+            config.linear_inner_size = Some(32);
+            let options =
+                crate::catena::InferenceOptions::new(crate::catena::InferencePrecision::Bf16)
+                    .with_codegen(CodegenKind::Experimental);
+            let source = crate::catena::generated_multimodal_source(&config, options)?;
+            let raw = metacat::theory::RawTheorySet::from_texts(
+                crate::catena::runtime_sources_for_options(&source, options),
+            )?;
+            let raw = crate::catena::prepare_sources(raw)?;
+            let module = catena_lang::compile::compile(
+                &mut catena_lang::report::CompileReport::new(raw),
+                CodegenKind::Experimental,
+                GpuDialect::Hip,
+            )?;
+            ensure!(
+                module
+                    .functions
+                    .iter()
+                    .any(|f| f.source_name == "qwen3.multimodal"),
+                "missing multimodal entrypoint"
+            );
+            if config.is_dense()
+                && let Some(directory) = std::env::var_os("QWEN35_TEST_CPP")
+            {
+                std::fs::create_dir_all(&directory)?;
+                std::fs::write(
+                    std::path::Path::new(&directory).join("language-Hip.cpp"),
+                    module.source,
                 )?;
-                let raw = metacat::theory::RawTheorySet::from_texts(
-                    crate::catena::runtime_sources(&source, precision),
-                )?;
-                let mut report = catena_lang::report::CompileReport::new(raw);
-                for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-                    let cpp = catena_lang::compile::compile(
-                        &mut report,
-                        catena_lang::codegen::CodegenKind::Default,
-                        dialect,
-                    )?
-                    .source;
-                    ensure!(
-                        cpp.contains("program_qwen3_multimodal"),
-                        "missing multimodal entrypoint"
-                    );
-                    if config.is_dense()
-                        && precision == crate::catena::InferencePrecision::F32
-                        && dialect == GpuDialect::Hip
-                        && let Some(directory) = std::env::var_os("QWEN35_TEST_CPP")
-                    {
-                        std::fs::create_dir_all(&directory)?;
-                        std::fs::write(
-                            std::path::Path::new(&directory).join("language-Hip.cpp"),
-                            cpp,
-                        )?;
-                    }
-                }
             }
         }
         Ok(())
@@ -492,34 +494,29 @@ mod tests {
             }
         }
         names.push("__zero".into());
-        let source = graph::source(&config, &names);
+        let source = experimental::source(&config, &names);
         let raw = metacat::theory::RawTheorySet::from_texts(
-            catena_lang::stdlib::sources()
+            catena_lang::stdlib::experimental_core_sources()
                 .map(|s| -> &str { s })
-                .chain([
-                    crate::catena::BF16_HELPER_SOURCE,
-                    crate::flux::ops::SOURCE,
-                    HELPERS,
-                    &source,
-                ]),
+                .chain([source.as_str()]),
         )?;
+        let raw = crate::catena::prepare_sources(raw)?;
         let mut report = catena_lang::report::CompileReport::new(raw);
         for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-            let cpp = catena_lang::compile::compile(
-                &mut report,
-                catena_lang::codegen::CodegenKind::Default,
-                dialect,
-            )?
-            .source;
+            let module =
+                catena_lang::compile::compile(&mut report, CodegenKind::Experimental, dialect)?;
             ensure!(
-                cpp.contains("program_vision_encode"),
+                module
+                    .functions
+                    .iter()
+                    .any(|f| f.source_name == "vision.encode"),
                 "missing encoder entrypoint"
             );
             if let Some(directory) = std::env::var_os("QWEN35_TEST_CPP") {
                 std::fs::create_dir_all(&directory)?;
                 std::fs::write(
                     std::path::Path::new(&directory).join(format!("vision-{dialect:?}.cpp")),
-                    cpp,
+                    module.source,
                 )?;
             }
         }
