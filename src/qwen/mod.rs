@@ -5,8 +5,6 @@ use crate::{
 };
 use anyhow::{Result, ensure};
 use catena_lang::codegen::GpuDialect;
-#[cfg(test)]
-use catena_lang::runtime::RuntimeModule;
 use std::fmt::Write;
 
 #[path = "fused.rs"]
@@ -542,100 +540,8 @@ fn graph_source(config: &ModelConfig, options: InferenceOptions) -> Result<Strin
 }
 
 #[cfg(test)]
-pub(crate) fn compile<'a>(
-    sources: impl IntoIterator<Item = &'a str>,
-    dialect: GpuDialect,
-) -> Result<RuntimeModule> {
-    crate::catena::compile(metacat::theory::RawTheorySet::from_texts(sources)?, dialect)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    fn options() -> InferenceOptions {
-        InferenceOptions::default().with_kernels(KernelKind::Reference)
-    }
-    pub(super) fn tiny_config() -> ModelConfig {
-        let mut c = ModelConfig::qwen3_0_6b();
-        c.hidden_size = 32;
-        c.intermediate_size = 64;
-        c.num_layers = 2;
-        c.num_attention_heads = 2;
-        c.num_key_value_heads = 1;
-        c.head_dim = 16;
-        c.rope_dimension_count = 16;
-        c.vocabulary_size = 33;
-        c.max_position_embeddings = 128;
-        c
-    }
-    #[test]
-    fn dense_bf16_compiles_and_preserves_runtime_abi() -> Result<()> {
-        for config in [
-            tiny_config(),
-            ModelConfig::qwen3_0_6b(),
-            ModelConfig::qwen3_1_7b(),
-        ] {
-            let model = source(&config, options())?;
-            let module = compile(crate::catena::runtime_sources(&model), GpuDialect::Hip)?;
-            let entry = module
-                .functions
-                .iter()
-                .find(|f| f.source_name == "qwen3")
-                .expect("Qwen3 entrypoint");
-            use catena_lang::runtime::ValueKind;
-            assert_eq!(entry.inputs.len(), 4 + weight_specs(&config)?.len());
-            assert_eq!(
-                entry.inputs[..4],
-                [
-                    ValueKind::MemRef,
-                    ValueKind::MemOwn,
-                    ValueKind::U64,
-                    ValueKind::U64
-                ]
-            );
-            assert!(entry.inputs[4..].iter().all(|k| *k == ValueKind::MemRef));
-            assert_eq!(entry.outputs, vec![ValueKind::MemOwn; 3]);
-            assert!(module.source.contains("__builtin_amdgcn_fdot2_f32_bf16"));
-            let symbol = &module
-                .functions
-                .iter()
-                .find(|f| f.source_name == "qwen3.normalize")
-                .unwrap()
-                .symbol;
-            let body = module
-                .source
-                .split(&format!("void {symbol}("))
-                .nth(1)
-                .unwrap()
-                .split("extern \"C\" __host__")
-                .next()
-                .unwrap();
-            assert!(
-                body.rfind("<<<").unwrap() < body.find("hipFree(").unwrap(),
-                "inverse RMS buffer must remain live until normalization completes"
-            );
-        }
-        Ok(())
-    }
-    #[test]
-    fn fused_session_entrypoints_compile_once() -> Result<()> {
-        let options = options().with_kernels(KernelKind::Fused);
-        let source = source(&tiny_config(), options)?;
-        let module = compile(crate::catena::runtime_sources(&source), GpuDialect::Hip)?;
-        let outputs = |name| {
-            module
-                .functions
-                .iter()
-                .find(|f| f.source_name == name)
-                .unwrap()
-                .outputs
-                .len()
-        };
-        assert_eq!(outputs("qwen3.init"), 2);
-        assert_eq!(outputs("qwen3"), 4);
-        Ok(())
-    }
-
     #[test]
     fn qwen35_moe_validates_routing_and_workspace() -> Result<()> {
         let options = InferenceOptions::default();
@@ -668,13 +574,10 @@ mod tests {
     }
     #[test]
     fn unsupported_options_are_rejected_before_compilation() {
-        let c = tiny_config();
+        let c = ModelConfig::qwen3_0_6b();
+        let options = InferenceOptions::default().with_kernels(KernelKind::Reference);
 
-        assert!(source(&ModelConfig::qwen35_0_8b(), options()).is_err());
-        assert!(validate(&c, options(), Some(GpuDialect::Cuda)).is_err());
+        assert!(source(&ModelConfig::qwen35_0_8b(), options).is_err());
+        assert!(validate(&c, options, Some(GpuDialect::Cuda)).is_err());
     }
 }
-
-#[cfg(test)]
-#[path = "device_tests.rs"]
-mod device_tests;

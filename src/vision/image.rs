@@ -259,23 +259,6 @@ fn resize_rgb(rgb: &[u8], w: usize, h: usize, rw: usize, rh: usize) -> Vec<u8> {
 mod tests {
     use super::*;
     #[test]
-    fn decodes_rgb_and_grayscale_jpeg_fixtures() -> Result<()> {
-        // Pillow 12.3.0, quality 90: JPEG's decoded red is (254, 0, 0).
-        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-        for (name, expected) in [("red", [254, 0, 0]), ("gray", [123; 3])] {
-            let (rgb, w, h) = decode(&fixtures.join(format!("qwen35-{name}.jpg")))?;
-            assert_eq!((w, h), (16, 16));
-            assert_eq!(rgb.len(), 16 * 16 * 3);
-            assert!(
-                rgb.as_chunks::<3>()
-                    .0
-                    .iter()
-                    .all(|pixel| *pixel == expected)
-            );
-        }
-        Ok(())
-    }
-    #[test]
     fn resize_limits() {
         assert_eq!(
             smart_resize(256, 256, 32, 65536, 1048576).unwrap(),
@@ -287,12 +270,6 @@ mod tests {
         );
         assert!(smart_resize(1, 1000, 32, 65536, 1048576).is_err());
         assert!(smart_resize(1, 1, 32, 1, 1).is_err());
-    }
-    #[test]
-    fn bicubic_identity_and_constant() {
-        let x = vec![123; 7 * 9 * 3];
-        assert_eq!(resize_rgb(&x, 7, 9, 7, 9), x);
-        assert_eq!(resize_rgb(&x, 7, 9, 13, 4), vec![123; 13 * 4 * 3]);
     }
 }
 

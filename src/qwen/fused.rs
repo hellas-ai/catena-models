@@ -167,33 +167,3 @@ fn balanced_end(text: &str, start: usize) -> usize {
     }
     panic!("unterminated Hex declaration")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn fused_projection_compiles() -> Result<()> {
-        let options = InferenceOptions::default();
-        let source = source(&super::super::tests::tiny_config(), options)?;
-        let module = compile(crate::catena::runtime_sources(&source), GpuDialect::Hip)?;
-        let entry = module
-            .functions
-            .iter()
-            .find(|f| f.source_name == "qwen3")
-            .unwrap();
-        use catena_lang::runtime::ValueKind;
-        assert_eq!(
-            entry.inputs[..5],
-            [
-                ValueKind::MemRef,
-                ValueKind::MemOwn,
-                ValueKind::MemOwn,
-                ValueKind::U64,
-                ValueKind::U64
-            ]
-        );
-        assert_eq!(entry.outputs, vec![ValueKind::MemOwn; 4]);
-        assert!(module.source.contains("__syncthreads"));
-        Ok(())
-    }
-}

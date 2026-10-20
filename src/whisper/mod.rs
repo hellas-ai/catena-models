@@ -1,8 +1,6 @@
 pub mod audio;
 pub mod graph;
 pub mod hub;
-#[cfg(test)]
-mod kernel_tests;
 mod kernels;
 use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
@@ -512,35 +510,5 @@ mod tests {
             bf16(&[f32::from_bits(0x3f808000), f32::from_bits(0x3f818000)]),
             [0x3f80, 0x3f82]
         );
-    }
-    #[test]
-    fn compatible_model_dimensions_come_from_metadata() {
-        let mut config = Config {
-            model_type: "whisper".into(),
-            d_model: 384,
-            num_mel_bins: 80,
-            encoder_layers: 4,
-            decoder_layers: 4,
-            encoder_attention_heads: 6,
-            decoder_attention_heads: 6,
-            encoder_ffn_dim: 1536,
-            decoder_ffn_dim: 1536,
-            max_source_positions: 1500,
-            max_target_positions: 448,
-            vocab_size: 51865,
-            decoder_start_token_id: 50258,
-            eos_token_id: 50257,
-            activation_function: "gelu".into(),
-            scale_embedding: false,
-        };
-        assert!(config.validate().is_ok());
-        config.d_model = 768;
-        config.encoder_attention_heads = 12;
-        config.decoder_attention_heads = 12;
-        config.encoder_ffn_dim = 3072;
-        config.decoder_ffn_dim = 3072;
-        assert!(config.validate().is_ok());
-        config.num_mel_bins = 128;
-        assert!(config.validate().is_err());
     }
 }

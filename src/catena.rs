@@ -19,9 +19,9 @@ impl InferenceOptions {
         self
     }
 }
-/// The compiler still uses its upstream pre-promotion API names here.
+/// Default compiler primitives and core helpers.
 pub fn core_sources() -> impl Iterator<Item = &'static str> {
-    catena_lang::stdlib::experimental_core_sources()
+    catena_lang::stdlib::core_sources()
 }
 pub fn runtime_sources(model: &str) -> impl Iterator<Item = &str> {
     core_sources().map(|s| -> &str { s }).chain([model])
@@ -33,7 +33,7 @@ pub fn compile(
     let raw = prepare_sources(raw)?;
     let module = catena_lang::compile::compile(
         &mut catena_lang::report::CompileReport::new(raw),
-        catena_lang::codegen::CodegenKind::Experimental,
+        catena_lang::codegen::CodegenKind::Default,
         dialect,
     )?;
     if let Some(path) = std::env::var_os("CATENA_QWEN3_CPP") {

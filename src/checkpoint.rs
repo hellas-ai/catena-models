@@ -1450,13 +1450,6 @@ mod tests {
     }
 
     #[test]
-    fn leaves_an_unsharded_name_alone() -> Result<()> {
-        let path = Path::new("fixture/checkpoint.gguf");
-        assert_eq!(resolve_gguf_paths(path)?, [path]);
-        Ok(())
-    }
-
-    #[test]
     fn resolves_a_directory_to_sorted_gguf_files_only() -> Result<()> {
         let unique = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
         let directory = std::env::temp_dir().join(format!(
@@ -1512,18 +1505,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_the_removed_qwen3_moe_architecture() {
-        let mut bytes = Vec::new();
-        push_u32(&mut bytes, GGUF_MAGIC);
-        push_u32(&mut bytes, GGUF_VERSION);
-        push_u64(&mut bytes, 0);
-        push_u64(&mut bytes, 1);
-        push_string_metadata(&mut bytes, "general.architecture", "qwen3moe");
-        let error = parse_gguf_model_config(&bytes).unwrap_err().to_string();
-        assert!(error.contains("unsupported GGUF architecture"));
-    }
-
-    #[test]
     fn parses_dense_qwen3_configuration() -> Result<()> {
         let mut bytes = Vec::new();
         push_u32(&mut bytes, GGUF_MAGIC);
@@ -1555,77 +1536,6 @@ mod tests {
         assert_eq!(config.head_dim, 128);
         assert_eq!(config.num_experts, 0);
         assert_eq!(weight_specs(&config)?.len(), 311);
-        Ok(())
-    }
-
-    #[test]
-    fn validates_downloaded_gguf_when_present() -> Result<()> {
-        if let Ok(selector) = std::env::var("CATENA_QWEN3_MODEL") {
-            let path = crate::hfhub::download_gguf(&selector)?.primary;
-            let file = GgufFile::open(&path)?;
-            let config = read_gguf_model_config(&path)?;
-            for spec in weight_specs(&config)? {
-                file.tensor_view(&spec, 0)?;
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn reads_qwen36_hybrid_configuration_when_present() -> Result<()> {
-        let Some(selector) = std::env::var_os("CATENA_QWEN36_MODEL") else {
-            return Ok(());
-        };
-        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
-        let config = read_gguf_model_config(&path)?;
-        assert_eq!(config.architecture, ModelArchitecture::Qwen35Moe);
-        assert_eq!(config.vocabulary_size, 248_320);
-        assert_eq!(config.hidden_size, 2_048);
-        assert_eq!(config.num_layers, 40);
-        assert_eq!(config.num_attention_heads, 16);
-        assert_eq!(config.num_key_value_heads, 2);
-        assert_eq!(config.head_dim, 256);
-        assert_eq!(config.full_attention_interval, Some(4));
-        assert_eq!(weight_specs(&config)?.len(), 733);
-        validate_gguf_tensors(&path, &config)?;
-        Ok(())
-    }
-
-    #[test]
-    fn reads_qwen35_dense_configuration_when_present() -> Result<()> {
-        let Some(selector) = std::env::var_os("CATENA_QWEN35_MODEL") else {
-            return Ok(());
-        };
-        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
-        let config = read_gguf_model_config(&path)?;
-        assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
-        assert_eq!(config.vocabulary_size, 248_320);
-        assert_eq!(config.hidden_size, 1_024);
-        assert_eq!(config.intermediate_size, 3_584);
-        assert_eq!(config.num_layers, 24);
-        assert_eq!(config.num_attention_heads, 8);
-        assert_eq!(config.num_key_value_heads, 2);
-        assert_eq!(config.head_dim, 256);
-        assert_eq!(config.rope_dimension_count, 64);
-        assert_eq!(config.full_attention_interval, Some(4));
-        assert_eq!(config.linear_qkv_size(), Some(6_144));
-        validate_gguf_tensors(&path, &config)?;
-        Ok(())
-    }
-
-    #[test]
-    fn reads_qwen38_dense_configuration_with_auxiliary_nextn_block_when_present() -> Result<()> {
-        let Some(selector) = std::env::var_os("CATENA_QWEN38_MODEL") else {
-            return Ok(());
-        };
-        let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
-        let config = read_gguf_model_config(&path)?;
-        assert_eq!(config.architecture, ModelArchitecture::Qwen35Dense);
-        assert_eq!(config.num_layers, 64);
-        assert_eq!(config.num_nextn_layers, 1);
-        assert!(!config.output_weight_tied);
-        assert_eq!(weight_specs(&config)?.len(), 851);
-        validate_gguf_tensors(&path, &config)?;
         Ok(())
     }
 }

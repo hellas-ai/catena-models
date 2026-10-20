@@ -81,7 +81,7 @@ fn tokenizer_prompt_matches_reference() -> Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires a GPU, QWEN35_MODEL, QWEN35_MMPROJ_MODEL and QWEN35_REFERENCE"]
+#[ignore = "requires a supported HIP GPU, QWEN35_MODEL and QWEN35_REFERENCE; QWEN35_MMPROJ_MODEL is optional"]
 fn native_images_prefill_and_cached_decode_match_reference() -> Result<()> {
     let dir = reference_dir()?;
     let meta: serde_json::Value =
