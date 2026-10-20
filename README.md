@@ -99,7 +99,6 @@ decoder. The public synthesis API and normal/debug result layouts are preserved.
 
 ## Compiler integration
 
-`src/catena.rs` contains the sole compiler adapter. The pinned compiler still
-names its retained API `CodegenKind::Experimental` and
-`experimental_core_sources()`. These upstream names are confined to that adapter
-until Catena promotes and renames its API; applications have no backend choice.
+`src/catena.rs` contains the sole compiler adapter. It uses the compiler's
+`CodegenKind::Default` backend and `core_sources()` standard library helpers;
+applications have no backend choice.
