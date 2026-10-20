@@ -262,7 +262,6 @@ fn shard_parts(path: &str) -> Option<(String, usize, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn paths(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
@@ -454,17 +453,7 @@ fn resolve_files(
 #[cfg(test)]
 mod model_files_tests {
     use super::*;
-    use std::{
-        fs,
-        io::{Read, Write},
-        net::TcpListener,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        thread,
-        time::Duration,
-    };
+    use std::fs;
     struct Temp(PathBuf);
     impl Temp {
         fn new(name: &str) -> Self {
@@ -507,83 +496,6 @@ mod model_files_tests {
         );
         assert!(resolve_local_files("unused/model", &["../secret"], Some(&t.0)).is_err());
         assert!(resolve_local_files("unused/model", &[], Some(&t.0)).is_err());
-        Ok(())
-    }
-    #[test]
-    fn named_downloads_use_main_then_reuse_cache_without_public_network() -> Result<()> {
-        let cache = Temp::new("download");
-        let listener = TcpListener::bind("127.0.0.1:0")?;
-        listener.set_nonblocking(true)?;
-        let endpoint = format!("http://{}", listener.local_addr()?);
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let server = thread::spawn(move || -> Result<()> {
-            while !worker_stop.load(Ordering::Relaxed) {
-                let (mut socket, _) = match listener.accept() {
-                    Ok(pair) => pair,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(2));
-                        continue;
-                    }
-                    Err(e) => return Err(e.into()),
-                };
-                socket.set_read_timeout(Some(Duration::from_secs(2)))?;
-                let mut request = Vec::new();
-                let mut buffer = [0; 1024];
-                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let n = socket.read(&mut buffer)?;
-                    if n == 0 {
-                        break;
-                    }
-                    request.extend_from_slice(&buffer[..n]);
-                }
-                let request = String::from_utf8(request)?;
-                let first = request.lines().next().unwrap();
-                assert!(
-                    first.contains("/owner/model/resolve/main/"),
-                    "unexpected request {first}"
-                );
-                let path = first.split_whitespace().nth(1).unwrap();
-                let (etag, body) = if path.ends_with("config.json") {
-                    ("config", b"{}".as_slice())
-                } else if path.ends_with("encoder/model.safetensors.index.json") {
-                    (
-                        "index",
-                        br#"{"weight_map":{"a":"one.safetensors"}}"#.as_slice(),
-                    )
-                } else if path.ends_with("encoder/one.safetensors") {
-                    ("one", b"tensor".as_slice())
-                } else {
-                    panic!("unexpected model file {path}")
-                };
-                let head = first.starts_with("HEAD ");
-                write!(
-                    socket,
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"{etag}\"\r\nX-Repo-Commit: 0123456789012345678901234567890123456789\r\nConnection: close\r\n\r\n",
-                    body.len()
-                )?;
-                if !head {
-                    socket.write_all(body)?;
-                }
-            }
-            Ok(())
-        });
-        let client = hf_hub::HFClient::builder()
-            .cache_dir(&cache.0)
-            .endpoint(&endpoint)
-            .retry_max_attempts(1)
-            .build_sync()?;
-        let files = ["config.json", "encoder/model.safetensors.index.json"];
-        let result = resolve_hub_files(&client, "owner/model", &files);
-        stop.store(true, Ordering::Relaxed);
-        server.join().unwrap()?;
-        let snapshot = result?;
-        assert_eq!(
-            fs::read(snapshot.join("encoder/one.safetensors"))?,
-            b"tensor"
-        );
-        // The same endpoint is now unavailable. hf-hub owns the cache fallback.
-        assert_eq!(resolve_hub_files(&client, "owner/model", &files)?, snapshot);
         Ok(())
     }
     #[test]

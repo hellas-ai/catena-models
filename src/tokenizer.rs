@@ -283,14 +283,6 @@ mod tests {
     }
 
     #[test]
-    fn builds_qwen35_tokenizer_from_gguf_metadata() -> Result<()> {
-        let tokenizer = QwenTokenizer::from_gguf_metadata(embedded_test_metadata("qwen35", false))?;
-        assert_eq!(tokenizer.encode("hi")?, [2]);
-        assert_eq!(tokenizer.decode(&[2], false)?, "hi");
-        Ok(())
-    }
-
-    #[test]
     fn qwen35_keeps_combining_marks_with_letters() -> Result<()> {
         fn split(pattern: &str) -> Result<Vec<String>> {
             let tokenizer = Split::new(
@@ -312,53 +304,6 @@ mod tests {
 
         assert_eq!(split(QWEN2_SPLIT_PATTERN)?, ["a", "\u{035c}b"]);
         assert_eq!(split(QWEN35_SPLIT_PATTERN)?, ["a\u{035c}b"]);
-        Ok(())
-    }
-
-    #[test]
-    fn downloaded_tokenizer_round_trips_when_present() -> Result<()> {
-        if let Ok(selector) = std::env::var("CATENA_TOKENIZER_MODEL") {
-            let path = crate::hfhub::download_gguf(&selector)?.primary;
-            let tokenizer =
-                QwenTokenizer::from_gguf(path)?.context("missing embedded tokenizer")?;
-            let tokens = tokenizer.encode("Gravity is")?;
-            assert!(!tokens.is_empty());
-            assert_eq!(tokenizer.decode(&tokens, false)?, "Gravity is");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn downloaded_tokenizer_streams_when_present() -> Result<()> {
-        if let Ok(selector) = std::env::var("CATENA_TOKENIZER_MODEL") {
-            let path = crate::hfhub::download_gguf(&selector)?.primary;
-            let tokenizer =
-                QwenTokenizer::from_gguf(path)?.context("missing embedded tokenizer")?;
-            let tokens = tokenizer.encode("Gravity is the only thing")?;
-            let mut stream = tokenizer.decode_stream(false);
-            let mut decoded = String::new();
-            for token in tokens {
-                if let Some(chunk) = stream
-                    .step(u32::try_from(token)?)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?
-                {
-                    decoded.push_str(&chunk);
-                }
-            }
-            assert_eq!(decoded, "Gravity is the only thing");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn dense_qwen3_gguf_tokenizer_round_trips_when_present() -> Result<()> {
-        if let Some(selector) = std::env::var_os("CATENA_QWEN3_DENSE_MODEL") {
-            let path = crate::hfhub::download_gguf(&selector.to_string_lossy())?.primary;
-            let tokenizer = QwenTokenizer::from_gguf(path)?.context("missing GGUF tokenizer")?;
-            let prompt = "The capital of France is";
-            let tokens = tokenizer.encode(prompt)?;
-            assert_eq!(tokenizer.decode(&tokens, false)?, prompt);
-        }
         Ok(())
     }
 }

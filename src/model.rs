@@ -206,25 +206,6 @@ impl Model {
         Ok(state)
     }
 
-    #[cfg(test)]
-    pub(crate) fn session_from_cache_for_test(
-        &self,
-        capacity: usize,
-        position: usize,
-        cache: &[u16],
-    ) -> Result<Session<'_>> {
-        ensure!(position <= capacity, "invalid test position");
-        let mut session = self.session(capacity)?;
-        let replacement = self.runtime.mem_u16(cache)?;
-        let mut inputs = vec![replacement.as_ref().into()];
-        inputs.extend(session.state.take().unwrap().into_iter().map(Value::MemOwn));
-        session.state = Some(owned_state(
-            self.artifact.exec_values("qwen3.state-import", inputs)?,
-        )?);
-        session.position = position;
-        Ok(session)
-    }
-
     fn cached_outputs(
         &self,
         tokens: &[u64],
@@ -373,25 +354,6 @@ pub struct Session<'model> {
 }
 
 impl Session<'_> {
-    #[cfg(test)]
-    pub(crate) fn cache_values_for_test(&mut self) -> Result<Vec<u16>> {
-        let inputs = self
-            .state
-            .take()
-            .context("missing test state")?
-            .into_iter()
-            .map(Value::MemOwn)
-            .collect();
-        let mut outputs = owned_state(
-            self.model
-                .artifact
-                .exec_values("qwen3.state-export", inputs)?,
-        )?;
-        let snapshot = outputs.pop().context("missing cache snapshot")?;
-        self.state = Some(outputs);
-        Ok(snapshot.try_to_u16_vec()?)
-    }
-
     pub fn position(&self) -> usize {
         self.position
     }

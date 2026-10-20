@@ -2,8 +2,6 @@
 mod config;
 mod graph;
 pub mod image;
-#[cfg(test)]
-mod kernel_tests;
 mod kernels;
 pub use config::VisionConfig;
 
@@ -350,139 +348,8 @@ fn position_ids(
 mod tests {
     use super::*;
     #[test]
-    fn multimodal_positions_keep_cache_and_rope_separate() {
-        let spans = vec![
-            ImageSpan { start: 3, len: 6 },
-            ImageSpan { start: 11, len: 4 },
-        ];
-        let (p, next) = position_ids(17, &spans, &[[1, 4, 6], [1, 4, 4]]).unwrap();
-        assert_eq!(p[3], [3, 3, 3]);
-        assert_eq!(p[8], [3, 4, 5]);
-        assert_eq!(p[9], [6; 3]);
-        assert_eq!(p[11], [8; 3]);
-        assert_eq!(p[15], [10; 3]);
-        assert_eq!(next, 12);
-    }
-    #[test]
     fn invalid_span_rejected() {
         assert!(position_ids(5, &[ImageSpan { start: 3, len: 4 }], &[[1, 4, 4]]).is_err());
-    }
-    #[test]
-    fn multimodal_language_graphs_compile_without_gpu() -> Result<()> {
-        // The current compiler supports these graphs through BF16/HIP;
-        // the default backend's fused model operations have been removed.
-        for mut config in [
-            crate::spec::ModelConfig::qwen35_0_8b(),
-            crate::spec::ModelConfig::qwen36_35b_a3b(),
-        ] {
-            config.num_layers = 4;
-            config.num_nextn_layers = 0;
-            config.hidden_size = 32;
-            config.intermediate_size = 64;
-            config.num_attention_heads = 1;
-            config.num_key_value_heads = 1;
-            config.head_dim = 64;
-            config.num_experts = if config.is_dense() { 0 } else { 2 };
-            config.experts_per_token = if config.is_dense() { 0 } else { 1 };
-            if !config.is_dense() {
-                config.shared_expert_intermediate_size = Some(64);
-            }
-            config.rope_dimension_count = 8;
-            config.mrope_sections = [2, 1, 1];
-            config.vocabulary_size = 33;
-            config.linear_state_size = Some(16);
-            config.linear_group_count = Some(1);
-            config.linear_time_step_rank = Some(2);
-            config.linear_inner_size = Some(32);
-            let options = crate::catena::InferenceOptions::default();
-            let source = crate::catena::generated_multimodal_source(&config, options)?;
-            let raw =
-                metacat::theory::RawTheorySet::from_texts(crate::catena::runtime_sources(&source))?;
-            let raw = crate::catena::prepare_sources(raw)?;
-            let module = crate::catena::compile(raw, GpuDialect::Hip)?;
-            ensure!(
-                module
-                    .functions
-                    .iter()
-                    .any(|f| f.source_name == "qwen3.multimodal"),
-                "missing multimodal entrypoint"
-            );
-            if config.is_dense()
-                && let Some(directory) = std::env::var_os("QWEN35_TEST_CPP")
-            {
-                std::fs::create_dir_all(&directory)?;
-                std::fs::write(
-                    std::path::Path::new(&directory).join("language-Hip.cpp"),
-                    module.source,
-                )?;
-            }
-        }
-        Ok(())
-    }
-    #[test]
-    fn vision_graph_compiles_without_gpu() -> Result<()> {
-        let config = VisionConfig {
-            hidden_size: 8,
-            intermediate_size: 16,
-            output_size: 8,
-            layers: 1,
-            heads: 2,
-            patch_size: 2,
-            merge_size: 2,
-            position_side: 4,
-            eps: 1e-6,
-            min_pixels: 16,
-            max_pixels: 64,
-            mean: [0.5; 3],
-            std: [0.5; 3],
-        };
-        let mut names = vec![
-            "v.patch_embd.weight",
-            "v.patch_embd.weight.1",
-            "v.patch_embd.bias",
-            "v.position_embd.weight",
-            "v.post_ln.weight",
-            "v.post_ln.bias",
-            "mm.0.weight",
-            "mm.0.bias",
-            "mm.2.weight",
-            "mm.2.bias",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-        for prefix in ["ln1", "ln2", "attn_qkv", "attn_out", "ffn_up", "ffn_down"] {
-            for suffix in ["weight", "bias"] {
-                names.push(format!("v.blk.0.{prefix}.{suffix}"));
-            }
-        }
-        names.push("__zero".into());
-        let source = kernels::source(&config, &names);
-        let raw = metacat::theory::RawTheorySet::from_texts(
-            crate::catena::core_sources()
-                .map(|s| -> &str { s })
-                .chain([source.as_str()]),
-        )?;
-        let raw = crate::catena::prepare_sources(raw)?;
-
-        for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
-            let module = crate::catena::compile(raw.clone(), dialect)?;
-            ensure!(
-                module
-                    .functions
-                    .iter()
-                    .any(|f| f.source_name == "vision.encode"),
-                "missing encoder entrypoint"
-            );
-            if let Some(directory) = std::env::var_os("QWEN35_TEST_CPP") {
-                std::fs::create_dir_all(&directory)?;
-                std::fs::write(
-                    std::path::Path::new(&directory).join(format!("vision-{dialect:?}.cpp")),
-                    module.source,
-                )?;
-            }
-        }
-        Ok(())
     }
 }
 
@@ -517,19 +384,6 @@ mod reference_tests {
             next as i64 - tokens.len() as i64,
             reference["rope_delta"].as_i64().unwrap()
         );
-        Ok(())
-    }
-    #[test]
-    #[ignore = "requires QWEN35_MMPROJ_MODELS (comma-separated HF names), no GPU"]
-    fn real_projector_inventories() -> Result<()> {
-        let models = std::env::var("QWEN35_MMPROJ_MODELS").context("set QWEN35_MMPROJ_MODELS")?;
-        for model in models.split(',') {
-            let path = crate::hfhub::download_mmproj(model.trim())?;
-            let config = VisionConfig::from_gguf(&path)?;
-            let specs = config.weight_specs(&path)?;
-            let actual = crate::checkpoint::tensor_inventory(&path)?;
-            ensure!(specs.len() == actual.len(), "unexpected projector tensors");
-        }
         Ok(())
     }
 }

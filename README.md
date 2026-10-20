@@ -44,11 +44,32 @@ F32 recurrent workspace are preserved.
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
   --bench --pp 0 --tg 128 --tg-context 32 --bench-runs 5
 cargo test --all-targets
-CATENA_QWEN3_GPU_TESTS=1 cargo test -r --lib qwen:: -- --nocapture
 ```
 
-GPU tests are opt-in. Checkpoint tests accept `CATENA_QWEN3_MODEL`,
-`CATENA_QWEN35_MODEL`, and `CATENA_QWEN36_MODEL` as HF model selectors.
+The default tests need no GPU or model downloads. Run the example applications
+above and below to exercise model compilation and GPU execution.
+
+External-reference checks are ignored by default. For Qwen images, set
+`QWEN35_REFERENCE` to a reference directory and `QWEN35_MODEL` to an HF model
+selector; optionally set `QWEN35_MMPROJ_MODEL` for a separate projector repository.
+The native inference check requires a supported HIP GPU; the tokenizer check
+requires no GPU.
+
+```bash
+cargo test -r --test qwen35_images -- --ignored --nocapture
+```
+
+For Flux, set `FLUX_TEST_REFERENCE` to a reference dump directory and
+`FLUX_TEST_DUMP` to an output directory. This check requires a HIP GPU and the
+model weights, and enforces VAE accuracy; transformer error is diagnostic only.
+
+```bash
+cargo test -r --lib flux::kernel_tests::cached_components_match_reference -- --ignored --nocapture
+```
+
+Explicitly invoked reference checks fail if required inputs or hardware are
+unavailable.
+
 `CATENA_QWEN3_CPP` optionally exports generated C++ for diagnostics.
 `--generate-entrypoint` exports Qwen Hex without initializing a GPU.
 
