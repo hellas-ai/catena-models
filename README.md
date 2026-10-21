@@ -70,6 +70,21 @@ cargo test -r --lib flux::kernel_tests::cached_components_match_reference -- --i
 Explicitly invoked reference checks fail if required inputs or hardware are
 unavailable.
 
+The shared compiler adapter caches generated GPU C++ and its complete public ABI
+before native compilation. Repeated Qwen loads skip Hex parsing, checking and
+closure conversion. Cache keys include ordered source contents, compiler and
+stdlib changes (including uncommitted edits), backend, GPU dialect, and the
+adapter's source-pruning policy. Native GPU compilation still runs on each load.
+[Compilation measurements](COMPILATION_BENCHMARKS.md) compare kernel deduplication
+and cache reuse.
+
+`CATENA_COMPILE_TIMINGS=1` reports module-cache hits/misses and Hex compilation
+time. `CATENA_HEX_CACHE=0` disables the module cache; `CATENA_GPU_CACHE=0` also
+disables it. Override its directory with `CATENA_GPU_CACHE_DIR` (entries go under
+`hex/`); the default is `$XDG_CACHE_HOME/catena/gpu/hex`, falling back to
+`$HOME/.cache/catena/gpu/hex`. Invalid entries are rebuilt, and unavailable caches
+fall back to normal compilation.
+
 `CATENA_QWEN3_CPP` optionally exports generated C++ for diagnostics.
 `--generate-entrypoint` exports Qwen Hex without initializing a GPU.
 

@@ -41,6 +41,39 @@ pub fn compile(
     }
     Ok(module)
 }
+/// Compile source texts through the persistent compiler module cache.
+/// The cache includes this adapter's source-pruning policy and saves the full ABI.
+pub fn compile_sources<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
+    dialect: catena_lang::runtime::GpuDialect,
+) -> Result<catena_lang::runtime::RuntimeModule> {
+    use catena_lang::{codegen::CodegenKind, runtime::ModuleCache};
+    let started = std::time::Instant::now();
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let build = || {
+        compile(
+            metacat::theory::RawTheorySet::from_texts(sources.iter().copied())?,
+            dialect,
+        )
+    };
+    let module = match ModuleCache::from_sources(&sources, CodegenKind::Default, dialect) {
+        Some(cache) => cache
+            .with_context(include_str!("catena.rs"))
+            .get_or_compile(build)?,
+        None => build()?,
+    };
+    if std::env::var_os("CATENA_COMPILE_TIMINGS").is_some() {
+        eprintln!(
+            "[compile] Hex module ready in {:.3}s",
+            started.elapsed().as_secs_f64()
+        );
+    }
+    // Preserve diagnostics on cache hits as well as uncached builds.
+    if let Some(path) = std::env::var_os("CATENA_QWEN3_CPP") {
+        std::fs::write(path, &module.source)?;
+    }
+    Ok(module)
+}
 pub(crate) fn load_runtime<'a>(
     sources: impl IntoIterator<Item = &'a str>,
     dialect: catena_lang::runtime::GpuDialect,
@@ -48,7 +81,7 @@ pub(crate) fn load_runtime<'a>(
     catena_lang::runtime::Runtime,
     catena_lang::runtime::Artifact,
 )> {
-    let module = compile(metacat::theory::RawTheorySet::from_texts(sources)?, dialect)?;
+    let module = compile_sources(sources, dialect)?;
     let mut runtime = catena_lang::runtime::Runtime::new(dialect)?;
     let artifact = runtime.load(module)?;
     Ok((runtime, artifact))
