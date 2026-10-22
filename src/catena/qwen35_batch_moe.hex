@@ -1,3 +1,16 @@
+(def program stdlib.qwen35.batch.moe.launch-count : {(u64 val)} -> (u64 val) =
+ ([blocks.]
+  ({[.blocks] (const.u64.0x0000000000FFFFFE)} stdlib.qwen3.memory.u64.add [padded.])
+  ({[.padded] (const.u64.0x0000000000FFFFFF)} stdlib.qwen3.memory.u64.div)
+ ))
+
+(def program stdlib.qwen35.batch.moe.launch-size : {(u64 val) (u64 val)} -> (u64 val) =
+ ([blocks base.]
+  ({[.blocks] [.base]} stdlib.qwen3.memory.u64.sub [remaining.])
+  ({[.remaining] (const.u64.0x0000000000FFFFFF)} stdlib.qwen3.memory.u64.less [small.])
+  ({[.small] [.remaining] (const.u64.0x0000000000FFFFFF)} stdlib.qwen3.memory.select-u64)
+ ))
+
 # Batched router/top-k and expert kernels with compact per-token workspace.
 (def program stdlib.qwen35.batch.layout.router-f32 : 1 -> (u64 val) =
  (unit.elim (const.u64.0x0000000000000000)))
@@ -374,9 +387,10 @@
 
 
 (def program stdlib.qwen35.batch.moe.gate.kernel : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([unused-token input gate up shared-gate shared-up scratch memory thread.]
+ ([block-base input gate up shared-gate shared-up scratch memory thread.]
   ({[.thread]} stdlib.qwen3.perf.indices [indices.])
-  ([.indices] *.elim [block tid.])
+  ([.indices] *.elim [local-block tid.])
+  ({[.local-block] [.block-base]} stdlib.qwen3.memory.u64.add [block.])
   ([.scratch] stdlib.qwen3.memory.own-count-f32 [workspace-words.])
   ({[.workspace-words] (unit.intro stdlib.qwen35.batch.layout.stride-4)} stdlib.qwen3.memory.u64.div [tokens.])
   ({[.block] [.tokens]} stdlib.qwen3.memory.u64.rem [token.])
@@ -446,24 +460,32 @@
  ))
 
 
-(def program stdlib.qwen35.batch.moe.gate.host : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
- ([token input gate up shared-gate shared-up scratch grid memory pair.]
+(def program stdlib.qwen35.batch.moe.gate.host : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([token input gate up shared-gate shared-up scratch pair.]
   ([.pair] *.elim [i acc.])
-  ({[.token] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch] [.memory]} partial.stdlib.qwen35.batch.moe.gate.kernel.8 [kernel.])
+  ({[.i] (const.u64.0x0000000000FFFFFF)} stdlib.qwen3.memory.u64.mul [block-base.])
+  ([.scratch] stdlib.qwen3.memory.own-count-f32 [workspace-words.])
+  ({[.workspace-words] (unit.intro stdlib.qwen35.batch.layout.stride-4)} stdlib.qwen3.memory.u64.div [tokens.])
+  ({[.tokens] (const.u64.0x{{TOTAL_ACTIVE_SIZE}})} stdlib.qwen3.memory.u64.mul [blocks.])
+  ({[.blocks] [.block-base]} stdlib.qwen35.batch.moe.launch-size [launch-blocks.])
+  ({[.launch-blocks] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
+  ({(const.u64.0x0000000000000200) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
+  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
+  ({[.block-base] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch] [.memory]} partial.stdlib.qwen35.batch.moe.gate.kernel.8 [kernel.])
   ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
   [.acc]
  ))
 
 
-(def program stdlib.qwen35.batch.moe.gate.host.fold : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([token input gate up shared-gate shared-up scratch grid memory pair.]
+(def program stdlib.qwen35.batch.moe.gate.host.fold : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([token input gate up shared-gate shared-up scratch pair.]
   ([.pair] *.elim [index rest.])
   ([.rest] *.elim [fold-value proofs.])
   ([.proofs] *.elim [less truth.])
   ([.less] unsafe.discard unit.elim)
   ([.index] :.forget [i.])
   ({[.i] [.fold-value]} *.intro [arguments.])
-  ({[.token] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch] [.grid] [.memory] [.arguments]} stdlib.qwen35.batch.moe.gate.host [fold-result.])
+  ({[.token] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch] [.arguments]} stdlib.qwen35.batch.moe.gate.host [fold-result.])
   ({[.fold-result] [.truth]} *.intro)
  ))
 
@@ -473,11 +495,9 @@
   ({[.scratch]} stdlib.qwen3.memory.own-count-f32 [workspace-words.])
   ({[.workspace-words] (unit.intro stdlib.qwen35.batch.layout.stride-4)} stdlib.qwen3.memory.u64.div [tokens.])
   ({[.tokens] (const.u64.0x{{TOTAL_ACTIVE_SIZE}})} stdlib.qwen3.memory.u64.mul [blocks.])
-  ({[.blocks] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
-  ({(const.u64.0x0000000000000200) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
-  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
-  ({[.token] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch] [.grid] [.memory]} partial.stdlib.qwen35.batch.moe.gate.host.fold.9 [callback.])
-  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.token] [.input] [.gate] [.up] [.shared-gate] [.shared-up] [.scratch]} partial.stdlib.qwen35.batch.moe.gate.host.fold.7 [callback.])
+  ([.blocks] stdlib.qwen35.batch.moe.launch-count [launches.])
+  ({[.launches] (unit.intro meta.master.end)} smolcat.value.named_at [end.])
   ({[.end] [.scratch] [.callback] (core.truth)} core.fold.bounded_u64 [complete proof.])
   ([.proof] unsafe.discard unit.elim)
   [.complete]
@@ -564,9 +584,10 @@
 
 
 (def program stdlib.qwen35.batch.moe.down.kernel : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([unused-token scratch down shared-down residual out memory thread.]
+ ([block-base scratch down shared-down residual out memory thread.]
   ({[.thread]} stdlib.qwen3.perf.indices [indices.])
-  ([.indices] *.elim [block tid.])
+  ([.indices] *.elim [local-block tid.])
+  ({[.local-block] [.block-base]} stdlib.qwen3.memory.u64.add [block.])
   ([.scratch] stdlib.qwen3.memory.own-count-f32 [workspace-words.])
   ({[.workspace-words] (unit.intro stdlib.qwen35.batch.layout.stride-4)} stdlib.qwen3.memory.u64.div [tokens.])
   ({[.block] [.tokens]} stdlib.qwen3.memory.u64.rem [token.])
@@ -600,24 +621,32 @@
  ))
 
 
-(def program stdlib.qwen35.batch.moe.down.host : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
- ([token scratch down shared-down residual out grid memory pair.]
+(def program stdlib.qwen35.batch.moe.down.host : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
+ ([token scratch down shared-down residual out pair.]
   ([.pair] *.elim [i acc.])
-  ({[.token] [.scratch] [.down] [.shared-down] [.residual] [.out] [.memory]} partial.stdlib.qwen35.batch.moe.down.kernel.7 [kernel.])
+  ({[.i] (const.u64.0x0000000000FFFFFF)} stdlib.qwen3.memory.u64.mul [block-base.])
+  ([.scratch] stdlib.qwen3.memory.own-count-f32 [workspace-words.])
+  ({[.workspace-words] (unit.intro stdlib.qwen35.batch.layout.stride-4)} stdlib.qwen3.memory.u64.div [tokens.])
+  ({[.tokens] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen3.memory.u64.mul [blocks.])
+  ({[.blocks] [.block-base]} stdlib.qwen35.batch.moe.launch-size [launch-blocks.])
+  ({[.launch-blocks] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
+  ({(const.u64.0x0000000000000200) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
+  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
+  ({[.block-base] [.scratch] [.down] [.shared-down] [.residual] [.out] [.memory]} partial.stdlib.qwen35.batch.moe.down.kernel.7 [kernel.])
   ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
   [.acc]
  ))
 
 
-(def program stdlib.qwen35.batch.moe.down.host.fold : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([token scratch down shared-down residual out grid memory pair.]
+(def program stdlib.qwen35.batch.moe.down.host.fold : {(u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([token scratch down shared-down residual out pair.]
   ([.pair] *.elim [index rest.])
   ([.rest] *.elim [fold-value proofs.])
   ([.proofs] *.elim [less truth.])
   ([.less] unsafe.discard unit.elim)
   ([.index] :.forget [i.])
   ({[.i] [.fold-value]} *.intro [arguments.])
-  ({[.token] [.scratch] [.down] [.shared-down] [.residual] [.out] [.grid] [.memory] [.arguments]} stdlib.qwen35.batch.moe.down.host [fold-result.])
+  ({[.token] [.scratch] [.down] [.shared-down] [.residual] [.out] [.arguments]} stdlib.qwen35.batch.moe.down.host [fold-result.])
   ({[.fold-result] [.truth]} *.intro)
  ))
 
@@ -629,11 +658,9 @@
   ({[.tokens] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen3.memory.u64.mul [output-count.])
   ({[.output-count]} stdlib.qwen3.memory.alloc-bf16 [out.])
   ({[.tokens] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen3.memory.u64.mul [blocks.])
-  ({[.blocks] (const.u64.0x0000000000000100)} stdlib.qwen3.perf.grid [grid.])
-  ({(const.u64.0x0000000000000200) (const.u64.0x0000000000000001)} stdlib.qwen3.perf.layout [layout.])
-  ({[.grid] [.layout]} stdlib.qwen3.perf.reserve [memory.])
-  ({[.token] [.scratch] [.down] [.shared-down] [.residual] [.out] [.grid] [.memory]} partial.stdlib.qwen35.batch.moe.down.host.fold.8 [callback.])
-  ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+  ({[.token] [.scratch] [.down] [.shared-down] [.residual] [.out]} partial.stdlib.qwen35.batch.moe.down.host.fold.6 [callback.])
+  ([.blocks] stdlib.qwen35.batch.moe.launch-count [launches.])
+  ({[.launches] (unit.intro meta.master.end)} smolcat.value.named_at [end.])
   ({[.end] [.out] [.callback] (core.truth)} core.fold.bounded_u64 [complete proof.])
   ([.proof] unsafe.discard unit.elim)
   [.complete]
