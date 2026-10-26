@@ -85,7 +85,7 @@ impl Model {
     ) -> Result<Self> {
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
-        crate::qwen::validate(&config, options, Some(dialect))?;
+        crate::qwen::validate(&config, options)?;
         let specs = weight_specs(&config)?;
         let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();

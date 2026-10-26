@@ -9,6 +9,17 @@ shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
 their normal meanings. Qwen tokenizers and model dimensions come from GGUF.
 BF16/F32 checkpoint weights retain their native storage.
 
+## GPU selection
+
+HIP is the default. Set `CATENA_GPU_DIALECT=cuda` to use CUDA for any application,
+including Qwen images, Flux, Whisper, and MMS TTS:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --prompt 'Gravity is'
+CATENA_GPU_DIALECT=cuda cargo run -r --bin whisper-asr -- speech.wav
+```
+
 ## Qwen text and images
 
 ```bash
@@ -22,11 +33,6 @@ The `:variant` suffix selects an unambiguous checkpoint, including split BF16
 checkpoints. Image projectors come from the same repository or an explicit
 `--mmproj-model`. Multiple `--image` arguments preserve their order;
 `--image-max-pixels` limits resized image area.
-
-Qwen always uses BF16 on HIP gfx11. Qwen3 dense supports `--kernels fused`
-(the default) and `--kernels reference`; Qwen3.5/3.6 requires fused kernels.
-The older Qwen3 MoE architecture and Qwen CUDA execution are unsupported.
-Compiler, precision, WMMA, BLAS, and legacy attention selectors have been removed.
 
 The Rust source renderers live under `src/qwen`; shared and model-specific Hex
 kernels live under `src/catena`. Hex owns allocation, scheduling, layer execution,
@@ -52,16 +58,16 @@ above and below to exercise model compilation and GPU execution.
 External-reference checks are ignored by default. For Qwen images, set
 `QWEN35_REFERENCE` to a reference directory and `QWEN35_MODEL` to an HF model
 selector; optionally set `QWEN35_MMPROJ_MODEL` for a separate projector repository.
-The native inference check requires a supported HIP GPU; the tokenizer check
-requires no GPU.
+The native inference check requires a supported HIP or CUDA GPU; the tokenizer
+check requires no GPU.
 
 ```bash
 cargo test -r --test qwen35_images -- --ignored --nocapture
 ```
 
 For Flux, set `FLUX_TEST_REFERENCE` to a reference dump directory and
-`FLUX_TEST_DUMP` to an output directory. This check requires a HIP GPU and the
-model weights, and enforces VAE accuracy; transformer error is diagnostic only.
+`FLUX_TEST_DUMP` to an output directory. This check requires a HIP or CUDA GPU
+and the model weights, and enforces VAE accuracy; transformer error is diagnostic only.
 
 ```bash
 cargo test -r --lib flux::kernel_tests::cached_components_match_reference -- --ignored --nocapture
