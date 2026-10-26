@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use catena_qwen3::{
+use catena_models::{
     tts::{self, Config, Options, Tts},
     weights::Weights,
 };

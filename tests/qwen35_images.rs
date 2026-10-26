@@ -1,6 +1,6 @@
 //! Checkpoint-backed checks are opt-in; ordinary tests need no GPU or downloads.
 use anyhow::{Context, Result, ensure};
-use catena_qwen3::{
+use catena_models::{
     catena::InferenceOptions,
     hfhub::{download_gguf, download_mmproj},
     model::{Model, configured_gpu_dialect},

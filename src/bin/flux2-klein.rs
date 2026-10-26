@@ -1,5 +1,5 @@
 use anyhow::Result;
-use catena_qwen3::{flux::config, weights::Weights};
+use catena_models::{flux::config, weights::Weights};
 use clap::Parser;
 use std::path::PathBuf;
 #[derive(Parser)]
@@ -50,7 +50,7 @@ fn main() -> Result<()> {
     let v: config::VaeConfig = config::read(p.join("vae/config.json"))?;
     v.validate()?;
     if let Some(dir) = &a.generate_entrypoint {
-        let options = catena_qwen3::flux::pipeline::GenerationOptions {
+        let options = catena_models::flux::pipeline::GenerationOptions {
             prompt: String::new(),
             output: a.output.clone(),
             seed: a.seed,
@@ -62,10 +62,10 @@ fn main() -> Result<()> {
         };
         options.validate()?;
         let debug = a.dump_dir.is_some();
-        let text = catena_qwen3::flux::text::generated_source_with_debug(&t.qwen()?, debug)?;
+        let text = catena_models::flux::text::generated_source_with_debug(&t.qwen()?, debug)?;
         let denoise =
-            catena_qwen3::flux::graph::transformer(&d, a.height, a.width, a.steps, debug)?;
-        let vae = catena_qwen3::flux::graph::vae(&v, a.height, a.width, debug)?;
+            catena_models::flux::graph::transformer(&d, a.height, a.width, a.steps, debug)?;
+        let vae = catena_models::flux::graph::vae(&v, a.height, a.width, debug)?;
         std::fs::create_dir_all(dir)?;
         for (name, source) in [
             ("flux-encode-text.hex", text),
@@ -73,7 +73,7 @@ fn main() -> Result<()> {
             ("flux-decode-image.hex", vae.source),
         ] {
             let path = dir.join(name);
-            std::fs::write(&path, catena_qwen3::flux::graph::bundle(&source))?;
+            std::fs::write(&path, catena_models::flux::graph::bundle(&source))?;
             println!("generated {}", path.display());
         }
         return Ok(());
@@ -93,7 +93,7 @@ fn main() -> Result<()> {
     if a.inspect {
         return Ok(());
     }
-    let options = catena_qwen3::flux::pipeline::GenerationOptions {
+    let options = catena_models::flux::pipeline::GenerationOptions {
         prompt: a
             .prompt
             .ok_or_else(|| anyhow::anyhow!("--prompt is required for generation"))?,
@@ -105,5 +105,5 @@ fn main() -> Result<()> {
         dump_dir: a.dump_dir,
         noise: a.noise,
     };
-    catena_qwen3::flux::pipeline::FluxPipeline::new(p)?.generate(&options)
+    catena_models::flux::pipeline::FluxPipeline::new(p)?.generate(&options)
 }
