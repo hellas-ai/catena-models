@@ -158,8 +158,9 @@ impl Weights {
                     continue;
                 }
                 ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16 or F32");
-                // Matrix kernels require naturally aligned scalars, not a GGUF-specific tensor alignment.
-                if t.offset % 2 != 0 {
+                // CUDA weights live in device memory. HIP can map aligned BF16
+                // tensors directly; unaligned tensors need an owned upload.
+                if runtime.dialect() == GpuDialect::Cuda || t.offset % 2 != 0 {
                     let bytes = &self.shards[t.file].bytes[t.offset..t.offset + t.len];
                     let values: Vec<_> = bytes
                         .chunks_exact(2)
@@ -170,7 +171,7 @@ impl Weights {
                 } else if self.shards[t.file].registration.is_none() {
                     self.shards[t.file].registration = Some(GpuRegistration::new(
                         &self.shards[t.file].bytes,
-                        GpuDialect::Hip,
+                        runtime.dialect(),
                     )?);
                 }
             }

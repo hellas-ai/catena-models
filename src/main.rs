@@ -77,10 +77,7 @@ struct Args {
 }
 
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
-    ensure!(
-        catena_models::model::configured_gpu_dialect()? == catena_lang::runtime::GpuDialect::Hip,
-        "BF16 Qwen inference requires HIP gfx11; CUDA is not supported"
-    );
+    catena_models::model::configured_gpu_dialect()?;
     Ok(InferenceOptions::default().with_kernels(args.kernels))
 }
 

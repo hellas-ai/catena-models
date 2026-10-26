@@ -4,7 +4,6 @@ use crate::{
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 use anyhow::{Result, ensure};
-use catena_lang::codegen::GpuDialect;
 use std::fmt::Write;
 
 #[path = "fused.rs"]
@@ -32,7 +31,6 @@ const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 pub(crate) fn validate(
     config: &ModelConfig,
     options: InferenceOptions,
-    dialect: Option<GpuDialect>,
 ) -> Result<()> {
     ensure!(
         matches!(
@@ -42,10 +40,6 @@ pub(crate) fn validate(
                 | ModelArchitecture::Qwen35Moe
         ),
         "codegen supports dense Qwen3 and dense/MoE Qwen3.5 text models only"
-    );
-    ensure!(
-        dialect.is_none_or(|d| d == GpuDialect::Hip),
-        "BF16 Qwen3 requires HIP gfx11; CUDA is not supported"
     );
     ensure!(
         [
@@ -120,7 +114,7 @@ pub(crate) fn validate(
 }
 
 pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
-    validate(config, options, None)?;
+    validate(config, options)?;
     ensure!(
         config.is_qwen35(),
         "image inputs require Qwen3.5 dense or MoE"
@@ -267,7 +261,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
 
 fn graph_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     config.validate()?;
-    validate(config, options, None)?;
+    validate(config, options)?;
     if matches!(
         config.architecture,
         ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
@@ -546,7 +540,7 @@ mod tests {
     fn qwen35_moe_validates_routing_and_workspace() -> Result<()> {
         let options = InferenceOptions::default();
         let config = ModelConfig::qwen36_35b_a3b();
-        validate(&config, options, Some(GpuDialect::Hip))?;
+        validate(&config, options)?;
         assert!(source(&config, options)?.contains("qwen3.init"));
         for (experts, selected, shared) in [
             (257, 8, Some(512)),
@@ -559,25 +553,33 @@ mod tests {
             bad.num_experts = experts;
             bad.experts_per_token = selected;
             bad.shared_expert_intermediate_size = shared;
-            assert!(validate(&bad, options, None).is_err());
+            assert!(validate(&bad, options).is_err());
         }
         for head in [512, 1024] {
             let mut bad = config.clone();
             bad.head_dim = head;
-            assert!(validate(&bad, options, None).is_err());
+            assert!(validate(&bad, options).is_err());
             let mut bad = config.clone();
             bad.linear_state_size = Some(head);
-            assert!(validate(&bad, options, None).is_err());
+            assert!(validate(&bad, options).is_err());
         }
-        assert!(validate(&config, options.with_kernels(KernelKind::Reference), None).is_err());
+        assert!(validate(&config, options.with_kernels(KernelKind::Reference)).is_err());
         Ok(())
     }
     #[test]
-    fn unsupported_options_are_rejected_before_compilation() {
+    fn both_dialects_preserve_kernel_restrictions() {
         let c = ModelConfig::qwen3_0_6b();
         let options = InferenceOptions::default().with_kernels(KernelKind::Reference);
 
         assert!(source(&ModelConfig::qwen35_0_8b(), options).is_err());
-        assert!(validate(&c, options, Some(GpuDialect::Cuda)).is_err());
+            assert!(validate(&c, options).is_ok());
+            assert!(validate(&ModelConfig::qwen35_0_8b(), options).is_err());
+            assert!(
+                validate(
+                    &ModelConfig::qwen35_0_8b(),
+                    InferenceOptions::default()
+                )
+                .is_ok()
+            );
     }
 }

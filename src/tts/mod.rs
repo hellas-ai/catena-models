@@ -6,10 +6,7 @@ use crate::{
     weights::{Weights, bf16},
 };
 use anyhow::{Context, Result, bail, ensure};
-use catena_lang::{
-    codegen::GpuDialect,
-    runtime::{Artifact, MemOwn, Runtime, Value},
-};
+use catena_lang::runtime::{Artifact, MemOwn, Runtime, Value};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -216,7 +213,7 @@ impl Tts {
             crate::catena::core_sources()
                 .map(|s| -> &str { s })
                 .chain([source.as_str()]),
-            GpuDialect::Hip,
+            crate::model::configured_gpu_dialect()?,
         )
         .context("compiling MMS TTS Hex")?;
         let ordinary = bindings()

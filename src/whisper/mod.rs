@@ -4,10 +4,7 @@ pub mod hub;
 mod kernels;
 use crate::weights::Weights;
 use anyhow::{Context, Result, bail, ensure};
-use catena_lang::{
-    codegen::GpuDialect,
-    runtime::{Artifact, MemOwn, Runtime, Value},
-};
+use catena_lang::runtime::{Artifact, MemOwn, Runtime, Value};
 use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -251,9 +248,11 @@ impl Whisper {
             "tokenizer vocabulary does not match model"
         );
         let source = graph::bundle(&config, debug)?;
-        let (runtime, artifact) =
-            crate::catena::load_runtime(crate::catena::runtime_sources(&source), GpuDialect::Hip)
-                .context("compiling Whisper Hex graphs")?;
+        let (runtime, artifact) = crate::catena::load_runtime(
+            crate::catena::runtime_sources(&source),
+            crate::model::configured_gpu_dialect()?,
+        )
+        .context("compiling Whisper Hex graphs")?;
         let names: BTreeSet<_> = graph::encoder_names(&config)
             .into_iter()
             .chain(graph::cross_names(&config))

@@ -1,9 +1,6 @@
 pub(crate) use crate::weights::startup_timing;
 use anyhow::{Context, Result, ensure};
-use catena_lang::{
-    codegen::GpuDialect,
-    runtime::{Artifact, MemOwn, MemRef, Runtime, Value},
-};
+use catena_lang::runtime::{Artifact, MemOwn, MemRef, Runtime, Value};
 pub struct Ops {
     pub runtime: Runtime,
     pub artifact: Artifact,
@@ -12,9 +9,11 @@ pub struct Ops {
 impl Ops {
     pub fn new(extra: Option<&str>) -> Result<Self> {
         let source = super::kernels::bundle(extra.unwrap_or(""));
-        let (runtime, artifact) =
-            crate::catena::load_runtime(crate::catena::runtime_sources(&source), GpuDialect::Hip)
-                .context("compiling Flux kernels")?;
+        let (runtime, artifact) = crate::catena::load_runtime(
+            crate::catena::runtime_sources(&source),
+            crate::model::configured_gpu_dialect()?,
+        )
+        .context("compiling Flux kernels")?;
         let zero = runtime.mem_f32(&[0.])?;
         Ok(Self {
             runtime,
