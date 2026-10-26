@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use catena_qwen3::whisper::{self, Config, Options, Whisper};
+use catena_models::whisper::{self, Config, Options, Whisper};
 use clap::Parser;
 use std::path::PathBuf;
 #[derive(Parser)]
@@ -40,7 +40,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if a.inspect {
-        let w = catena_qwen3::weights::Weights::open(&model_dir.join("model.safetensors"))?;
+        let w = catena_models::weights::Weights::open(&model_dir.join("model.safetensors"))?;
         whisper::validate_weights(&w, &config)?;
         eprintln!(
             "Whisper: {} tensors, {:.2} GiB",

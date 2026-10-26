@@ -311,7 +311,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "catena-qwen3"
+name = "catena-models"
 version = "0.1.0"
 dependencies = [
  "anyhow",

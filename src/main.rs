@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Result, ensure};
-use catena_qwen3::{
+use catena_models::{
     catena::{InferenceOptions, KernelKind, generated_model_source_for_options},
     checkpoint::read_gguf_model_config,
     hfhub::{download_gguf, download_mmproj},
@@ -78,7 +78,7 @@ struct Args {
 
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
     ensure!(
-        catena_qwen3::model::configured_gpu_dialect()? == catena_lang::runtime::GpuDialect::Hip,
+        catena_models::model::configured_gpu_dialect()? == catena_lang::runtime::GpuDialect::Hip,
         "BF16 Qwen inference requires HIP gfx11; CUDA is not supported"
     );
     Ok(InferenceOptions::default().with_kernels(args.kernels))
@@ -134,7 +134,7 @@ fn main() -> Result<()> {
             "image inputs require a Qwen3.5 dense or MoE model"
         );
         let path = download_mmproj(args.mmproj_model.as_deref().unwrap_or(&args.model))?;
-        let vision_config = catena_qwen3::vision::VisionConfig::from_gguf(&path)?;
+        let vision_config = catena_models::vision::VisionConfig::from_gguf(&path)?;
         ensure!(
             vision_config.output_size == config.hidden_size,
             "projector output width does not match language model"

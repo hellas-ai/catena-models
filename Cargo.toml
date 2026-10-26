@@ -1,8 +1,8 @@
 [package]
-name = "catena-qwen3"
+name = "catena-models"
 version = "0.1.0"
 edition = "2024"
-default-run = "catena-qwen3"
+default-run = "catena-models"
 
 [dependencies]
 anyhow = "1.0"
