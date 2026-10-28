@@ -992,35 +992,9 @@
   [. x9]
  ))
 
-# Checked U64-to-U32 conversion expressed as a 32-step fold.
-# Vocabulary sizes and cache positions can exceed the original 8-bit helper.
+# Checked loop-count narrowing lowers to one bounds check and a native cast.
 (def program stdlib.qwen3.memory.fold-count-u32 : {(u64 val)} -> (u32 val) =
- ([count.]
-  ([.] const.u64.0x00000000FFFFFFFF [x0.])
-  ([.count x0] stdlib.qwen3.memory.u64.less_equal [x1.])
-  ([.] unit.intro meta.master.predicate [x2.])
-  ([.x1 x2] smolcat.value.named_at [x3.])
-  ([.x3] stdlib.assert.assert_true [x4 x5.])
-  ([.x4] unit.elim)
-  ([.x5] unsafe.discard unit.elim)
-  ([.] const.u64.0x0000000080000000 [x6.])
-  ([.] const.u32.0x80000000 [x7.])
-  ([.] const.u32.0x00000000 [x8.])
-  ([.x7 x8] *.intro [x9.])
-  ([.x6 x9] *.intro [x10.])
-  ([.count x10] *.intro [x11.])
-  ([.] name.stdlib.qwen3.memory.fold-count-step.master-fold-u32 lift [x12.])
-  ([.] const.u32.0x00000020 [x13.])
-  ([.] unit.intro meta.master.end [x14.])
-  ([.x13 x14] smolcat.value.named_at [x15.])
-  ([.] core.truth [x16.])
-  ([.x15 x11 x12 x16] core.fold.bounded [x17 x18.])
-  ([.x18] unsafe.discard unit.elim)
-  ([.x17] *.elim [x19 x20.])
-  ([.x20] *.elim [x21 x22.])
-  ([.x22] *.elim [x23 x24.])
-  [. x24]
- ))
+ ([count.] [.count] stdlib.numeric.u64_to_u32))
 
 (def program stdlib.qwen3.memory.bf16.add : {(bf16 val) (bf16 val)} -> (bf16 val) =
  ([a b.]

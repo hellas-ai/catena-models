@@ -10,6 +10,17 @@ const SCRATCH: [&str; 7] = [
 const TRIPLE: &str = "({((cap.own mem) val) ({((cap.own mem) val) ((cap.own mem) val)} *)} *)";
 const FOLDED: &str = "({({master.index32 u32} :) ({({((cap.own mem) val) ({((cap.own mem) val) ((cap.own mem) val)} *)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)";
 
+#[derive(Clone, Copy)]
+pub(super) struct WmmaStages {
+    pub projections: bool,
+    pub experts: bool,
+    pub attention: bool,
+    pub exact_gate: bool,
+    pub exact_context: bool,
+    pub safe_experts: bool,
+    pub safe_scores: bool,
+}
+
 fn finish(s: &mut String) {
     s.push_str("\n ))\n");
 }
@@ -47,7 +58,14 @@ fn selector(s: &mut String, layers: &[usize], group: &str, tree: &str, kind: &st
     s.push_str(&selector);
 }
 
-fn emit_moe(s: &mut String, c0: &ModelConfig, _shadow_bytes: usize) -> Result<()> {
+fn emit_moe(
+    s: &mut String,
+    c0: &ModelConfig,
+    _shadow_bytes: usize,
+    wmma: bool,
+    exact: bool,
+    safe: bool,
+) -> Result<()> {
     let active = c0.experts_per_token * c0.intermediate_size;
     let shared = c0.shared_expert_intermediate_size.unwrap();
     let mut hex = [
@@ -55,6 +73,15 @@ fn emit_moe(s: &mut String, c0: &ModelConfig, _shadow_bytes: usize) -> Result<()
         include_str!("../catena/qwen35_batch_moe.hex"),
     ]
     .join("\n");
+    if wmma {
+        hex.push_str(include_str!("../catena/qwen35_wmma_moe.hex"));
+    }
+    if exact {
+        hex.push_str(include_str!("../catena/qwen35_exact_moe.hex"));
+    }
+    if safe {
+        hex.push_str(include_str!("../catena/qwen35_safe_moe.hex"));
+    }
     for (key, value) in [
         ("EXPERT_COUNT", c0.num_experts),
         ("TOP_K", c0.experts_per_token),
@@ -67,6 +94,7 @@ fn emit_moe(s: &mut String, c0: &ModelConfig, _shadow_bytes: usize) -> Result<()
         ("ACTIVE_WIDTH_PAIRS", active / 2),
         ("TOTAL_ACTIVE_SIZE", active + shared),
         ("SHARED_PAIRS", shared / 2),
+        ("SHARED_SIZE", shared),
         ("ROUTER_ROWS", c0.num_experts + 1),
     ] {
         hex = hex.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
@@ -431,6 +459,45 @@ fn replace_moe_decoder(s: &mut String, name: &str, linear: bool) -> Result<()> {
 }
 
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    // Diagnostic ablations are encoded in the generated source/cache key.
+    let scope = if options.wmma_prefill {
+        std::env::var("CATENA_WMMA_COMPONENTS").unwrap_or_else(|_| "all".into())
+    } else {
+        "none".into()
+    };
+    ensure!(
+        matches!(
+            scope.as_str(),
+            "all"
+                | "experts"
+                | "attention"
+                | "exact-experts"
+                | "exact-attention"
+                | "safe-experts"
+                | "safe-attention"
+                | "safe"
+                | "none"
+        ),
+        "CATENA_WMMA_COMPONENTS has an unknown ablation name"
+    );
+    let wmma = WmmaStages {
+        projections: scope == "all",
+        experts: matches!(
+            scope.as_str(),
+            "all" | "experts" | "exact-experts" | "safe-experts" | "safe"
+        ),
+        attention: matches!(
+            scope.as_str(),
+            "all" | "attention" | "exact-attention" | "safe-attention" | "safe"
+        ),
+        exact_gate: matches!(scope.as_str(), "exact-experts" | "safe-experts" | "safe"),
+        exact_context: matches!(
+            scope.as_str(),
+            "exact-attention" | "safe-attention" | "safe"
+        ),
+        safe_experts: matches!(scope.as_str(), "safe-experts" | "safe"),
+        safe_scores: matches!(scope.as_str(), "safe-attention" | "safe"),
+    };
     let full = (0..config.num_layers)
         .filter(|&l| config.layer_type(l) == LayerType::FullAttention)
         .collect::<Vec<_>>();
@@ -450,7 +517,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     base.num_experts = 0;
     base.experts_per_token = 0;
     base.shared_expert_intermediate_size = None;
-    let mut s = super::fused::source(&base, options)?;
+    let mut s = super::fused::source(&base, options.with_wmma_prefill(false))?;
     let cut = s
         .find("(def program stdlib.qwen3.select-layer.yes")
         .unwrap();
@@ -557,6 +624,14 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
         include_str!("../catena/qwen35_cached_delta.hex"),
     ]
     .join("\n");
+    if wmma.projections || wmma.experts || wmma.attention {
+        kernels.push_str(include_str!("../catena/qwen35_batch_wmma.hex"));
+        kernels.push_str(include_str!("../catena/qwen35_wmma_epilogues.hex"));
+        kernels.push_str(include_str!("../catena/qwen35_wmma_attention.hex"));
+    }
+    if wmma.exact_context {
+        kernels.push_str(include_str!("../catena/qwen35_exact_attention.hex"));
+    }
     if config.architecture == ModelArchitecture::Qwen35Moe {
         kernels.push_str(include_str!("../catena/qwen35_group_projection.hex"));
     }
@@ -708,7 +783,14 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
             .checked_mul(config.num_layers)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| anyhow::anyhow!("recurrent workspace overflow"))?;
-        emit_moe(&mut s, config, shadow_bytes)?;
+        emit_moe(
+            &mut s,
+            config,
+            shadow_bytes,
+            wmma.experts,
+            wmma.exact_gate,
+            wmma.safe_experts,
+        )?;
         emit_attention_branches(&mut s);
         replace_moe_decoder(&mut s, "qwen3.decoder-layer", false)?;
         replace_moe_decoder(&mut s, "qwen35.linear-decoder", true)?;
@@ -969,7 +1051,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     }
     if key_dim == 128 {
         let mut batch = String::new();
-        prefill::emit(&mut batch, config, &full_tree, &linear_tree);
+        prefill::emit(&mut batch, config, &full_tree, &linear_tree, wmma);
         let entry = s.rfind("(def program qwen3 :").unwrap();
         s.insert_str(entry, &batch);
     }

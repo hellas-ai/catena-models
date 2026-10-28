@@ -83,6 +83,10 @@ impl Model {
         dialect: GpuDialect,
         multimodal: bool,
     ) -> Result<Self> {
+        ensure!(
+            !options.wmma_prefill || dialect == GpuDialect::Hip,
+            "WMMA prefill requires the HIP backend on gfx11"
+        );
         let gguf_path = gguf_path.as_ref();
         let config = read_gguf_model_config(gguf_path)?;
         crate::qwen::validate(&config, options)?;

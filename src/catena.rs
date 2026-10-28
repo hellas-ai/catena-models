@@ -12,10 +12,15 @@ pub enum KernelKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InferenceOptions {
     pub kernels: KernelKind,
+    pub wmma_prefill: bool,
 }
 impl InferenceOptions {
     pub const fn with_kernels(mut self, kernels: KernelKind) -> Self {
         self.kernels = kernels;
+        self
+    }
+    pub const fn with_wmma_prefill(mut self, enabled: bool) -> Self {
+        self.wmma_prefill = enabled;
         self
     }
 }

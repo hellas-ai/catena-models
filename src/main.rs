@@ -23,6 +23,10 @@ struct Args {
     #[arg(long, value_enum, default_value_t = KernelKind::Fused)]
     kernels: KernelKind,
 
+    /// Use experimental RDNA3 tiled attention and expert prefill kernels.
+    #[arg(long)]
+    wmma_prefill: bool,
+
     /// Text prefix, or user-message text when images are supplied.
     #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image"])]
     prompt: Option<String>,
@@ -77,8 +81,14 @@ struct Args {
 }
 
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
-    catena_models::model::configured_gpu_dialect()?;
-    Ok(InferenceOptions::default().with_kernels(args.kernels))
+    let dialect = catena_models::model::configured_gpu_dialect()?;
+    ensure!(
+        !args.wmma_prefill || dialect == catena_lang::runtime::GpuDialect::Hip,
+        "--wmma-prefill requires the HIP backend on gfx11"
+    );
+    Ok(InferenceOptions::default()
+        .with_kernels(args.kernels)
+        .with_wmma_prefill(args.wmma_prefill))
 }
 
 fn main() -> Result<()> {

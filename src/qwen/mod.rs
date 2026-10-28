@@ -28,10 +28,28 @@ const REF: &str = "((cap.ref mem) val)";
 const U64: &str = "(u64 val)";
 const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 
-pub(crate) fn validate(
-    config: &ModelConfig,
-    options: InferenceOptions,
-) -> Result<()> {
+pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
+    if options.wmma_prefill {
+        ensure!(
+            config.architecture == ModelArchitecture::Qwen35Moe,
+            "WMMA prefill currently requires Qwen3.5 MoE"
+        );
+        ensure!(
+            config.num_experts <= 256,
+            "WMMA prefill currently supports at most 256 routed experts"
+        );
+        ensure!(
+            config.hidden_size.is_multiple_of(16),
+            "WMMA prefill requires a hidden size divisible by 16"
+        );
+        ensure!(
+            config.intermediate_size.is_multiple_of(16)
+                && config
+                    .shared_expert_intermediate_size
+                    .is_some_and(|n| n.is_multiple_of(16)),
+            "WMMA expert projections require intermediate widths divisible by 16"
+        );
+    }
     ensure!(
         matches!(
             config.architecture,
@@ -567,19 +585,48 @@ mod tests {
         Ok(())
     }
     #[test]
+    fn wmma_prefill_is_scoped_to_moe() -> Result<()> {
+        let config = ModelConfig::qwen36_35b_a3b();
+        let enabled = InferenceOptions::default().with_wmma_prefill(true);
+        let accelerated = source(&config, enabled)?;
+        assert!(accelerated.contains("stdlib.qwen35.batch.wmma-project"));
+        assert!(accelerated.contains("wmma.mma-bf16-f32"));
+        let full_start = accelerated
+            .find("(def program stdlib.qwen35.batch.full :")
+            .unwrap();
+        let linear_start = accelerated
+            .find("(def program stdlib.qwen35.batch.linear :")
+            .unwrap();
+        assert_eq!(
+            accelerated[full_start..linear_start]
+                .matches("} stdlib.qwen35.batch.wmma-project [")
+                .count(),
+            3
+        );
+        let linear = &accelerated[linear_start..];
+        let end = linear[1..]
+            .find("(def program ")
+            .map_or(linear.len(), |n| n + 1);
+        assert!(!linear[..end].contains("} stdlib.qwen35.batch.wmma-project ["));
+        let original = source(&config, InferenceOptions::default())?;
+        assert!(!original.contains("stdlib.qwen35.batch.wmma-project"));
+        assert!(validate(&ModelConfig::qwen35_0_8b(), enabled).is_err());
+        let mut too_many_experts = config.clone();
+        too_many_experts.num_experts = 512;
+        assert!(validate(&too_many_experts, enabled).is_err());
+        let mut unaligned = config;
+        unaligned.hidden_size += 2;
+        assert!(validate(&unaligned, enabled).is_err());
+        Ok(())
+    }
+    #[test]
     fn both_dialects_preserve_kernel_restrictions() {
         let c = ModelConfig::qwen3_0_6b();
         let options = InferenceOptions::default().with_kernels(KernelKind::Reference);
 
         assert!(source(&ModelConfig::qwen35_0_8b(), options).is_err());
-            assert!(validate(&c, options).is_ok());
-            assert!(validate(&ModelConfig::qwen35_0_8b(), options).is_err());
-            assert!(
-                validate(
-                    &ModelConfig::qwen35_0_8b(),
-                    InferenceOptions::default()
-                )
-                .is_ok()
-            );
+        assert!(validate(&c, options).is_ok());
+        assert!(validate(&ModelConfig::qwen35_0_8b(), options).is_err());
+        assert!(validate(&ModelConfig::qwen35_0_8b(), InferenceOptions::default()).is_ok());
     }
 }
