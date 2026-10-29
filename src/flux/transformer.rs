@@ -22,6 +22,7 @@ impl Transformer {
         steps: usize,
         debug: bool,
     ) -> Result<Self> {
+        super::validate_backend()?;
         let config: TransformerConfig = read(snapshot.join("transformer/config.json"))?;
         config.validate()?;
         let mut weights =
