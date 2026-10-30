@@ -29,6 +29,14 @@ cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
 
+On RDNA3 HIP GPUs, `--wmma-prefill` enables experimental tiled attention,
+grouped expert projections, and BF16 matrix-core projections for Qwen3.5/3.6
+MoE prefill. The native WMMA path currently fails the full-model accuracy gate,
+so SIMT remains the default. Set `CATENA_WMMA_COMPONENTS=safe` with that flag
+to use the exact tiled expert and attention variant, which has a smaller speedup.
+See [prefill measurements](PREFILL_BENCHMARKS.md)
+for numerical checks and component ablations.
+
 The `:variant` suffix selects an unambiguous checkpoint, including split BF16
 checkpoints. Image projectors come from the same repository or an explicit
 `--mmproj-model`. Multiple `--image` arguments preserve their order;
@@ -116,13 +124,15 @@ cargo run -r --bin flux2-klein -- \
   --prompt 'A red fox sitting in a snowy forest' --output fox.png
 ```
 
-The text encoder and transformer use BF16 kernels; the VAE uses F32.
+The text encoder and transformer use BF16 WMMA projections and fused attention
+on gfx11 HIP GPUs; the VAE uses F32. Flux generation requires this HIP backend.
+See [WMMA implementation and measurements](FLUX_WMMA.md).
 `--width`, `--height`, `--steps`, `--seed`, and `--noise` control generation.
 `--dump-dir` exports intermediate tensors and `--startup-timings` reports startup
 costs. `--generate-entrypoint DIR` exports the three complete Hex stage assets.
-There is no backend selector. Exported assets require Catena's matching core
-library. Regenerate kernels with `python3 tools/generate-flux-kernels.py` and
-network compositions with `python3 scripts/generate-flux-networks.py`.
+Exported assets require Catena's matching core library. Regenerate WMMA kernels
+with `python3 tools/generate-flux-wmma-linear.py` and
+`python3 tools/generate-flux-wmma-attention.py`.
 
 ## MMS English TTS
 

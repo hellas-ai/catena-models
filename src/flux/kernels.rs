@@ -1,6 +1,15 @@
 //! Native kernels for the shared Flux graphs. This module only renders Hex.
 use anyhow::Result;
 
+pub(super) fn with_wmma(mut source: String) -> String {
+    source = source
+        .replace("} flux.linear-bf16", "} flux.wmma-linear-bf16")
+        .replace("} flux.attention-bf16", "} flux.wmma-fused-attention-bf16");
+    source.push_str(include_str!("../catena/flux_wmma_linear.hex"));
+    source.push_str(include_str!("../catena/flux_wmma_attention.hex"));
+    source
+}
+
 pub(super) fn bundle(source: &str) -> String {
     let mut out = include_str!("../catena/memory.hex").to_owned();
     for helper in [

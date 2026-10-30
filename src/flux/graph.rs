@@ -1072,7 +1072,7 @@ pub fn transformer(
     ] {
         extra += &owned_network(src, n);
     }
-    Ok(finish(
+    let mut program = finish(
         b.into_inner(),
         "denoise",
         &[
@@ -1081,7 +1081,9 @@ pub fn transformer(
         ],
         latents,
         &extra,
-    ))
+    );
+    program.source = super::kernels::with_wmma(program.source);
+    Ok(program)
 }
 pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Result<Program> {
     config.validate()?;

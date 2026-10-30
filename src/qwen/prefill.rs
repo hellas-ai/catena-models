@@ -33,8 +33,37 @@ fn finish_state(s: &mut String, cache: &str, shadow: &str, hidden: &str) {
     finish(s);
 }
 
-pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tree: &str) {
+pub(super) fn emit(
+    s: &mut String,
+    cfg: &ModelConfig,
+    full_tree: &str,
+    linear_tree: &str,
+    wmma: WmmaStages,
+) {
     let moe = cfg.architecture == ModelArchitecture::Qwen35Moe;
+    let project = if moe && wmma.projections {
+        "stdlib.qwen35.batch.wmma-project"
+    } else {
+        "stdlib.qwen35.batch.project"
+    };
+    let moe_ffn = if wmma.safe_experts {
+        "stdlib.qwen35.wmma.moe.ffn-safe"
+    } else if wmma.exact_gate {
+        "stdlib.qwen35.wmma.moe.ffn-exact"
+    } else if wmma.experts {
+        "stdlib.qwen35.wmma.moe.ffn"
+    } else {
+        "stdlib.qwen35.batch.moe.ffn"
+    };
+    let attention = if wmma.safe_scores && cfg.head_dim.is_multiple_of(16) {
+        "stdlib.qwen35.wmma.attention.run-safe"
+    } else if wmma.exact_context && cfg.head_dim.is_multiple_of(16) {
+        "stdlib.qwen35.wmma.attention.run-exact"
+    } else if wmma.attention && cfg.head_dim.is_multiple_of(16) {
+        "stdlib.qwen35.wmma.attention.run"
+    } else {
+        "stdlib.qwen35.batch.staged"
+    };
     let fcount = if moe { 16 } else { 11 };
     let lcount = if moe { 19 } else { 14 };
     let fg = nested_product(&vec![REF.to_owned(); fcount]);
@@ -69,7 +98,7 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
         call(
             s,
             &["normalized", weight, &c(cfg.hidden_size), &c(size)],
-            "stdlib.qwen35.batch.project",
+            project,
             out,
         );
     }
@@ -141,7 +170,7 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
             "key-base",
             "value-base",
         ],
-        "stdlib.qwen35.batch.staged",
+        attention,
         "context",
     );
     let mut ready = "context".to_owned();
@@ -159,7 +188,11 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
             &c(cfg.hidden_size),
             "hidden",
         ],
-        "stdlib.qwen35.batch.residual",
+        if wmma.projections && cfg.query_size().is_multiple_of(16) {
+            "stdlib.qwen35.wmma.projection.residual"
+        } else {
+            "stdlib.qwen35.batch.residual"
+        },
         "attention",
     );
     free(s, &ready, "attention", "attention-after-context");
@@ -169,7 +202,7 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
         let mut args = names(&["ffn-input", "attention-ready"]);
         args.extend(fw[8..].iter().cloned());
         let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        call(s, &refs, "stdlib.qwen35.batch.moe.ffn", "final-hidden");
+        call(s, &refs, moe_ffn, "final-hidden");
     } else {
         call(
             s,
@@ -217,6 +250,8 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
         call(
             s,
             &["normalized", w, &c(cfg.hidden_size), &c(size)],
+            // DeltaNet amplifies projection rounding differences through its
+            // recurrent state. Keep these four inputs on the exact SIMT tree.
             "stdlib.qwen35.batch.project",
             out,
         );
@@ -308,7 +343,11 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
             &c(cfg.hidden_size),
             "hidden",
         ],
-        "stdlib.qwen35.batch.residual",
+        if wmma.projections && cfg.linear_inner_size.unwrap().is_multiple_of(16) {
+            "stdlib.qwen35.wmma.projection.residual"
+        } else {
+            "stdlib.qwen35.batch.residual"
+        },
         "attention",
     );
     free(s, &ready, "attention", "attention-after-context");
@@ -318,7 +357,7 @@ pub(super) fn emit(s: &mut String, cfg: &ModelConfig, full_tree: &str, linear_tr
         let mut args = names(&["ffn-input", "attention-ready"]);
         args.extend(lw[11..].iter().cloned());
         let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        call(s, &refs, "stdlib.qwen35.batch.moe.ffn", "final-hidden");
+        call(s, &refs, moe_ffn, "final-hidden");
         finish_state(s, "history-ready", "shadow", "final-hidden");
     } else {
         call(

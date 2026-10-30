@@ -61,6 +61,7 @@ impl TextEncoder {
         Self::load_with_debug(snapshot, valid, false)
     }
     pub fn load_with_debug(snapshot: &Path, _valid: usize, debug: bool) -> Result<Self> {
+        super::validate_backend()?;
         let tc: TextConfig = read(snapshot.join("text_encoder/config.json"))?;
         let config = tc.qwen()?;
         let mut weights =
@@ -146,10 +147,10 @@ pub fn generated_source_with_debug(
     config: &crate::spec::ModelConfig,
     debug: bool,
 ) -> Result<String> {
-    super::kernels::text(config, debug)
+    Ok(super::kernels::with_wmma(super::kernels::text(
+        config, debug,
+    )?))
 }
-
-/// Select kernels at source-generation time; the runtime stage ABI is identical.
 
 /// Shared checkpoint argument order for standalone Hex assets.
 pub(super) fn weight_comments() -> String {
