@@ -53,7 +53,9 @@ fn decode_saved_256() -> Result<()> {
         program.source = program
             .source
             .replace("} flux.vae-conv-f32", "} flux.conv2d-f32")
-            .replace("} flux.vae-norm-f32", "} flux.norm-f32");
+            .replace("} flux.vae-norm-f32", "} flux.norm-f32")
+            .replace("} flux.vae-linear-f32-orr", "} flux.linear-f32-orr")
+            .replace("} flux.vae-attention-f32-ooo", "} flux.attention-f32-ooo");
         let source = graph::bundle(&program.source);
         let mut runtime = Runtime::new(GpuDialect::Hip)?;
         let artifact = runtime.load(compile_sources(runtime_sources(&source), GpuDialect::Hip)?)?;

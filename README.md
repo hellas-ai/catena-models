@@ -125,8 +125,9 @@ cargo run -r --bin flux2-klein -- \
 ```
 
 The text encoder and transformer use BF16 WMMA projections and fused attention
-on gfx11 HIP GPUs. The VAE uses WMMA convolutions with F32 accumulation,
-normalization, residuals, and RGB output. Flux generation requires this HIP backend.
+on gfx11 HIP GPUs. The VAE uses WMMA convolutions, projections, and tiled
+512-channel attention, with F32 accumulation, normalization, residuals, and RGB
+output. Flux generation requires this HIP backend.
 See [WMMA implementation and measurements](FLUX_WMMA.md).
 `--width`, `--height`, `--steps`, `--seed`, and `--noise` control generation.
 `--dump-dir` exports intermediate tensors and `--startup-timings` reports startup
@@ -134,7 +135,9 @@ costs. `--generate-entrypoint DIR` exports the three complete Hex stage assets.
 Exported assets require Catena's matching core library. Regenerate WMMA kernels
 with `python3 tools/generate-flux-wmma-linear.py` and
 `python3 tools/generate-flux-wmma-attention.py`; VAE kernels use
-`python3 tools/generate-flux-vae-wmma.py`. Timings separate VAE decode, RGB
+`python3 tools/generate-flux-vae-wmma.py` and
+`python3 tools/generate-flux-vae-attention.py`. The linear generator also emits
+the VAE's F32-interface projections. Timings separate VAE decode, RGB
 readback, and PNG conversion/write.
 
 ## MMS English TTS

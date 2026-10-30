@@ -1135,10 +1135,18 @@ pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Resu
     program.source = program
         .source
         .replace("} flux.conv2d-f32", "} flux.vae-conv-f32")
-        .replace("} flux.norm-f32", "} flux.vae-norm-f32");
+        .replace("} flux.norm-f32", "} flux.vae-norm-f32")
+        .replace("} flux.linear-f32-orr", "} flux.vae-linear-f32-orr")
+        .replace("} flux.attention-f32-ooo", "} flux.vae-attention-f32-ooo");
     program
         .source
         .push_str(include_str!("../catena/flux_vae_wmma.hex"));
+    program
+        .source
+        .push_str(include_str!("../catena/flux_vae_wmma_linear.hex"));
+    program
+        .source
+        .push_str(include_str!("../catena/flux_vae_wmma_attention.hex"));
     Ok(program)
 }
 

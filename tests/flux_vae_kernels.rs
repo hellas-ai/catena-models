@@ -137,3 +137,59 @@ fn convolution_and_group_norm_match_cpu() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+#[ignore = "requires gfx11 GPU; isolated large group-normalization timing"]
+fn large_group_norm() -> Result<()> {
+    let entry = r#"(def program test-group : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([x w b cols.] {[.x] [.w] [.b] (const.u64.0x0000000000000020) [.cols] [.cols] (const.u64.0x0000000000000002) (const.u64.0x0000000000000002) (const.u32.0x358637BD u32.bitcast-f32)} flux.vae-norm-f32))"#;
+    let old = entry
+        .replace("test-group", "chunk-group")
+        .replace("flux.vae-norm-f32", "flux.norm-f32");
+    let s = catena_models::flux::graph::bundle(
+        &[include_str!("../src/catena/flux_vae_wmma.hex"), entry, &old].join("\n"),
+    );
+    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let m = rt.load(compile_sources(
+        core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
+        GpuDialect::Hip,
+    )?)?;
+    let w = rt.mem_f32(&[1.; 32])?;
+    let b = rt.mem_f32(&[0.; 32])?;
+    for cols in [4096, 65536, 1048576] {
+        let x: Vec<f32> = (0..32 * cols).map(|i| (i % 29) as f32 / 29.).collect();
+        let x = rt.mem_f32(&x)?;
+        let mut previous = None;
+        for name in ["test-group", "chunk-group"] {
+            let start = std::time::Instant::now();
+            let [Value::MemOwn(out)] = m.exec(
+                name,
+                [
+                    x.as_ref().into(),
+                    w.as_ref().into(),
+                    b.as_ref().into(),
+                    (cols as u64).into(),
+                ],
+            )?
+            else {
+                panic!()
+            };
+            eprintln!(
+                "VAE {name} cols={cols}: {:.6}s",
+                start.elapsed().as_secs_f64()
+            );
+            let out = out.try_to_f32_vec()?;
+            if let Some(prev) = previous {
+                let prev: Vec<f32> = prev;
+                let error = out
+                    .iter()
+                    .zip(prev)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0., f32::max);
+                assert!(error < 0.0001, "group normalization max error {error}");
+            }
+            previous = Some(out);
+        }
+    }
+    Ok(())
+}
