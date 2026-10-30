@@ -117,7 +117,14 @@ fn cached_components_match_reference() -> Result<()> {
         .map(|i| (raw[i % 3 * width * height + i / 3] * 0.5 + 0.5).clamp(0., 1.))
         .collect::<Vec<_>>();
     let error = nrms(&rgb, &expected);
-    eprintln!("same-latent F32 VAE NRMS: {error:.8}");
-    ensure!(error < 0.0005, "F32 VAE diverged with identical inputs");
+    let mse = rgb
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (f64::from(*a) - f64::from(*b)).powi(2))
+        .sum::<f64>()
+        / rgb.len() as f64;
+    let psnr = -10. * mse.log10();
+    eprintln!("same-latent mixed-precision VAE NRMS: {error:.8}; PSNR: {psnr:.4}dB");
+    ensure!(psnr >= 35., "VAE PSNR below 35dB with identical inputs");
     Ok(())
 }

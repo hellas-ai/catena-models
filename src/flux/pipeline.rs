@@ -114,7 +114,11 @@ impl FluxPipeline {
         eprintln!("VAE load/compile: {:.2}s", t.elapsed().as_secs_f64());
         let t = Instant::now();
         let rgb = vae.decode(&latents, dump)?;
+        eprintln!("VAE decode: {:.2}s", t.elapsed().as_secs_f64());
+        let t = Instant::now();
         let values = rgb.try_to_f32_vec()?;
+        eprintln!("RGB readback: {:.4}s", t.elapsed().as_secs_f64());
+        let t = Instant::now();
         ensure!(
             values.iter().all(|v| v.is_finite()),
             "VAE produced non-finite pixels"
@@ -136,7 +140,7 @@ impl FluxPipeline {
         png.set_depth(png::BitDepth::Eight);
         png.write_header()?.write_image_data(&bytes)?;
         eprintln!(
-            "decode/write: {:.2}s; total: {:.2}s; output: {}",
+            "PNG convert/write: {:.4}s; total: {:.2}s; output: {}",
             t.elapsed().as_secs_f64(),
             total.elapsed().as_secs_f64(),
             o.output.display()
