@@ -1125,13 +1125,21 @@ pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Resu
         extra += src;
         extra += &owned_network(src, 1);
     }
-    Ok(finish(
+    let mut program = finish(
         b.into_inner(),
         "decode-image",
         &[("latents".into(), "((cap.ref mem) val)")],
         image,
         &extra,
-    ))
+    );
+    program.source = program
+        .source
+        .replace("} flux.conv2d-f32", "} flux.vae-conv-f32")
+        .replace("} flux.norm-f32", "} flux.vae-norm-f32");
+    program
+        .source
+        .push_str(include_str!("../catena/flux_vae_wmma.hex"));
+    Ok(program)
 }
 
 pub(crate) fn execute<'a>(
