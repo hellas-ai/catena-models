@@ -35,6 +35,7 @@ pub type QwenDecodeStream<'a> = DecodeStream<
 
 pub struct QwenTokenizer {
     inner: Tokenizer,
+    chat_template: Option<String>,
 }
 
 impl QwenTokenizer {
@@ -43,7 +44,10 @@ impl QwenTokenizer {
         let inner = Tokenizer::from_file(path)
             .map_err(|error| anyhow::anyhow!(error.to_string()))
             .with_context(|| format!("failed to load tokenizer {}", path.display()))?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            chat_template: None,
+        })
     }
 
     pub fn from_gguf(path: impl AsRef<Path>) -> Result<Option<Self>> {
@@ -159,7 +163,15 @@ impl QwenTokenizer {
             .map(|(id, _)| AddedToken::from(metadata.tokens[id].clone(), false).normalized(false))
             .collect::<Vec<_>>();
         inner.add_tokens(&user_tokens);
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            chat_template: metadata.chat_template,
+        })
+    }
+
+    /// Model-provided Jinja template, when loaded from a GGUF checkpoint.
+    pub fn chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref()
     }
 
     pub fn special_token_id(&self, token: &str) -> Result<u64> {

@@ -7,7 +7,15 @@ default-run = "catena-models"
 [dependencies]
 anyhow = "1.0"
 catena-lang = { git = "https://github.com/hellas-ai/catena-lang.git", branch = "master", version = "0.1.0" }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.5", features = ["derive", "env"] }
+axum = "0.8"
+http-body = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "signal", "sync", "macros"] }
+tokio-stream = "0.1"
+minijinja = { version = "2", features = ["json", "loop_controls"] }
+minijinja-contrib = { version = "2", features = ["pycompat"] }
 hf-hub = { version = "1.0.0", default-features = false, features = ["blocking", "rustls-tls"] }
 libc = "0.2"
 libloading = "0.9"
@@ -24,3 +32,6 @@ rand_chacha = "0.9"
 rand_distr = "0.5"
 hound = "3.5"
 rustfft = "6.4"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

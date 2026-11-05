@@ -64,6 +64,7 @@ struct TensorInfo {
 
 #[derive(Debug, Default)]
 pub(crate) struct GgufTokenizerMetadata {
+    pub(crate) chat_template: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) pre: Option<String>,
     pub(crate) tokens: Vec<String>,
@@ -1016,6 +1017,9 @@ fn parse_gguf_tokenizer_metadata(bytes: &[u8]) -> Result<Option<GgufTokenizerMet
         let key = cursor.string("metadata key")?.to_owned();
         let value_type = ValueType::from_u32(cursor.u32()?)?;
         match key.as_str() {
+            "tokenizer.chat_template" => {
+                metadata.chat_template = Some(cursor.string_value(value_type, &key)?.to_owned());
+            }
             "tokenizer.ggml.model" => {
                 metadata.model = Some(cursor.string_value(value_type, &key)?.to_owned());
             }
