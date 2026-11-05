@@ -102,7 +102,7 @@ pub(crate) fn generated_multimodal_source(
     crate::qwen::multimodal_source(config, options)
 }
 /// Keep primitive declarations and exported programs, following callback dependencies.
-pub(crate) fn prepare_sources(
+pub fn prepare_sources(
     raw: metacat::theory::RawTheorySet,
 ) -> Result<metacat::theory::RawTheorySet> {
     use std::collections::BTreeSet;
