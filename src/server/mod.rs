@@ -4,6 +4,11 @@ mod engine;
 mod output;
 mod prompt;
 mod protocol;
+mod responses;
+mod responses_output;
+#[cfg(test)]
+mod responses_tests;
+mod structured;
 #[cfg(test)]
 mod tests;
 mod tools;

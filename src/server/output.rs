@@ -101,6 +101,9 @@ impl OutputParser {
             calls: 0,
         }
     }
+    pub fn is_reasoning(&self) -> bool {
+        self.mode == Mode::Reasoning
+    }
     pub fn push(&mut self, text: &str) -> Result<Vec<Delta>, String> {
         self.pending.push_str(text);
         let mut out = Vec::new();

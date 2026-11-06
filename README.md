@@ -32,8 +32,8 @@ cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
 
-Use `--serve` to keep a Qwen model loaded and expose a text Chat Completions API,
-including streaming, reasoning output, and client-executed function tools:
+Use `--serve` to keep a Qwen model loaded and expose text Chat Completions and
+Responses APIs, including streaming, reasoning output, and client-executed tools:
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000

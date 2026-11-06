@@ -25,6 +25,7 @@ pub struct Generation {
     pub parallel: bool,
     pub max_tokens: Option<usize>,
     pub stops: Vec<String>,
+    pub structured: Option<Arc<super::structured::StructuredOutput>>,
 }
 #[derive(Clone, Debug)]
 pub enum Delta {
@@ -40,6 +41,7 @@ pub enum Event {
         reason: &'static str,
         prompt_tokens: usize,
         completion_tokens: usize,
+        reasoning_tokens: usize,
     },
     Failed(Failure),
 }
@@ -186,8 +188,20 @@ impl QwenBackend {
         })
     }
 }
-impl Backend for QwenBackend {
-    fn generate(&mut self, request: Generation, sink: &Sink) -> Result<(), Failure> {
+struct Attempt {
+    deltas: Vec<Delta>,
+    reason: &'static str,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    reasoning_tokens: usize,
+}
+impl QwenBackend {
+    fn generate_once(
+        &mut self,
+        request: &Generation,
+        sink: &Sink,
+        started: bool,
+    ) -> Result<Option<Attempt>, Failure> {
         let text = self
             .prompt
             .render(&request.messages, &request.tools, request.thinking)
@@ -212,43 +226,58 @@ impl Backend for QwenBackend {
             .filter(|&n| n <= self.ctx_size)
             .ok_or_else(|| Failure::invalid("prompt plus output limit exceeds --ctx-size"))?;
         if sink.cancelled() {
-            return Ok(());
+            return Ok(None);
         }
         let internal = |e: anyhow::Error| Failure::internal(format!("inference failed: {e:#}"));
         let mut session = self.model.session(capacity).map_err(internal)?;
-        if !sink.send(Event::Started) {
-            return Ok(());
+        if !started && !sink.send(Event::Started) {
+            return Ok(None);
         }
         let mut next = session.prefill_next_token(&tokens).map_err(internal)?;
         let mut decoder = self.tokenizer.decode_stream(false);
-        let mut stop = StopFilter::new(request.stops);
-        let mut parser = OutputParser::new(request.thinking, request.tools, request.parallel);
+        let mut stop = StopFilter::new(request.stops.clone());
+        let mut parser =
+            OutputParser::new(request.thinking, request.tools.clone(), request.parallel);
+        let mut deltas = Vec::new();
+        let mut emit = |delta: Delta| {
+            if request.structured.is_some() {
+                deltas.push(delta);
+                !sink.cancelled()
+            } else {
+                sink.send(Event::Delta(delta))
+            }
+        };
         let mut generated = 0;
+        let mut reasoning_tokens = 0;
         let mut length = true;
         for index in 0..max_tokens {
             if sink.cancelled() {
-                return Ok(());
+                return Ok(None);
             }
             if index > 0 {
                 next = session.decode_next_token(next).map_err(internal)?;
             }
             if sink.cancelled() {
-                return Ok(());
+                return Ok(None);
             }
             generated += 1;
             if self.stop_ids.contains(&next) {
                 length = false;
                 break;
             }
+            let was_reasoning = parser.is_reasoning();
             let chunk = decoder
                 .step(u32::try_from(next).map_err(|e| Failure::internal(e.to_string()))?)
                 .map_err(|e| Failure::internal(e.to_string()))?
                 .unwrap_or_default();
             let text = stop.push(&chunk);
             for delta in parser.push(&text).map_err(Failure::internal)? {
-                if !sink.send(Event::Delta(delta)) {
-                    return Ok(());
+                if !emit(delta) {
+                    return Ok(None);
                 }
+            }
+            if was_reasoning || parser.is_reasoning() {
+                reasoning_tokens += 1;
             }
             if stop.stopped {
                 length = false;
@@ -256,13 +285,13 @@ impl Backend for QwenBackend {
             }
         }
         for delta in parser.push(&stop.finish()).map_err(Failure::internal)? {
-            if !sink.send(Event::Delta(delta)) {
-                return Ok(());
+            if !emit(delta) {
+                return Ok(None);
             }
         }
         for delta in parser.finish(length).map_err(Failure::internal)? {
-            if !sink.send(Event::Delta(delta)) {
-                return Ok(());
+            if !emit(delta) {
+                return Ok(None);
             }
         }
         let reason = if length {
@@ -272,11 +301,88 @@ impl Backend for QwenBackend {
         } else {
             "stop"
         };
-        sink.send(Event::Done {
+        Ok(Some(Attempt {
+            deltas,
             reason,
             prompt_tokens: tokens.len(),
             completion_tokens: generated,
-        });
-        Ok(())
+            reasoning_tokens,
+        }))
+    }
+}
+
+impl Backend for QwenBackend {
+    fn generate(&mut self, mut request: Generation, sink: &Sink) -> Result<(), Failure> {
+        let budget = request.max_tokens.unwrap_or(512);
+        let mut prompt_tokens = 0;
+        let mut completion_tokens = 0;
+        let mut reasoning_tokens = 0;
+        for attempt in 0..3 {
+            let result = self
+                .generate_once(&request, sink, attempt > 0)
+                .map_err(|error| {
+                    if attempt == 0 {
+                        error
+                    } else {
+                        Failure::internal(format!(
+                            "structured output correction failed: {}",
+                            error.message
+                        ))
+                    }
+                })?;
+            let Some(result) = result else {
+                return Ok(());
+            };
+            prompt_tokens += result.prompt_tokens;
+            completion_tokens += result.completion_tokens;
+            reasoning_tokens += result.reasoning_tokens;
+            if let Some(format) = &request.structured {
+                let tool_turn = result
+                    .deltas
+                    .iter()
+                    .any(|delta| matches!(delta, Delta::Tool { .. }));
+                if result.reason != "length" && !tool_turn {
+                    let answer: String = result
+                        .deltas
+                        .iter()
+                        .filter_map(|delta| {
+                            if let Delta::Content(text) = delta {
+                                Some(text.as_str())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if let Err(error) = format.validate(&answer) {
+                        let remaining = budget.saturating_sub(completion_tokens);
+                        if attempt == 2 || remaining == 0 {
+                            return Err(Failure::internal(error));
+                        }
+                        tracing::debug!(target: "catena_models::server::structured", attempt=attempt+1, %error, "correcting structured output");
+                        // Keep failed candidates out of the replayed prompt: small
+                        // models otherwise tend to repeat the same invalid value.
+                        let correction = format.correction_instruction();
+                        request
+                            .messages
+                            .push(serde_json::json!({"role":"user","content":correction}));
+                        request.max_tokens = Some(remaining);
+                        continue;
+                    }
+                }
+            }
+            for delta in result.deltas {
+                if !sink.send(Event::Delta(delta)) {
+                    return Ok(());
+                }
+            }
+            sink.send(Event::Done {
+                reason: result.reason,
+                prompt_tokens,
+                completion_tokens,
+                reasoning_tokens,
+            });
+            return Ok(());
+        }
+        unreachable!("structured correction loop always returns")
     }
 }

@@ -49,6 +49,7 @@ impl Backend for Fake {
             },
             prompt_tokens: 4,
             completion_tokens: 2,
+            reasoning_tokens: usize::from(request.thinking),
         });
         Ok(())
     }
@@ -232,6 +233,7 @@ async fn queue_saturation_and_worker_unavailability() {
             parallel: true,
             max_tokens: None,
             stops: vec![],
+            structured: None,
         },
         output: out,
     })
@@ -290,6 +292,7 @@ async fn dropped_http_stream_cancels_generation_and_next_request_succeeds() {
                     reason: "stop",
                     prompt_tokens: 1,
                     completion_tokens: 1,
+                    reasoning_tokens: 0,
                 });
             }
             Ok(())
@@ -353,7 +356,7 @@ async fn malformed_oversized_and_unknown_requests_keep_error_envelopes() {
             StatusCode::METHOD_NOT_ALLOWED,
         ),
         (
-            "/v1/responses",
+            "/v1/not-an-endpoint",
             "POST",
             "{}".to_owned(),
             StatusCode::NOT_FOUND,
