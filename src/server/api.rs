@@ -38,6 +38,7 @@ pub fn router(state: ServerState) -> Router {
         .route("/health", get(health))
         .route("/v1/models", get(models))
         .route("/v1/chat/completions", post(chat))
+        .route("/v1/responses", post(super::responses::create))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "unknown endpoint") })
         .method_not_allowed_fallback(|| async {
             error(
@@ -50,7 +51,7 @@ pub fn router(state: ServerState) -> Router {
         .layer(axum::middleware::from_fn(super::protocol::log_messages))
         .with_state(state)
 }
-fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
+pub(super) fn authorize(state: &ServerState, headers: &HeaderMap) -> Result<(), StatusCode> {
     if let Some(key) = &state.key
         && headers.get("authorization").and_then(|v| v.to_str().ok())
             != Some(&format!("Bearer {key}"))
@@ -90,10 +91,10 @@ async fn models(State(state): State<ServerState>, headers: HeaderMap) -> Respons
 fn error_json(kind: &str, message: &str) -> Value {
     json!({"error":{"message":message,"type":kind,"param":null,"code":null}})
 }
-fn error(status: StatusCode, kind: &str, message: &str) -> Response {
+pub(super) fn error(status: StatusCode, kind: &str, message: &str) -> Response {
     (status, Json(error_json(kind, message))).into_response()
 }
-fn failure(f: Failure) -> Response {
+pub(super) fn failure(f: Failure) -> Response {
     if f.invalid_request {
         error(StatusCode::BAD_REQUEST, "invalid_request_error", &f.message)
     } else {
@@ -214,8 +215,15 @@ impl ChatRequest {
             parallel: self.parallel_tool_calls.unwrap_or(true),
             max_tokens,
             stops,
+            structured: None,
         })
     }
+}
+
+pub(super) fn normalize_chat(value: Value, model: &str) -> Result<Generation, String> {
+    serde_json::from_value::<ChatRequest>(value)
+        .map_err(|e| e.to_string())?
+        .normalize(model)
 }
 
 fn normalize_messages(messages: &[Value]) -> Result<Vec<Value>, String> {
@@ -368,11 +376,47 @@ impl Envelope {
         }
     }
 }
-fn usage(prompt: usize, completion: usize) -> Value {
-    json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion})
+fn usage(prompt: usize, completion: usize, cached: usize) -> Value {
+    json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion,"prompt_tokens_details":{"cached_tokens":cached}})
 }
 fn sse(value: Value) -> Result<SseEvent, Infallible> {
     Ok(SseEvent::default().data(value.to_string()))
+}
+
+pub(super) async fn enqueue(
+    state: &ServerState,
+    generation: Generation,
+) -> Result<mpsc::Receiver<Event>, Box<Response>> {
+    let (tx, mut rx) = mpsc::channel(32);
+    match state.jobs.try_send(Job {
+        request: generation,
+        output: tx,
+    }) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            return Err(Box::new(error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "inference queue is full",
+            )));
+        }
+        Err(_) => {
+            return Err(Box::new(error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "inference worker is unavailable",
+            )));
+        }
+    }
+    match rx.recv().await {
+        Some(Event::Started) => Ok(rx),
+        Some(Event::Failed(f)) => Err(Box::new(failure(f))),
+        _ => Err(Box::new(error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "inference worker stopped unexpectedly",
+        ))),
+    }
 }
 
 async fn chat(
@@ -408,38 +452,10 @@ async fn chat(
         Ok(r) => r,
         Err(e) => return error(StatusCode::BAD_REQUEST, "invalid_request_error", &e),
     };
-    let (tx, mut rx) = mpsc::channel(32);
-    match state.jobs.try_send(Job {
-        request: generation,
-        output: tx,
-    }) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            return error(
-                StatusCode::TOO_MANY_REQUESTS,
-                "rate_limit_error",
-                "inference queue is full",
-            );
-        }
-        Err(_) => {
-            return error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "server_error",
-                "inference worker is unavailable",
-            );
-        }
-    }
-    match rx.recv().await {
-        Some(Event::Started) => {}
-        Some(Event::Failed(f)) => return failure(f),
-        _ => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "inference worker stopped unexpectedly",
-            );
-        }
-    }
+    let mut rx = match enqueue(&state, generation).await {
+        Ok(rx) => rx,
+        Err(error) => return *error,
+    };
     let envelope = Envelope::new(state.model);
     let include_usage = request
         .stream_options
@@ -482,6 +498,8 @@ async fn chat(
                 reason,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
+                ..
             } => {
                 let mut message = json!({"role":"assistant","content":if content.is_empty() && !calls.is_empty() {Value::Null} else {json!(content)}});
                 if !reasoning.is_empty() {
@@ -490,7 +508,7 @@ async fn chat(
                 if !calls.is_empty() {
                     message["tool_calls"] = json!(calls);
                 }
-                return Json(json!({"id":envelope.id,"object":"chat.completion","created":envelope.created,"model":&*envelope.model,"choices":[{"index":0,"message":message,"finish_reason":reason}],"usage":usage(prompt_tokens,completion_tokens)})).into_response();
+                return Json(json!({"id":envelope.id,"object":"chat.completion","created":envelope.created,"model":&*envelope.model,"choices":[{"index":0,"message":message,"finish_reason":reason}],"usage":usage(prompt_tokens,completion_tokens,cached_tokens)})).into_response();
             }
             _ => {
                 return error(
@@ -547,6 +565,8 @@ impl tokio_stream::Stream for ChatStream {
                 reason,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
+                ..
             }) => {
                 this.pending.push_back(
                     SseEvent::default().data(
@@ -556,7 +576,7 @@ impl tokio_stream::Stream for ChatStream {
                     ),
                 );
                 if this.include_usage {
-                    this.pending.push_back(SseEvent::default().data(json!({"id":this.envelope.id,"object":"chat.completion.chunk","created":this.envelope.created,"model":&*this.envelope.model,"choices":[],"usage":usage(prompt_tokens,completion_tokens)}).to_string()));
+                    this.pending.push_back(SseEvent::default().data(json!({"id":this.envelope.id,"object":"chat.completion.chunk","created":this.envelope.created,"model":&*this.envelope.model,"choices":[],"usage":usage(prompt_tokens,completion_tokens,cached_tokens)}).to_string()));
                 }
             }
             other => {

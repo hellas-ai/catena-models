@@ -25,12 +25,22 @@ impl Prompt {
         tools: &[Tool],
         thinking: bool,
     ) -> Result<String, String> {
+        self.render_with_generation_prompt(messages, tools, thinking, true)
+    }
+
+    pub fn render_with_generation_prompt(
+        &self,
+        messages: &[Value],
+        tools: &[Tool],
+        thinking: bool,
+        add_generation_prompt: bool,
+    ) -> Result<String, String> {
         self.environment
             .get_template("chat")
             .map_err(|e| e.to_string())?
             .render(context! {
                 messages => messages, tools => tools, enable_thinking => thinking,
-                add_generation_prompt => true, add_vision_id => false,
+                add_generation_prompt => add_generation_prompt, add_vision_id => false,
                 bos_token => "<|endoftext|>", eos_token => "<|im_end|>",
             })
             .map_err(|e| format!("chat template: {e:#}"))
@@ -66,6 +76,43 @@ mod tests {
             assert!(rendered.contains("<tool_response>\nfile contents\n</tool_response>"));
             assert!(rendered.contains("a.rs"));
             assert!(rendered.contains("<tools>"));
+        }
+    }
+
+    #[test]
+    fn stable_user_prefix_survives_tool_replay_and_reasoning_removal() {
+        for source in [
+            include_str!("../../tests/fixtures/qwen3_chat.jinja"),
+            include_str!("../../tests/fixtures/qwen35_chat.jinja"),
+        ] {
+            let prompt = Prompt::new(source.into()).unwrap();
+            for thinking in [false, true] {
+                let mut messages = vec![
+                    json!({"role":"system","content":"Follow the instructions."}),
+                    json!({"role":"user","content":"Inspect the repository."}),
+                ];
+                let stable = prompt
+                    .render_with_generation_prompt(&messages, &[], thinking, false)
+                    .unwrap();
+                assert!(
+                    prompt
+                        .render(&messages, &[], thinking)
+                        .unwrap()
+                        .starts_with(&stable)
+                );
+                assert!(stable.ends_with("<|im_end|>\n"));
+                messages.push(json!({"role":"assistant","content":"", "reasoning_content":"private reasoning marker", "tool_calls":[{"type":"function","function":{"name":"read","arguments":{"path":"a.rs"}}}]}));
+                messages.push(json!({"role":"tool","content":"file contents"}));
+                let replay = prompt.render(&messages, &[], thinking).unwrap();
+                assert!(replay.starts_with(&stable));
+                assert!(replay.contains("private reasoning marker"));
+                messages.push(json!({"role":"assistant","content":"Done."}));
+                messages.push(json!({"role":"user","content":"Now explain it."}));
+                let next = prompt.render(&messages, &[], thinking).unwrap();
+                assert!(next.starts_with(&stable));
+                assert!(!next.contains("private reasoning marker"));
+                assert!(!next.starts_with(&replay));
+            }
         }
     }
 }

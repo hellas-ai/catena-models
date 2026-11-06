@@ -21,7 +21,7 @@ mod server;
 #[derive(Debug, Parser)]
 #[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
 struct Args {
-    /// Serve text chat through the OpenAI Chat Completions API.
+    /// Serve text chat through the OpenAI Chat Completions and Responses APIs.
     #[arg(long, conflicts_with_all = ["prompt", "image", "bench", "generate_entrypoint", "ignore_eos", "max_new_tokens"])]
     serve: bool,
 
@@ -31,9 +31,13 @@ struct Args {
     #[arg(long, value_enum, default_value_t = KernelKind::Fused)]
     kernels: KernelKind,
 
-    /// Use experimental RDNA3 WMMA prefill (CUDA requires CATENA_WMMA_EMULATE=1).
-    #[arg(long)]
+    /// Use RDNA3 WMMA prefill (enabled by default; CUDA requires CATENA_WMMA_EMULATE=1).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
+
+    /// Use SIMT prefill instead of WMMA (also needed for Qwen3 models).
+    #[arg(long, conflicts_with = "wmma_prefill")]
+    no_wmma_prefill: bool,
 
     /// Text prefix, or user-message text when images are supplied.
     #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image", "serve"])]
@@ -92,17 +96,23 @@ struct Args {
     ignore_eos: bool,
 }
 
+impl Args {
+    fn wmma_prefill_enabled(&self) -> bool {
+        self.wmma_prefill && !self.no_wmma_prefill
+    }
+}
+
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
     let dialect = catena_models::model::configured_gpu_dialect()?;
     ensure!(
-        !args.wmma_prefill
+        !args.wmma_prefill_enabled()
             || dialect == catena_lang::runtime::GpuDialect::Hip
             || std::env::var_os("CATENA_WMMA_EMULATE").is_some_and(|value| value == "1"),
-        "--wmma-prefill requires the HIP backend on gfx11 or CATENA_WMMA_EMULATE=1"
+        "WMMA prefill requires the HIP backend on gfx11 or CATENA_WMMA_EMULATE=1; use --no-wmma-prefill for SIMT"
     );
     Ok(InferenceOptions::default()
         .with_kernels(args.kernels)
-        .with_wmma_prefill(args.wmma_prefill))
+        .with_wmma_prefill(args.wmma_prefill_enabled()))
 }
 
 fn main() -> Result<()> {
@@ -480,16 +490,33 @@ mod cli_tests {
     #[test]
     fn default_model_in_cli_and_server() {
         for args in [vec!["app", "--prompt", "hi"], vec!["app", "--serve"]] {
-            assert_eq!(
-                Args::try_parse_from(args).unwrap().model,
-                "unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
-            );
+            let args = Args::try_parse_from(args).unwrap();
+            assert!(args.wmma_prefill_enabled());
+            assert_eq!(args.model, "unsloth/Qwen3.6-35B-A3B-GGUF:BF16");
         }
         assert_eq!(
             Args::try_parse_from(["app", "--serve", "--model", "custom"])
                 .unwrap()
                 .model,
             "custom"
+        );
+    }
+    #[test]
+    fn wmma_prefill_can_be_explicitly_enabled_or_disabled() {
+        for mode in [vec!["--prompt", "hi"], vec!["--serve"]] {
+            for (flag, enabled) in [("--wmma-prefill", true), ("--no-wmma-prefill", false)] {
+                let mut argv = vec!["app"];
+                argv.extend(mode.clone());
+                argv.push(flag);
+                assert_eq!(
+                    Args::try_parse_from(argv).unwrap().wmma_prefill_enabled(),
+                    enabled
+                );
+            }
+        }
+        assert!(
+            Args::try_parse_from(["app", "--serve", "--wmma-prefill", "--no-wmma-prefill"])
+                .is_err()
         );
     }
     #[test]
@@ -518,5 +545,11 @@ mod cli_tests {
             Args::try_parse_from(["app", "--model", "test", "--prompt", "hi", "--port", "1234"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn prefix_cache_defaults_on_and_can_be_disabled_for_serving() {
+        assert!(Args::try_parse_from(["app", "--serve", "--no-prefix-cache"]).is_ok());
+        assert!(Args::try_parse_from(["app", "--prompt", "hi", "--no-prefix-cache"]).is_err());
     }
 }

@@ -3,7 +3,7 @@ use catena_models::{flux::config, weights::Weights};
 use clap::Parser;
 use std::path::PathBuf;
 #[derive(Parser)]
-#[command(about = "FLUX.2-klein-4B text-to-image generation")]
+#[command(about = "FLUX.2-klein-4B text-to-image generation (WMMA enabled by default)")]
 struct Args {
     #[arg(long)]
     prompt: Option<String>,

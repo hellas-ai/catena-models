@@ -32,8 +32,8 @@ cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
 
-Use `--serve` to keep a Qwen model loaded and expose a text Chat Completions API,
-including streaming, reasoning output, and client-executed function tools:
+Use `--serve` to keep a Qwen model loaded and expose text Chat Completions and
+Responses APIs, including streaming, reasoning output, and client-executed tools:
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000
@@ -43,18 +43,21 @@ See [serving and coding-client setup](SERVING.md) for remote binding,
 authentication, request limits, tool calls, protocol logging with
 `RUST_LOG=catena_models::server::protocol=debug`, and the supported API subset.
 
-On RDNA3 HIP GPUs, `--wmma-prefill` enables experimental tiled attention and
-BF16 matrix-core projections for dense and MoE Qwen3.5/3.6 prefill. Dense models
-also use WMMA gate/up/down FFN projections; MoE models use grouped expert
-projections. DeltaNet's QKV, Z, alpha, and beta input projections also use WMMA
+WMMA prefill is enabled by default in both the Qwen CLI and server for the
+Qwen3.5/3.6 path. `--wmma-prefill` remains accepted; use `--no-wmma-prefill` to
+select SIMT explicitly. Qwen3 models require `--no-wmma-prefill` because their
+prefill implementation does not support this WMMA path.
+
+On RDNA3 HIP GPUs, WMMA uses tiled attention and BF16 matrix-core projections.
+Dense models also use WMMA gate/up/down FFN projections; MoE models use grouped
+expert projections. DeltaNet's QKV, Z, alpha, and beta input projections use WMMA
 during prefill; token decode and the vocabulary projection retain SIMT arithmetic.
-WMMA changes accumulation order and can change logits and generated tokens,
-so SIMT remains the default. Set `CATENA_WMMA_COMPONENTS=safe`
-with that flag to use the exact tiled attention variant and, for MoE, exact
-experts. Dense FFNs retain SIMT arithmetic in this safe selection.
-See [prefill measurements](PREFILL_BENCHMARKS.md)
-for numerical checks and component ablations. On CUDA, set
-`CATENA_WMMA_EMULATE=1` to use `--wmma-prefill` with WMMA emulation.
+WMMA changes accumulation order and can change logits and generated tokens.
+Set `CATENA_WMMA_COMPONENTS=safe` to use the exact tiled attention variant and,
+for MoE, exact experts. Dense FFNs retain SIMT arithmetic in this safe selection.
+See [prefill measurements](PREFILL_BENCHMARKS.md) for numerical checks and
+component ablations. On CUDA, set `CATENA_WMMA_EMULATE=1` for the default WMMA
+path, or pass `--no-wmma-prefill` to use SIMT.
 
 All GPU model exponentials use the shared `stdlib.models.math.exp` Hex implementation,
 including DeltaNet decay and online attention. It uses fixed F32 arithmetic,
@@ -155,8 +158,8 @@ cargo run -r --bin flux2-klein -- \
   --prompt 'A red fox sitting in a snowy forest' --output fox.png
 ```
 
-The text encoder and transformer use BF16 WMMA projections and fused attention
-on gfx11 HIP GPUs. The VAE uses WMMA convolutions, projections, and tiled
+Flux already uses WMMA by default without an extra flag. The text encoder and
+transformer use BF16 WMMA projections and fused attention on gfx11 HIP GPUs. The VAE uses WMMA convolutions, projections, and tiled
 512-channel attention, with F32 accumulation, normalization, residuals, and RGB
 output. Flux generation requires this HIP backend.
 See [WMMA implementation and measurements](FLUX_WMMA.md).
