@@ -270,6 +270,8 @@ impl Backend for Fake {
             prompt_tokens: 5,
             completion_tokens: 4,
             reasoning_tokens: usize::from(request.thinking),
+            cached_tokens: 3,
+            cache_write_tokens: 2,
         });
         Ok(())
     }
@@ -329,6 +331,11 @@ async fn json_and_sse_text_tools_reasoning_and_usage() {
     assert_eq!(body["output"][3]["input"], "*** Begin Patch\n*** End Patch");
     assert_ne!(body["output"][2]["id"], body["output"][2]["call_id"]);
     assert_eq!(body["usage"]["input_tokens"], 5);
+    assert_eq!(body["usage"]["input_tokens_details"]["cached_tokens"], 3);
+    assert_eq!(
+        body["usage"]["input_tokens_details"]["cache_write_tokens"],
+        2
+    );
     assert_eq!(
         body["usage"]["output_tokens_details"]["reasoning_tokens"],
         1
@@ -554,6 +561,8 @@ async fn strict_codex_titles_are_validated_for_json_and_sse() {
                 prompt_tokens: 50,
                 completion_tokens: 10,
                 reasoning_tokens: usize::from(request.thinking),
+                cached_tokens: 0,
+                cache_write_tokens: 0,
             });
             Ok(())
         }

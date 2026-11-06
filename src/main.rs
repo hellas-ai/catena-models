@@ -546,4 +546,10 @@ mod cli_tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn prefix_cache_defaults_on_and_can_be_disabled_for_serving() {
+        assert!(Args::try_parse_from(["app", "--serve", "--no-prefix-cache"]).is_ok());
+        assert!(Args::try_parse_from(["app", "--prompt", "hi", "--no-prefix-cache"]).is_err());
+    }
 }

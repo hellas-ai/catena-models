@@ -50,6 +50,8 @@ impl Backend for Fake {
             prompt_tokens: 4,
             completion_tokens: 2,
             reasoning_tokens: usize::from(request.thinking),
+            cached_tokens: 3,
+            cache_write_tokens: 1,
         });
         Ok(())
     }
@@ -128,6 +130,7 @@ async fn json_stream_tools_auth_and_errors() {
     let json: Value = serde_json::from_str(&body(response).await).unwrap();
     assert_eq!(json["choices"][0]["message"]["content"], "Hello 世界");
     assert_eq!(json["usage"]["total_tokens"], 6);
+    assert_eq!(json["usage"]["prompt_tokens_details"]["cached_tokens"], 3);
     let mut streaming = base();
     streaming["stream"] = json!(true);
     streaming["stream_options"] = json!({"include_usage":true});
@@ -293,6 +296,8 @@ async fn dropped_http_stream_cancels_generation_and_next_request_succeeds() {
                     prompt_tokens: 1,
                     completion_tokens: 1,
                     reasoning_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
                 });
             }
             Ok(())

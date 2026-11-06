@@ -1,4 +1,4 @@
-use std::{collections::HashSet, env, path::Path};
+use std::{collections::HashSet, env, path::Path, sync::Arc};
 
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
@@ -26,6 +26,7 @@ pub struct Model {
     weight_byte_len: usize,
     dialect: GpuDialect,
     multimodal: bool,
+    identity: Arc<()>,
 }
 
 impl Model {
@@ -152,6 +153,7 @@ impl Model {
             weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
             dialect,
             multimodal,
+            identity: Arc::new(()),
         })
     }
 
@@ -197,6 +199,46 @@ impl Model {
             position: 0,
             capacity,
             next_rope_position: None,
+        })
+    }
+
+    /// Restore an independent GPU copy; the immutable checkpoint remains reusable.
+    pub fn resume_checkpoint(&self, checkpoint: &SessionCheckpoint) -> Result<Session<'_>> {
+        ensure!(
+            Arc::ptr_eq(&self.identity, &checkpoint.identity),
+            "session checkpoint belongs to another loaded model"
+        );
+        let state = checkpoint
+            .state
+            .iter()
+            .map(|buffer| {
+                let bytes = buffer.byte_len();
+                ensure!(
+                    bytes.is_multiple_of(2),
+                    "session buffer has an odd byte length"
+                );
+                let (entry, size) = if bytes.is_multiple_of(8) {
+                    ("qwen3.copy-buffer", 8)
+                } else {
+                    ("qwen3.copy-buffer-16", 2)
+                };
+                let mut outputs = self
+                    .artifact
+                    .exec_values(entry, vec![buffer.as_ref().into(), (bytes / size).into()])?;
+                match outputs.pop() {
+                    Some(Value::MemOwn(copy)) if outputs.is_empty() && copy.byte_len() == bytes => {
+                        Ok(copy)
+                    }
+                    _ => anyhow::bail!("session copy ABI mismatch"),
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Session {
+            model: self,
+            state: Some(state),
+            position: checkpoint.position,
+            capacity: checkpoint.capacity,
+            next_rope_position: checkpoint.next_rope_position,
         })
     }
 
@@ -350,6 +392,28 @@ pub fn configured_gpu_dialect() -> Result<GpuDialect> {
     }
 }
 
+/// Immutable, owned GPU state. Includes KV, recurrence, convolution and workspaces.
+/// Checkpoints can outlive sessions, but can only be resumed by their original model.
+pub struct SessionCheckpoint {
+    identity: Arc<()>,
+    state: Vec<MemOwn>,
+    position: usize,
+    capacity: usize,
+    next_rope_position: Option<u64>,
+}
+
+impl SessionCheckpoint {
+    pub fn position(&self) -> usize {
+        self.position
+    }
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+    pub fn byte_len(&self) -> u64 {
+        self.state.iter().map(MemOwn::byte_len).sum()
+    }
+}
+
 /// Opaque, persistent model state for one generation sequence.
 pub struct Session<'model> {
     model: &'model Model,
@@ -360,6 +424,32 @@ pub struct Session<'model> {
 }
 
 impl Session<'_> {
+    /// Freeze this session without copying or retaining a borrow of the model.
+    pub fn into_checkpoint(mut self) -> Result<SessionCheckpoint> {
+        Ok(SessionCheckpoint {
+            identity: self.model.identity.clone(),
+            state: self
+                .state
+                .take()
+                .context("session state is unavailable after an inference error")?,
+            position: self.position,
+            capacity: self.capacity,
+            next_rope_position: self.next_rope_position,
+        })
+    }
+
+    /// Append a nonempty prefill batch at the current position, including position zero.
+    pub fn append_next_token(&mut self, tokens: &[u64]) -> Result<u64> {
+        let (_, next) = self.forward(tokens)?;
+        Ok(next)
+    }
+
+    /// Append a nonempty prefill batch and read final-position logits.
+    pub fn append_logits(&mut self, tokens: &[u64]) -> Result<Vec<f32>> {
+        let (logits, _) = self.forward(tokens)?;
+        read_logits(logits, self.model.config.vocabulary_size)
+    }
+
     pub fn position(&self) -> usize {
         self.position
     }

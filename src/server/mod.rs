@@ -2,6 +2,7 @@
 mod api;
 mod engine;
 mod output;
+mod prefix_cache;
 mod prompt;
 mod protocol;
 mod responses;
@@ -36,6 +37,9 @@ pub struct ServeOptions {
     /// Maximum prompt plus output tokens for each request.
     #[arg(long, default_value_t=128*1024, value_parser=super::parse_positive_usize, requires="serve")]
     ctx_size: usize,
+    /// Disable GPU prompt checkpoints (canonical prefill batching is retained).
+    #[arg(long, requires = "serve")]
+    no_prefix_cache: bool,
     /// Optional bearer credential for all endpoints.
     #[arg(
         long,
@@ -59,7 +63,7 @@ pub fn run(
     let shutdown = Arc::new(AtomicBool::new(false));
     eprintln!("loading model and chat template for serving");
     let worker = engine::start(
-        move || engine::QwenBackend::load(path, options, config.ctx_size),
+        move || engine::QwenBackend::load(path, options, config.ctx_size, !config.no_prefix_cache),
         shutdown.clone(),
     )?;
     let state = api::ServerState {

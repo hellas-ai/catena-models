@@ -75,12 +75,67 @@ Chat requests support:
   to false. Reasoning is returned separately as `message.reasoning_content` or
   streamed `delta.reasoning_content`, without `<think>` delimiters.
 
-Each request creates a fresh GPU session. Send the full conversation on every
-turn, including prior tool calls and their matching results. GPU inference is
+Send the full conversation on every turn, including prior tool calls and their
+matching results. The server reuses matching prompt checkpoints as described
+below. GPU inference is
 serialized on one owning thread; up to eight requests can wait. A full queue
 returns `429`. Dropping a request cancels inference between GPU operations and
 releases its session. HTTP model/health requests remain responsive during
 inference. Request bodies are limited to 8 MiB. Ctrl-C shuts the server down.
+
+## Prompt prefix caching
+
+Prefix caching is enabled by default for both APIs. It keeps at most two GPU
+checkpoints on the inference worker: a stable prefix through the latest user
+message, and a recent prompt prefix for tool continuations. Matching compares
+the rendered token IDs exactly. A changed system prompt, tool definition, or
+history edit can cause a miss; Qwen's removal of old reasoning can invalidate
+the recent checkpoint while leaving the stable one usable. This is a small
+shared cache, not a separate cache for each client or conversation.
+
+Checkpoints contain all session state, including attention KV, DeltaNet
+recurrence, and convolution history. Generated output is not cached. Clients
+must still replay history, and Responses `previous_response_id` remains
+unsupported. `prompt_cache_key` does not determine a hit.
+
+Serving prefills use fixed 1,024-token blocks from position zero, with a final
+partial block when needed. Checkpoints are saved only at full-block boundaries;
+prompts shorter than 1,024 tokens do not populate the cache. `--no-prefix-cache`
+disables reuse and checkpoint storage but retains this schedule, so cold and
+warm execution use the same arithmetic order. This schedule can produce
+different bits from older single-batch serving and from one-shot CLI prefill.
+
+Session capacity is rounded up to a power of two covering prompt plus output
+budget, capped at `--ctx-size`. Reuse requires the same capacity bucket; growing
+past a bucket boundary causes a cold prefill. The cache can retain two full
+session allocations in addition to the working session. Identical checkpoints
+share one allocation. Short unrelated requests do not evict useful checkpoints.
+
+Usage reports reused tokens in Chat Completions
+`prompt_tokens_details.cached_tokens` and Responses
+`input_tokens_details.cached_tokens`. Responses also reports
+`input_tokens_details.cache_write_tokens`: newly computed prompt tokens covered
+by saved checkpoints. Counts are summed across structured-output correction
+attempts; total prompt usage still includes all input tokens.
+
+Use `RUST_LOG=catena_models::server::prefix_cache=debug` to see hits, reused-token
+counts, capacity, GPU copy time, and suffix prefill time.
+
+GPU validation and benchmarks accept a local BF16 GGUF or HF selector:
+
+```bash
+export CATENA_PREFIX_MODEL=unsloth/Qwen3.5-0.8B-GGUF:BF16
+cargo test -r --test session_checkpoint -- --ignored --nocapture
+cargo test -r --bin catena-models serving_prefix_cache_bitwise_parity -- --ignored --nocapture
+RUST_LOG=catena_models::server::prefix_cache=debug \
+  cargo test -r --bin catena-models serving_prefix_cache_benchmark -- --ignored --nocapture
+```
+
+Repeat with a MoE model to exercise its additional state. Set
+`CATENA_PREFIX_WMMA=0` for SIMT, or `CATENA_GPU_DIALECT=cuda` with
+`CATENA_WMMA_EMULATE=1` for emulated WMMA. The raw device-copy test uses HIP.
+`CATENA_PREFIX_LENGTHS=4096,16384,32768` controls benchmark prefix lengths;
+each case appends 32 tokens and reports cold and warm prefill latency.
 
 ## Function tools and coding clients
 

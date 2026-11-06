@@ -376,8 +376,8 @@ impl Envelope {
         }
     }
 }
-fn usage(prompt: usize, completion: usize) -> Value {
-    json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion})
+fn usage(prompt: usize, completion: usize, cached: usize) -> Value {
+    json!({"prompt_tokens":prompt,"completion_tokens":completion,"total_tokens":prompt+completion,"prompt_tokens_details":{"cached_tokens":cached}})
 }
 fn sse(value: Value) -> Result<SseEvent, Infallible> {
     Ok(SseEvent::default().data(value.to_string()))
@@ -498,6 +498,7 @@ async fn chat(
                 reason,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
                 ..
             } => {
                 let mut message = json!({"role":"assistant","content":if content.is_empty() && !calls.is_empty() {Value::Null} else {json!(content)}});
@@ -507,7 +508,7 @@ async fn chat(
                 if !calls.is_empty() {
                     message["tool_calls"] = json!(calls);
                 }
-                return Json(json!({"id":envelope.id,"object":"chat.completion","created":envelope.created,"model":&*envelope.model,"choices":[{"index":0,"message":message,"finish_reason":reason}],"usage":usage(prompt_tokens,completion_tokens)})).into_response();
+                return Json(json!({"id":envelope.id,"object":"chat.completion","created":envelope.created,"model":&*envelope.model,"choices":[{"index":0,"message":message,"finish_reason":reason}],"usage":usage(prompt_tokens,completion_tokens,cached_tokens)})).into_response();
             }
             _ => {
                 return error(
@@ -564,6 +565,7 @@ impl tokio_stream::Stream for ChatStream {
                 reason,
                 prompt_tokens,
                 completion_tokens,
+                cached_tokens,
                 ..
             }) => {
                 this.pending.push_back(
@@ -574,7 +576,7 @@ impl tokio_stream::Stream for ChatStream {
                     ),
                 );
                 if this.include_usage {
-                    this.pending.push_back(SseEvent::default().data(json!({"id":this.envelope.id,"object":"chat.completion.chunk","created":this.envelope.created,"model":&*this.envelope.model,"choices":[],"usage":usage(prompt_tokens,completion_tokens)}).to_string()));
+                    this.pending.push_back(SseEvent::default().data(json!({"id":this.envelope.id,"object":"chat.completion.chunk","created":this.envelope.created,"model":&*this.envelope.model,"choices":[],"usage":usage(prompt_tokens,completion_tokens,cached_tokens)}).to_string()));
                 }
             }
             other => {

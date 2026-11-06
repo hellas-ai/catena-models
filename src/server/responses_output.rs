@@ -285,6 +285,8 @@ impl Output {
         prompt: usize,
         completion: usize,
         reasoning: usize,
+        cached: usize,
+        cache_write: usize,
     ) -> Result<(), String> {
         let length = reason == "length";
         if let Some(format) = self.structured.take() {
@@ -313,7 +315,7 @@ impl Output {
         if length {
             self.incomplete_details = json!({"reason":"max_output_tokens"});
         }
-        self.usage = json!({"input_tokens":prompt,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":0},"output_tokens":completion,"output_tokens_details":{"reasoning_tokens":reasoning},"total_tokens":prompt+completion});
+        self.usage = json!({"input_tokens":prompt,"input_tokens_details":{"cached_tokens":cached,"cache_write_tokens":cache_write},"output_tokens":completion,"output_tokens_details":{"reasoning_tokens":reasoning},"total_tokens":prompt+completion});
         self.emit(
             if length {
                 "response.incomplete"

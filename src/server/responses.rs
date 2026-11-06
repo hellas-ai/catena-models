@@ -483,10 +483,17 @@ pub(super) async fn create(
                 prompt_tokens,
                 completion_tokens,
                 reasoning_tokens,
+                cached_tokens,
+                cache_write_tokens,
             } => {
-                if let Err(e) =
-                    output.finish(reason, prompt_tokens, completion_tokens, reasoning_tokens)
-                {
+                if let Err(e) = output.finish(
+                    reason,
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                ) {
                     return api::failure(super::engine::Failure::internal(e));
                 }
                 return Json(output.response()).into_response();
@@ -538,11 +545,17 @@ impl tokio_stream::Stream for ResponseStream {
                 prompt_tokens,
                 completion_tokens,
                 reasoning_tokens,
+                cached_tokens,
+                cache_write_tokens,
             })) => {
-                if let Err(e) =
-                    this.output
-                        .finish(reason, prompt_tokens, completion_tokens, reasoning_tokens)
-                {
+                if let Err(e) = this.output.finish(
+                    reason,
+                    prompt_tokens,
+                    completion_tokens,
+                    reasoning_tokens,
+                    cached_tokens,
+                    cache_write_tokens,
+                ) {
                     this.output.fail(e);
                 }
                 this.finished = true;

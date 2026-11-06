@@ -1,0 +1,135 @@
+# Bit-preserving device copies for owned session checkpoints.
+# The normal path copies raw uint64 words. The fallback copies two-byte storage
+# using native BF16 loads/stores only: no float conversions or arithmetic, including NaNs.
+# Rust checks the view size before invoking either entrypoint.
+
+(def program stdlib.models.session.copy-words.element : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([x count out element.]
+ ([.element] [i.])
+ (
+ ({[.x] [.i]} stdlib.models.memory.ref-read-u64 [result.]) [.result]
+ [point-result.])
+ ({[.out] [.element] [.point-result]} stdlib.models.memory.write-u64)
+ (unit.elim) (unit.intro)
+ ))
+
+(def program stdlib.models.session.copy-words.yes : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([x count out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.x] [.count] [.out] [.element]} stdlib.models.session.copy-words.element)
+ ))
+
+(def program stdlib.models.session.copy-words.no : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([x count out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.models.session.copy-words.launch : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([x count out work thread.]
+ ([.thread] stdlib.models.memory.thread-index [element.])
+ ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
+ ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.x] [.count] [.out]} partial.stdlib.models.session.copy-words.yes.3 [yes.])
+ ({[.x] [.count] [.out]} partial.stdlib.models.session.copy-words.no.3 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.models.session.copy-words.host : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([x count out work grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.x] [.count] [.out] [.work]} partial.stdlib.models.session.copy-words.launch.4 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.models.session.copy-words.run : {((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([x count work elements.]
+ ([.elements] stdlib.models.memory.alloc-u64 [out.])
+ ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
+ ({[.blocks] (const.u64.0x0000000000000001)} stdlib.models.memory.u64.add stdlib.models.memory.grid [grid.])
+ ({[.x] [.count] [.out] [.work] [.grid]} partial.stdlib.models.session.copy-words.host.5 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+(def program stdlib.models.session.copy-halves.element : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
+ ([x count out element.]
+ ([.element] [i.])
+ (
+ ({[.x] [.i]} stdlib.models.memory.ref-read-bf16 [result.]) [.result]
+ [point-result.])
+ ({[.out] [.element] [.point-result]} stdlib.models.memory.write-bf16)
+ (unit.elim) (unit.intro)
+ ))
+
+(def program stdlib.models.session.copy-halves.yes : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
+ ([x count out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ ([.unit] unit.elim)
+ ({[.x] [.count] [.out] [.element]} stdlib.models.session.copy-halves.element)
+ ))
+
+(def program stdlib.models.session.copy-halves.no : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
+ ([x count out pair.]
+ ([.pair] *.elim [element proofs.])
+ ([.proofs] *.elim [proof unit.])
+ ([.proof] unsafe.discard unit.elim)
+ [.unit]
+ ))
+
+(def program stdlib.models.session.copy-halves.launch : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([x count out work thread.]
+ ([.thread] stdlib.models.memory.thread-index [element.])
+ ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
+ ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+ ({[.x] [.count] [.out]} partial.stdlib.models.session.copy-halves.yes.3 [yes.])
+ ({[.x] [.count] [.out]} partial.stdlib.models.session.copy-halves.no.3 [no.])
+ ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
+ ))
+
+(def program stdlib.models.session.copy-halves.host : {((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([x count out work grid pair.]
+ ([.pair] *.elim [step rest.])
+ ([.rest] *.elim [value proofs.])
+ ([.proofs] *.elim [less truth.])
+ ([.less] unsafe.discard unit.elim)
+ ({[.x] [.count] [.out] [.work]} partial.stdlib.models.session.copy-halves.launch.4 [kernel.])
+ ({[.grid] [.kernel]} unsafe.launch)
+ (unit.elim)
+ ({[.value] [.truth]} *.intro)
+ ))
+
+(def program stdlib.models.session.copy-halves.run : {((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([x count work elements.]
+ ([.elements] stdlib.models.memory.alloc-bf16 [out.])
+ ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
+ ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
+ ({[.blocks] (const.u64.0x0000000000000001)} stdlib.models.memory.u64.add stdlib.models.memory.grid [grid.])
+ ({[.x] [.count] [.out] [.work] [.grid]} partial.stdlib.models.session.copy-halves.host.5 [host.])
+ ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
+ ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
+ ([.proof] unsafe.discard unit.elim)
+ [.result]
+ ))
+
+
+(def program qwen3.copy-buffer : {((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count.] ({[.input] [.count] [.count] [.count]} stdlib.models.session.copy-words.run)))
+
+(def program qwen3.copy-buffer-16 : {((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([input count.] ({[.input] [.count] [.count] [.count]} stdlib.models.session.copy-halves.run)))

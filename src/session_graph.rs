@@ -10,6 +10,7 @@ pub(crate) fn append(source: &mut String, c: &ModelConfig, options: InferenceOpt
     let start = source.len();
     let dtype = "bf16";
     source.push_str(include_str!("catena/state_buffers.hex"));
+    source.push_str(include_str!("catena/session_copy.hex"));
 
     let init = match (options.kernels, c.architecture) {
         (KernelKind::Reference, _) => include_str!("catena/state_init.hex"),
