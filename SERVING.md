@@ -17,7 +17,9 @@ clients should connect. `CATENA_API_KEY` (or `--api-key`) optionally requires a
 bearer token on every endpoint. Without a configured key, authentication is
 disabled. HTTP is served directly; TLS can be supplied by a reverse proxy.
 Model downloads, GPU selection, `--kernels`, and `--wmma-prefill` work as in
-one-shot mode. Startup loads the tokenizer, embedded GGUF chat template, compiled
+one-shot mode. WMMA prefill is enabled by default; pass `--no-wmma-prefill` to
+select SIMT (required for Qwen3 models). CUDA requires `CATENA_WMMA_EMULATE=1`
+for the default WMMA path, or the SIMT opt-out. Startup loads the tokenizer, embedded GGUF chat template, compiled
 kernels, and weights before opening the listener. No catena-lang changes are
 required.
 
