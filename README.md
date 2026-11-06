@@ -22,12 +22,26 @@ CATENA_GPU_DIALECT=cuda cargo run -r --bin whisper-asr -- speech.wav
 
 ## Qwen text and images
 
+If `--model` is omitted, CLI and server modes use
+`unsloth/Qwen3.6-35B-A3B-GGUF:BF16`.
+
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```
+
+Use `--serve` to keep a Qwen model loaded and expose a text Chat Completions API,
+including streaming, reasoning output, and client-executed function tools:
+
+```bash
+cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000
+```
+
+See [serving and coding-client setup](SERVING.md) for remote binding,
+authentication, request limits, tool calls, protocol logging with
+`RUST_LOG=catena_models::server::protocol=debug`, and the supported API subset.
 
 On RDNA3 HIP GPUs, `--wmma-prefill` enables experimental tiled attention and
 BF16 matrix-core projections for dense and MoE Qwen3.5/3.6 prefill. Dense models

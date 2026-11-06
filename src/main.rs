@@ -16,9 +16,17 @@ use catena_models::{
 };
 use clap::{CommandFactory, FromArgMatches, Parser};
 
+mod server;
+
 #[derive(Debug, Parser)]
 #[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
 struct Args {
+    /// Serve text chat through the OpenAI Chat Completions API.
+    #[arg(long, conflicts_with_all = ["prompt", "image", "bench", "generate_entrypoint", "ignore_eos", "max_new_tokens"])]
+    serve: bool,
+
+    #[command(flatten)]
+    server: server::ServeOptions,
     /// Hex kernel implementation (reference is available for Qwen3 dense).
     #[arg(long, value_enum, default_value_t = KernelKind::Fused)]
     kernels: KernelKind,
@@ -28,7 +36,7 @@ struct Args {
     wmma_prefill: bool,
 
     /// Text prefix, or user-message text when images are supplied.
-    #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image"])]
+    #[arg(long, required_unless_present_any = ["generate_entrypoint", "bench", "image", "serve"])]
     prompt: Option<String>,
 
     /// Write the generated model-specific Hex source under target/, then exit.
@@ -56,7 +64,11 @@ struct Args {
     bench_runs: usize,
 
     /// Hugging Face model as owner/repo[:variant].
-    #[arg(long, value_name = "MODEL", required = true)]
+    #[arg(
+        long,
+        value_name = "MODEL",
+        default_value = "unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
+    )]
     model: String,
 
     /// Still images, in order, preceding the text in one Qwen3.5 user message.
@@ -94,6 +106,13 @@ fn inference_options(args: &Args) -> Result<InferenceOptions> {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(io::stderr)
+        .init();
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches)?;
     let options = inference_options(&args)?;
@@ -103,6 +122,9 @@ fn main() -> Result<()> {
         checkpoint.files.len()
     );
     let selected_gguf = checkpoint.primary;
+    if args.serve {
+        return server::run(args.server, args.model, selected_gguf, options);
+    }
     if args.generate_entrypoint {
         let config = read_gguf_model_config(&selected_gguf)?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
@@ -449,5 +471,52 @@ fn format_parameter_count(parameters: usize) -> String {
         format!("{:.2} B", parameters as f64 / 1_000_000_000.0)
     } else {
         format!("{:.2} M", parameters as f64 / 1_000_000.0)
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+    #[test]
+    fn default_model_in_cli_and_server() {
+        for args in [vec!["app", "--prompt", "hi"], vec!["app", "--serve"]] {
+            assert_eq!(
+                Args::try_parse_from(args).unwrap().model,
+                "unsloth/Qwen3.6-35B-A3B-GGUF:BF16"
+            );
+        }
+        assert_eq!(
+            Args::try_parse_from(["app", "--serve", "--model", "custom"])
+                .unwrap()
+                .model,
+            "custom"
+        );
+    }
+    #[test]
+    fn serving_and_existing_modes() {
+        for args in [
+            vec!["app", "--model", "test", "--serve"],
+            vec!["app", "--model", "test", "--prompt", "hi"],
+            vec!["app", "--model", "test", "--bench"],
+            vec!["app", "--model", "test", "--generate-entrypoint"],
+        ] {
+            assert!(Args::try_parse_from(args).is_ok());
+        }
+        for extra in [
+            vec!["--prompt", "hi"],
+            vec!["--bench"],
+            vec!["--generate-entrypoint"],
+            vec!["--image", "a.png"],
+            vec!["--max-new-tokens", "5"],
+            vec!["--ignore-eos"],
+        ] {
+            let mut args = vec!["app", "--model", "test", "--serve"];
+            args.extend(extra);
+            assert!(Args::try_parse_from(args).is_err());
+        }
+        assert!(
+            Args::try_parse_from(["app", "--model", "test", "--prompt", "hi", "--port", "1234"])
+                .is_err()
+        );
     }
 }
