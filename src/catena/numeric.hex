@@ -12,6 +12,21 @@
 # nearest-even subnormal rounding, so it never needs subnormal F32 arithmetic.
 # NaNs are canonicalized; exception flags and other rounding modes are not modeled.
 
+# Keep packed loads, but accumulate low then high using ordinary F32 operations.
+# Each multiply/add rounds separately; this intentionally differs from AMD dot2.
+(def program stdlib.models.math.dot-pair-f32 : {(bf16x2 val) (bf16x2 val) (f32 val)} -> (f32 val) =
+ ([a b acc.]
+  ([.a] bf16x2.low bf16.to-f32 [a-low.])
+  ([.b] bf16x2.low bf16.to-f32 [b-low.])
+  ([.a] bf16x2.high bf16.to-f32 [a-high.])
+  ([.b] bf16x2.high bf16.to-f32 [b-high.])
+  ({[.a-low] [.b-low]} stdlib.models.memory.f32.mul [low.])
+  ({[.acc] [.low]} stdlib.models.memory.f32.add [partial.])
+  ({[.a-high] [.b-high]} stdlib.models.memory.f32.mul [high.])
+  ({[.partial] [.high]} stdlib.models.memory.f32.add [result.])
+  [.result]
+ ))
+
 (def program stdlib.models.math.exp-scale : {(f32 val) (u32 val) (bool val)} -> (f32 val) =
  ([y n negative.]
   ({[.y]} stdlib.math.f32_bits [y-bits.])

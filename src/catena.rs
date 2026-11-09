@@ -251,6 +251,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn scalar_pair_helper_compiles_on_both_dialects() -> Result<()> {
+        use catena_lang::runtime::GpuDialect;
+
+        for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
+            let module = compile_sources(
+                core_sources().chain([
+                    include_str!("catena/memory.hex"),
+                    include_str!("catena/numeric.hex"),
+                    "(def program test-pair : {(bf16x2 val) (bf16x2 val) (f32 val)} -> (f32 val) = (stdlib.models.math.dot-pair-f32))",
+                ]),
+                dialect,
+            )?;
+            assert!(!module.source.contains("catena_bf16_dot"));
+            assert!(!module.source.contains("__dmul_rn"));
+        }
+        Ok(())
+    }
+
+    #[test]
     fn shared_helpers_prune_and_keep_callback_dependencies() -> Result<()> {
         let cooperative = include_str!("catena/cooperative.hex");
         let start = cooperative

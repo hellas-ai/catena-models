@@ -1080,12 +1080,8 @@ fn source_with_scope(
         s.insert_str(entry, &batch);
     }
     crate::session_graph::append_layout(&mut s, config, options);
-    if config.architecture == ModelArchitecture::Qwen35Dense {
-        // Include inherited decode/head helpers and batched SIMT prefill without
-        // changing the shared kernels used by Qwen3 or MoE models.
-        s = s.replace(" bf16x2.dot-f32 ", " stdlib.qwen35.dot-pair-f32 ");
-    }
-    Ok(s)
+    // Cover inherited decode/head helpers, SIMT prefill, and exact/safe experts.
+    Ok(s.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 "))
 }
 
 #[cfg(test)]
@@ -1102,7 +1098,7 @@ mod tests {
         let options = InferenceOptions::default();
         let source = source_with_scope(&config, options, "none")?;
         assert!(!source.contains("bf16x2.dot-f32"));
-        assert!(source.contains("} stdlib.qwen35.dot-pair-f32 ["));
+        assert!(source.contains("} stdlib.models.math.dot-pair-f32 ["));
         for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
             let module = compile_sources(runtime_sources(&source), dialect)?;
             assert!(!module.source.contains("catena_bf16_dot"));
@@ -1112,7 +1108,7 @@ mod tests {
         assert!(!accelerated.contains("bf16x2.dot-f32"));
         assert!(accelerated.contains("wmma.mma-bf16-f32"));
         let moe = source_with_scope(&ModelConfig::qwen36_35b_a3b(), options, "none")?;
-        assert!(moe.contains("bf16x2.dot-f32"));
+        assert!(!moe.contains("bf16x2.dot-f32"));
         Ok(())
     }
 
@@ -1146,6 +1142,7 @@ mod tests {
                     continue;
                 }
                 let generated = source_with_scope(&config, options, scope)?;
+                assert!(!generated.contains("bf16x2.dot-f32"), "{scope}");
                 let linear = definition(&generated, "stdlib.qwen35.batch.linear");
                 let (wmma, simt) = if scope == "all" { (4, 0) } else { (0, 4) };
                 assert_eq!(

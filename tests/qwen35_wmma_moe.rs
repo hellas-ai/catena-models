@@ -93,6 +93,7 @@ fn compile_moe_kind(kind: u8) -> anyhow::Result<RuntimeModule> {
             "} stdlib.qwen35.wmma.moe.run-safe [",
         );
     }
+    let source = source.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ");
     compile_sources(
         core_sources().map(|s| -> &str { s }).chain([
             include_str!("../src/catena/memory.hex"),

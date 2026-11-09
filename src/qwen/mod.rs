@@ -597,6 +597,7 @@ mod tests {
         let config = ModelConfig::qwen36_35b_a3b();
         let enabled = InferenceOptions::default().with_wmma_prefill(true);
         let accelerated = source(&config, enabled)?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
         assert!(accelerated.contains("stdlib.qwen35.batch.wmma-project"));
         assert!(accelerated.contains("wmma.mma-bf16-f32"));
         let full_start = accelerated
@@ -623,6 +624,7 @@ mod tests {
         );
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("stdlib.qwen35.batch.wmma-project"));
+        assert!(!original.contains("bf16x2.dot-f32"));
         assert!(validate(&ModelConfig::qwen35_0_8b(), enabled).is_ok());
         assert!(validate(&ModelConfig::qwen3_0_6b(), enabled).is_err());
         let mut too_many_experts = config.clone();

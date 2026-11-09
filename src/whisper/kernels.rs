@@ -433,4 +433,5 @@ fn render(cfg: &Config, debug: bool) -> String {
         }
     }
     crate::catena::rename_programs(&source, &mapping)
+        .replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ")
 }

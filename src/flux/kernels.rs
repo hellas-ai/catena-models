@@ -34,6 +34,7 @@ pub(super) fn bundle(source: &str) -> String {
     }
     out.replace(" qwen3.", " stdlib.flux.qwen3.")
         .replace("partial.qwen3.", "partial.stdlib.flux.qwen3.")
+        .replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ")
 }
 
 pub(super) fn text(cfg: &crate::spec::ModelConfig, debug: bool) -> Result<String> {

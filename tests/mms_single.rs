@@ -24,7 +24,7 @@ fn length_source() -> Vec<String> {
 "#,
     ]
     .into_iter()
-    .map(str::to_owned)
+    .map(|source| source.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 "))
     .collect()
 }
 
@@ -223,7 +223,7 @@ fn bounded_convolutions_match_original() -> Result<()> {
         include_str!("../src/catena/qwen35_batch_projection.hex"),
         include_str!("../src/catena/whisper.hex"),
     ] {
-        source.push(helper.into());
+        source.push(helper.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 "));
     }
     source.push(r#"
 (def program bounded-conv : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =

@@ -30,4 +30,15 @@ fn with_exports(exports: &[&str]) -> String {
         })
         .collect();
     crate::catena::rename_programs(&source, &mapping)
+        .replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bundle_uses_scalar_pair_arithmetic() {
+        let source = super::with_exports(&["tts.synthesize", "tts.synthesize-debug"]);
+        assert!(!source.contains("bf16x2.dot-f32"));
+        assert!(source.contains("} stdlib.models.math.dot-pair-f32 ["));
+    }
 }

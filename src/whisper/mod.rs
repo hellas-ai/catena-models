@@ -510,4 +510,21 @@ mod tests {
             [0x3f80, 0x3f82]
         );
     }
+
+    #[test]
+    fn bundle_uses_scalar_pair_arithmetic() -> Result<()> {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "model_type": "whisper", "d_model": 384, "num_mel_bins": 80,
+            "encoder_layers": 4, "decoder_layers": 4,
+            "encoder_attention_heads": 6, "decoder_attention_heads": 6,
+            "encoder_ffn_dim": 1536, "decoder_ffn_dim": 1536,
+            "max_source_positions": 1500, "max_target_positions": 448,
+            "vocab_size": 51865, "decoder_start_token_id": 50258,
+            "eos_token_id": 50257, "activation_function": "gelu"
+        }))?;
+        let source = graph::bundle(&config, false)?;
+        assert!(!source.contains("bf16x2.dot-f32"));
+        assert!(source.contains("} stdlib.models.math.dot-pair-f32 ["));
+        Ok(())
+    }
 }
