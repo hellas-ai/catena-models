@@ -638,6 +638,7 @@ mod tests {
         let config = ModelConfig::qwen35_0_8b();
         let enabled = InferenceOptions::default().with_wmma_prefill(true);
         let accelerated = source(&config, enabled)?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
         let full = accelerated
             .find("(def program stdlib.qwen35.batch.full :")
             .unwrap();
@@ -669,6 +670,7 @@ mod tests {
         assert!(!linear.contains("} stdlib.qwen35.batch.project ["));
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("wmma.mma-bf16-f32"));
+        assert!(!original.contains("bf16x2.dot-f32"));
         let safe = qwen35::wmma_stages(&config, "safe")?;
         assert!(!safe.projections && safe.safe_scores);
         for scope in ["experts", "exact-experts", "safe-experts"] {

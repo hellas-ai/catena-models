@@ -1080,12 +1080,41 @@ fn source_with_scope(
         s.insert_str(entry, &batch);
     }
     crate::session_graph::append_layout(&mut s, config, options);
+    if config.architecture == ModelArchitecture::Qwen35Dense {
+        // Include inherited decode/head helpers and batched SIMT prefill without
+        // changing the shared kernels used by Qwen3 or MoE models.
+        s = s.replace(" bf16x2.dot-f32 ", " stdlib.qwen35.dot-pair-f32 ");
+    }
     Ok(s)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "compiles the full dense model for HIP and CUDA; no GPU required"]
+    fn dense_uses_scalar_pair_arithmetic_on_both_dialects() -> Result<()> {
+        use crate::catena::{compile_sources, runtime_sources};
+        use catena_lang::runtime::GpuDialect;
+
+        let config = ModelConfig::qwen35_0_8b();
+        let options = InferenceOptions::default();
+        let source = source_with_scope(&config, options, "none")?;
+        assert!(!source.contains("bf16x2.dot-f32"));
+        assert!(source.contains("} stdlib.qwen35.dot-pair-f32 ["));
+        for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
+            let module = compile_sources(runtime_sources(&source), dialect)?;
+            assert!(!module.source.contains("catena_bf16_dot"));
+            assert!(!module.source.contains("__dmul_rn"));
+        }
+        let accelerated = source_with_scope(&config, options.with_wmma_prefill(true), "all")?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
+        assert!(accelerated.contains("wmma.mma-bf16-f32"));
+        let moe = source_with_scope(&ModelConfig::qwen36_35b_a3b(), options, "none")?;
+        assert!(moe.contains("bf16x2.dot-f32"));
+        Ok(())
+    }
 
     fn definition<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source.find(&format!("(def program {name} :")).unwrap();
