@@ -16,7 +16,10 @@ fn compile_moe(exact: bool) -> anyhow::Result<RuntimeModule> {
 }
 fn compile_moe_kind(kind: u8) -> anyhow::Result<RuntimeModule> {
     let exact = kind > 0;
-    let mut source = include_str!("../src/catena/qwen35_wmma_moe.hex").to_owned();
+    let mut source = include_str!("../src/catena/qwen35_simt.hex")
+        .replace("qwen3.fused.", "stdlib.qwen3.fused.");
+    source.push_str(include_str!("../src/catena/qwen35_simt_moe.hex"));
+    source.push_str(include_str!("../src/catena/qwen35_wmma_moe.hex"));
     if exact {
         source.push_str(include_str!("../src/catena/qwen35_exact_moe.hex"));
     }
@@ -93,6 +96,7 @@ fn compile_moe_kind(kind: u8) -> anyhow::Result<RuntimeModule> {
             "} stdlib.qwen35.wmma.moe.run-safe [",
         );
     }
+    let source = source.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ");
     compile_sources(
         core_sources().map(|s| -> &str { s }).chain([
             include_str!("../src/catena/memory.hex"),

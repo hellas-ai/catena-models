@@ -10,6 +10,7 @@ use std::fmt::Write;
 pub(crate) mod fused;
 #[path = "qwen35.rs"]
 mod qwen35;
+mod simt;
 
 const SOURCES: &[&str] = &[
     include_str!("../catena/memory.hex"),
@@ -281,6 +282,9 @@ fn emit_layer_selector(s: &mut String, layers: usize, group: &str, weights: &str
 
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     let mut s = graph_source(config, options)?;
+    if config.architecture == ModelArchitecture::Qwen3Dense {
+        s = simt::specialize(s, options.kernels);
+    }
     crate::session_graph::append(&mut s, config, options);
     Ok(s)
 }
@@ -597,6 +601,7 @@ mod tests {
         let config = ModelConfig::qwen36_35b_a3b();
         let enabled = InferenceOptions::default().with_wmma_prefill(true);
         let accelerated = source(&config, enabled)?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
         assert!(accelerated.contains("stdlib.qwen35.batch.wmma-project"));
         assert!(accelerated.contains("wmma.mma-bf16-f32"));
         let full_start = accelerated
@@ -623,6 +628,7 @@ mod tests {
         );
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("stdlib.qwen35.batch.wmma-project"));
+        assert!(!original.contains("bf16x2.dot-f32"));
         assert!(validate(&ModelConfig::qwen35_0_8b(), enabled).is_ok());
         assert!(validate(&ModelConfig::qwen3_0_6b(), enabled).is_err());
         let mut too_many_experts = config.clone();
@@ -638,6 +644,7 @@ mod tests {
         let config = ModelConfig::qwen35_0_8b();
         let enabled = InferenceOptions::default().with_wmma_prefill(true);
         let accelerated = source(&config, enabled)?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
         let full = accelerated
             .find("(def program stdlib.qwen35.batch.full :")
             .unwrap();
@@ -669,6 +676,7 @@ mod tests {
         assert!(!linear.contains("} stdlib.qwen35.batch.project ["));
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("wmma.mma-bf16-f32"));
+        assert!(!original.contains("bf16x2.dot-f32"));
         let safe = qwen35::wmma_stages(&config, "safe")?;
         assert!(!safe.projections && safe.safe_scores);
         for scope in ["experts", "exact-experts", "safe-experts"] {

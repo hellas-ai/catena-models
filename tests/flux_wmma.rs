@@ -12,6 +12,8 @@ fn source() -> String {
 #[test]
 fn linear_compiles() -> anyhow::Result<()> {
     let s = source();
+    assert!(!s.contains("bf16x2.dot-f32"));
+    assert!(s.contains("} stdlib.models.math.dot-pair-f32 ["));
     let module = compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
         GpuDialect::Hip,

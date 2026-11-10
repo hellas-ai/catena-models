@@ -74,6 +74,7 @@ fn emit_moe(
     let active = c0.experts_per_token * c0.intermediate_size;
     let shared = c0.shared_expert_intermediate_size.unwrap();
     let mut hex = [
+        include_str!("../catena/qwen35_simt_moe.hex"),
         include_str!("../catena/qwen35_moe.hex"),
         include_str!("../catena/qwen35_batch_moe.hex"),
     ]
@@ -544,18 +545,6 @@ fn source_with_scope(
     let kernels = s[s.find("(def program stdlib.models.coop.grid").unwrap()..].to_owned();
     s.truncate(cut);
     s.push_str(&kernels);
-    // Match the default BF16 GEMV's 256-lane accumulation tree for the first
-    // Qwen3.5 port; its recurrent state amplifies small projection differences.
-    let projection_start = s.find("(def program stdlib.qwen3.fused.dot :").unwrap();
-    let projection_end = s
-        .find("(def program stdlib.qwen3.fused.norm.square :")
-        .unwrap();
-    let projection = s[projection_start..projection_end]
-        .replace(&c(32), &c(256))
-        .replace(&c(31), &c(255))
-        .replace(&c(8), &c(1))
-        .replace(&c(7), &c(0));
-    s.replace_range(projection_start..projection_end, &projection);
     // The fused base merges shared-memory metatypes into its initial theories.
     let start = s.find("(def program qwen3.decoder-layer").unwrap();
     let end = start + s[start..].find("\n ))").unwrap() + 5;
@@ -1080,12 +1069,37 @@ fn source_with_scope(
         s.insert_str(entry, &batch);
     }
     crate::session_graph::append_layout(&mut s, config, options);
-    Ok(s)
+    // Cover inherited decode/head helpers, SIMT prefill, and exact/safe experts.
+    Ok(s.replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 "))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "compiles the full dense model for HIP and CUDA; no GPU required"]
+    fn dense_uses_scalar_pair_arithmetic_on_both_dialects() -> Result<()> {
+        use crate::catena::{compile_sources, runtime_sources};
+        use catena_lang::runtime::GpuDialect;
+
+        let config = ModelConfig::qwen35_0_8b();
+        let options = InferenceOptions::default();
+        let source = source_with_scope(&config, options, "none")?;
+        assert!(!source.contains("bf16x2.dot-f32"));
+        assert!(source.contains("} stdlib.models.math.dot-pair-f32 ["));
+        for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
+            let module = compile_sources(runtime_sources(&source), dialect)?;
+            assert!(!module.source.contains("catena_bf16_dot"));
+            assert!(!module.source.contains("__dmul_rn"));
+        }
+        let accelerated = source_with_scope(&config, options.with_wmma_prefill(true), "all")?;
+        assert!(!accelerated.contains("bf16x2.dot-f32"));
+        assert!(accelerated.contains("wmma.mma-bf16-f32"));
+        let moe = source_with_scope(&ModelConfig::qwen36_35b_a3b(), options, "none")?;
+        assert!(!moe.contains("bf16x2.dot-f32"));
+        Ok(())
+    }
 
     fn definition<'a>(source: &'a str, name: &str) -> &'a str {
         let start = source.find(&format!("(def program {name} :")).unwrap();
@@ -1117,6 +1131,7 @@ mod tests {
                     continue;
                 }
                 let generated = source_with_scope(&config, options, scope)?;
+                assert!(!generated.contains("bf16x2.dot-f32"), "{scope}");
                 let linear = definition(&generated, "stdlib.qwen35.batch.linear");
                 let (wmma, simt) = if scope == "all" { (4, 0) } else { (0, 4) };
                 assert_eq!(

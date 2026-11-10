@@ -104,7 +104,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     decoder.replace_range(begin..end, &gate);
     text.replace_range(start..decoder_end, &decoder);
     append_hex(&mut text, include_str!("../catena/cooperative.hex"));
-    text.push_str(include_str!("../catena/fused_projection.hex"));
+    text.push_str(include_str!("../catena/qwen35_simt.hex"));
     text.push_str(&include_str!("../catena/fused_normalization.hex").replace(
         "{{RMS_EPSILON_BITS}}",
         &format!("{:08X}", config.rms_norm_eps.to_bits()),

@@ -412,6 +412,8 @@ fn render(cfg: &Config, debug: bool) -> String {
         include_str!("../catena/resources.hex"),
         include_str!("../catena/cooperative.hex"),
         include_str!("../catena/qwen35_batch_projection.hex"),
+        include_str!("../catena/bf16_simt.hex"),
+        include_str!("../catena/bf16_attention.hex"),
         include_str!("../catena/fused_argmax.hex"),
         include_str!("../catena/whisper.hex"),
         &composition,
@@ -433,4 +435,5 @@ fn render(cfg: &Config, debug: bool) -> String {
         }
     }
     crate::catena::rename_programs(&source, &mapping)
+        .replace(" bf16x2.dot-f32 ", " stdlib.models.math.dot-pair-f32 ")
 }
