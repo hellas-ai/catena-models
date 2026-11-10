@@ -10,6 +10,7 @@ use std::fmt::Write;
 pub(crate) mod fused;
 #[path = "qwen35.rs"]
 mod qwen35;
+mod simt;
 
 const SOURCES: &[&str] = &[
     include_str!("../catena/memory.hex"),
@@ -281,6 +282,9 @@ fn emit_layer_selector(s: &mut String, layers: usize, group: &str, weights: &str
 
 pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     let mut s = graph_source(config, options)?;
+    if config.architecture == ModelArchitecture::Qwen3Dense {
+        s = simt::specialize(s, options.kernels);
+    }
     crate::session_graph::append(&mut s, config, options);
     Ok(s)
 }

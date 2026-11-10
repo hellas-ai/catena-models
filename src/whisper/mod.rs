@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn bundle_uses_scalar_pair_arithmetic() -> Result<()> {
+    fn bundle_uses_portable_reductions() -> Result<()> {
         let config: Config = serde_json::from_value(serde_json::json!({
             "model_type": "whisper", "d_model": 384, "num_mel_bins": 80,
             "encoder_layers": 4, "decoder_layers": 4,
@@ -524,7 +524,17 @@ mod tests {
         }))?;
         let source = graph::bundle(&config, false)?;
         assert!(!source.contains("bf16x2.dot-f32"));
-        assert!(source.contains("} stdlib.models.math.dot-pair-f32 ["));
+        assert!(source.contains("stdlib.models.simt.or"));
+        let raw =
+            metacat::theory::RawTheorySet::from_texts(crate::catena::runtime_sources(&source))?;
+        let prepared = crate::catena::prepare_sources(raw)?;
+        let program = prepared.theories.get(&"program".parse().unwrap()).unwrap();
+        assert!(
+            !program
+                .arrows
+                .keys()
+                .any(|n| n.as_str() == "stdlib.models.math.dot-pair-f32")
+        );
         Ok(())
     }
 }

@@ -412,6 +412,8 @@ fn render(cfg: &Config, debug: bool) -> String {
         include_str!("../catena/resources.hex"),
         include_str!("../catena/cooperative.hex"),
         include_str!("../catena/qwen35_batch_projection.hex"),
+        include_str!("../catena/bf16_simt.hex"),
+        include_str!("../catena/bf16_attention.hex"),
         include_str!("../catena/fused_argmax.hex"),
         include_str!("../catena/whisper.hex"),
         &composition,

@@ -17,6 +17,7 @@ pub(super) fn bundle(source: &str) -> String {
         include_str!("../catena/resources.hex"),
         include_str!("../catena/cooperative.hex"),
         include_str!("../catena/qwen35_batch_projection.hex"),
+        include_str!("../catena/bf16_simt.hex"),
         include_str!("../catena/flux.hex"),
         source,
     ] {

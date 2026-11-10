@@ -8,9 +8,11 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 use std::{path::PathBuf, time::Instant};
 #[test]
-#[ignore = "requires gfx11 HIP GPU and cached Klein weights; only 256x256"]
+#[ignore = "requires gfx11 HIP GPU, cached Klein weights, saved conditioning and a fresh baseline; only 256x256"]
 fn saved_denoiser_256() -> Result<()> {
-    let dir = PathBuf::from("/tmp/flux-denoiser-tune");
+    let dir = std::env::var_os("FLUX_DENOISER_BASELINE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/flux-denoiser-tune"));
     std::fs::create_dir_all(&dir)?;
     let baseline = std::env::var_os("FLUX_DENOISER_SAVE_BASELINE").is_some();
     let path = dir.join("baseline.bin");
@@ -65,9 +67,11 @@ fn saved_denoiser_256() -> Result<()> {
         let norm = reference.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>();
         let nrms = (err / norm).sqrt();
         eprintln!("same-input latent NRMS {nrms:.8}");
+        // Small SIMT conditioning projections round before the unchanged WMMA
+        // blocks; reordered sums can change the subsequent BF16 trajectory.
         ensure!(
-            raw == bytes,
-            "denoiser output differs from preceding WMMA path"
+            nrms <= 0.02,
+            "denoiser output NRMS exceeds 2% after reordered BF16 SIMT reductions"
         );
         std::fs::write(dir.join("optimized.bin"), raw)?;
     }

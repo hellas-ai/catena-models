@@ -74,6 +74,7 @@ fn emit_moe(
     let active = c0.experts_per_token * c0.intermediate_size;
     let shared = c0.shared_expert_intermediate_size.unwrap();
     let mut hex = [
+        include_str!("../catena/qwen35_simt_moe.hex"),
         include_str!("../catena/qwen35_moe.hex"),
         include_str!("../catena/qwen35_batch_moe.hex"),
     ]
@@ -544,18 +545,6 @@ fn source_with_scope(
     let kernels = s[s.find("(def program stdlib.models.coop.grid").unwrap()..].to_owned();
     s.truncate(cut);
     s.push_str(&kernels);
-    // Match the default BF16 GEMV's 256-lane accumulation tree for the first
-    // Qwen3.5 port; its recurrent state amplifies small projection differences.
-    let projection_start = s.find("(def program stdlib.qwen3.fused.dot :").unwrap();
-    let projection_end = s
-        .find("(def program stdlib.qwen3.fused.norm.square :")
-        .unwrap();
-    let projection = s[projection_start..projection_end]
-        .replace(&c(32), &c(256))
-        .replace(&c(31), &c(255))
-        .replace(&c(8), &c(1))
-        .replace(&c(7), &c(0));
-    s.replace_range(projection_start..projection_end, &projection);
     // The fused base merges shared-memory metatypes into its initial theories.
     let start = s.find("(def program qwen3.decoder-layer").unwrap();
     let end = start + s[start..].find("\n ))").unwrap() + 5;
