@@ -603,7 +603,7 @@ mod tests {
         let accelerated = source(&config, enabled)?;
         assert!(!accelerated.contains("bf16x2.dot-f32"));
         assert!(accelerated.contains("stdlib.qwen35.batch.wmma-project"));
-        assert!(accelerated.contains("wmma.mma-bf16-f32"));
+        assert!(accelerated.contains("stdlib.qwen35.tile.dot.fold"));
         let full_start = accelerated
             .find("(def program stdlib.qwen35.batch.full :")
             .unwrap();
@@ -675,7 +675,7 @@ mod tests {
         );
         assert!(!linear.contains("} stdlib.qwen35.batch.project ["));
         let original = source(&config, InferenceOptions::default())?;
-        assert!(!original.contains("wmma.mma-bf16-f32"));
+        assert!(!original.contains("stdlib.qwen35.tile.dot.fold"));
         assert!(!original.contains("bf16x2.dot-f32"));
         let safe = qwen35::wmma_stages(&config, "safe")?;
         assert!(!safe.projections && safe.safe_scores);

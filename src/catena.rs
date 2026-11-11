@@ -35,6 +35,7 @@ pub fn compile(
     raw: metacat::theory::RawTheorySet,
     dialect: catena_lang::runtime::GpuDialect,
 ) -> Result<catena_lang::runtime::RuntimeModule> {
+    let raw = raw.merge(tile_sources(dialect))?;
     let raw = prepare_sources(raw)?;
     let module = catena_lang::compile::compile(
         &mut catena_lang::report::CompileReport::new(raw),
@@ -45,6 +46,17 @@ pub fn compile(
         std::fs::write(path, &module.source)?;
     }
     Ok(module)
+}
+
+fn tile_sources(dialect: catena_lang::runtime::GpuDialect) -> metacat::theory::RawTheorySet {
+    metacat::theory::RawTheorySet::from_texts([
+        include_str!("catena/qwen35_tile.hex"),
+        match dialect {
+            catena_lang::runtime::GpuDialect::Cuda => include_str!("catena/qwen35_tile_cuda.hex"),
+            catena_lang::runtime::GpuDialect::Hip => include_str!("catena/qwen35_tile_hip.hex"),
+        },
+    ])
+    .expect("valid tile helper definitions")
 }
 /// Compile source texts through the persistent compiler module cache.
 /// The cache includes this adapter's source-pruning policy and saves the full ABI.
@@ -64,6 +76,13 @@ pub fn compile_sources<'a>(
     let module = match ModuleCache::from_sources(&sources, CodegenKind::Default, dialect) {
         Some(cache) => cache
             .with_context(include_str!("catena.rs"))
+            .with_context(include_str!("catena/qwen35_tile.hex"))
+            .with_context(match dialect {
+                catena_lang::runtime::GpuDialect::Cuda => {
+                    include_str!("catena/qwen35_tile_cuda.hex")
+                }
+                catena_lang::runtime::GpuDialect::Hip => include_str!("catena/qwen35_tile_hip.hex"),
+            })
             .get_or_compile(build)?,
         None => build()?,
     };

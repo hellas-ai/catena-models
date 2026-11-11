@@ -48,7 +48,8 @@ Qwen3.5/3.6 path. `--wmma-prefill` remains accepted; use `--no-wmma-prefill` to
 select SIMT explicitly. Qwen3 models require `--no-wmma-prefill` because their
 prefill implementation does not support this WMMA path.
 
-On RDNA3 HIP GPUs, WMMA uses tiled attention and BF16 matrix-core projections.
+On RDNA3 HIP and NVIDIA sm_80+ CUDA GPUs, prefill uses tiled attention and BF16
+matrix-core projections. CUDA uses native `mma.sync` instructions; HIP uses WMMA.
 Dense models also use WMMA gate/up/down FFN projections; MoE models use grouped
 expert projections. DeltaNet's QKV, Z, alpha, and beta input projections use WMMA
 during prefill; token decode and the vocabulary projection retain SIMT arithmetic.
@@ -56,8 +57,9 @@ WMMA changes accumulation order and can change logits and generated tokens.
 Set `CATENA_WMMA_COMPONENTS=safe` to use the exact tiled attention variant and,
 for MoE, exact experts. Dense FFNs retain SIMT arithmetic in this safe selection.
 See [prefill measurements](PREFILL_BENCHMARKS.md) for numerical checks and
-component ablations. On CUDA, set `CATENA_WMMA_EMULATE=1` for the default WMMA
-path, or pass `--no-wmma-prefill` to use SIMT.
+component ablations. The model graph and reduction loops share Hex code; small
+CUDA/HIP Hex helpers select native fragment loads, MMA operations, and output coordinates.
+`CATENA_WMMA_EMULATE=1` remains a HIP arithmetic diagnostic.
 
 All GPU model exponentials use the shared `stdlib.models.math.exp` Hex implementation,
 including DeltaNet decay and online attention. It uses fixed F32 arithmetic,

@@ -1095,7 +1095,7 @@ mod tests {
         }
         let accelerated = source_with_scope(&config, options.with_wmma_prefill(true), "all")?;
         assert!(!accelerated.contains("bf16x2.dot-f32"));
-        assert!(accelerated.contains("wmma.mma-bf16-f32"));
+        assert!(accelerated.contains("stdlib.qwen35.tile.dot.fold"));
         let moe = source_with_scope(&ModelConfig::qwen36_35b_a3b(), options, "none")?;
         assert!(!moe.contains("bf16x2.dot-f32"));
         Ok(())

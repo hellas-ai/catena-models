@@ -1,3 +1,5 @@
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
 use catena_lang::runtime::{GpuDialect, Runtime, RuntimeModule, Value};
 use catena_models::{
     catena::{compile_sources, core_sources},
@@ -6,13 +8,10 @@ use catena_models::{
 const D: usize = 256;
 const QH: usize = 16;
 const KV: usize = 2;
-fn compile_attention() -> anyhow::Result<RuntimeModule> {
-    compile_attention_kind(false)
-}
-fn compile_attention_kind(exact: bool) -> anyhow::Result<RuntimeModule> {
-    compile_attention_config(if exact { 1 } else { 0 })
-}
 fn compile_attention_config(kind: u8) -> anyhow::Result<RuntimeModule> {
+    compile_attention_config_for(kind, tiles::dialect())
+}
+fn compile_attention_config_for(kind: u8, dialect: GpuDialect) -> anyhow::Result<RuntimeModule> {
     let exact = kind > 0;
     let norm = include_str!("../src/catena/qwen35.hex");
     let norm = &norm[norm
@@ -95,21 +94,28 @@ fn compile_attention_config(kind: u8) -> anyhow::Result<RuntimeModule> {
             include_str!("../src/catena/resources.hex"),
             &source,
         ]),
-        GpuDialect::Hip,
+        dialect,
     )
 }
 #[test]
 fn tiled_attention_compiles() -> anyhow::Result<()> {
-    compile_attention()?;
+    for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
+        for kind in 0..=2 {
+            let module = compile_attention_config_for(kind, dialect)?;
+            if kind < 2 {
+                tiles::check_native(&module, dialect);
+            }
+        }
+    }
     Ok(())
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn tiled_attention_matches_cpu() -> anyhow::Result<()> {
     check(false)
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn exact_context_matches_cpu() -> anyhow::Result<()> {
     check(true)
 }
@@ -117,12 +123,12 @@ fn check(exact: bool) -> anyhow::Result<()> {
     check_kind(if exact { 1 } else { 0 })
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn safe_attention_matches_cpu() -> anyhow::Result<()> {
     check_kind(2)
 }
 fn check_kind(kind: u8) -> anyhow::Result<()> {
-    let mut runtime = Runtime::new(GpuDialect::Hip)?;
+    let mut runtime = Runtime::new(tiles::dialect())?;
     let artifact = runtime.load(compile_attention_config(kind)?)?;
     let round = |x: f32| bf16_to_f32(f32_to_bf16(x));
     for (rows, start) in [(1, 0), (17, 3), (65, 0)] {
@@ -196,4 +202,13 @@ fn check_kind(kind: u8) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[test]
+#[ignore = "requires CUDA toolkit; no GPU needed"]
+fn cuda_toolkit_compiles() -> anyhow::Result<()> {
+    tiles::check_toolkit(
+        compile_attention_config_for(0, GpuDialect::Cuda)?,
+        "attention",
+    )
 }
