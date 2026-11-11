@@ -1,3 +1,5 @@
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
 use catena_lang::runtime::{GpuDialect, Runtime, RuntimeModule, Value};
 use catena_models::{
     catena::{compile_sources, core_sources},
@@ -11,10 +13,10 @@ const I: usize = 512;
 const S: usize = 512;
 const ACTIVE: usize = 64;
 const STRIDE: usize = ACTIVE + K * I + S;
-fn compile_moe(exact: bool) -> anyhow::Result<RuntimeModule> {
-    compile_moe_kind(if exact { 1 } else { 0 })
-}
 fn compile_moe_kind(kind: u8) -> anyhow::Result<RuntimeModule> {
+    compile_moe_kind_for(kind, tiles::dialect())
+}
+fn compile_moe_kind_for(kind: u8, dialect: GpuDialect) -> anyhow::Result<RuntimeModule> {
     let exact = kind > 0;
     let mut source = include_str!("../src/catena/qwen35_simt.hex")
         .replace("qwen3.fused.", "stdlib.qwen3.fused.");
@@ -105,23 +107,28 @@ fn compile_moe_kind(kind: u8) -> anyhow::Result<RuntimeModule> {
             include_str!("../src/catena/resources.hex"),
             &source,
         ]),
-        GpuDialect::Hip,
+        dialect,
     )
 }
 #[test]
 fn grouped_moe_compiles() -> anyhow::Result<()> {
-    compile_moe(false)?;
-    compile_moe(true)?;
-    compile_moe_kind(2)?;
+    for dialect in [GpuDialect::Hip, GpuDialect::Cuda] {
+        for kind in 0..=2 {
+            let module = compile_moe_kind_for(kind, dialect)?;
+            if kind < 2 {
+                tiles::check_native(&module, dialect);
+            }
+        }
+    }
     Ok(())
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn grouped_moe_matches_cpu() -> anyhow::Result<()> {
     check(false)
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn exact_gate_matches_cpu() -> anyhow::Result<()> {
     check(true)
 }
@@ -129,13 +136,13 @@ fn check(exact: bool) -> anyhow::Result<()> {
     check_kind(if exact { 1 } else { 0 })
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP or CUDA GPU"]
 fn safe_moe_matches_original_bits() -> anyhow::Result<()> {
     check_kind(2)
 }
 fn check_kind(kind: u8) -> anyhow::Result<()> {
     let exact = kind > 0;
-    let mut runtime = Runtime::new(GpuDialect::Hip)?;
+    let mut runtime = Runtime::new(tiles::dialect())?;
     let artifact = runtime.load(compile_moe_kind(kind)?)?;
     let round = |x: f32| bf16_to_f32(f32_to_bf16(x));
     for rows in [1, 17, 33] {
@@ -302,4 +309,10 @@ fn check_kind(kind: u8) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+#[test]
+#[ignore = "requires CUDA toolkit; no GPU needed"]
+fn cuda_toolkit_compiles() -> anyhow::Result<()> {
+    tiles::check_toolkit(compile_moe_kind_for(0, GpuDialect::Cuda)?, "moe")
 }

@@ -1,0 +1,109 @@
+# Native CUDA 16x16 BF16 tile. All 32 lanes must participate.
+# PTX lane group g=tid/4, pair t=tid%4. A registers select rows g/g+8
+# and K pairs t/t+4; B registers select columns g/g+8 and K pairs t/t+4.
+# Output slots 0..3 and 4..7 are the two native m16n8 accumulator fragments.
+(def program stdlib.qwen35.tile.row : {(u64 val) (u64 val)} -> (u64 val) =
+ ([tid j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.div [g.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [i.])
+  ({[.i] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.div [half.])
+  ({[.half] (const.u64.0x0000000000000008)} stdlib.models.memory.u64.mul [offset.])
+  ({[.g] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.col : {(u64 val) (u64 val)} -> (u64 val) =
+ ([tid j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [t.])
+  ({[.t] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.mul [base.])
+  ({[.j] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.rem [odd.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.div [half.])
+  ({[.half] (const.u64.0x0000000000000008)} stdlib.models.memory.u64.mul [offset.])
+  ({[.base] [.odd]} stdlib.models.memory.u64.add [v.])
+  ({[.v] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.a-row : {(u64 val) (u64 val)} -> (u64 val) =
+ ([tid j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.div [g.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [reg.])
+  ({[.reg] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.rem [hi.])
+  ({[.hi] (const.u64.0x0000000000000008)} stdlib.models.memory.u64.mul [offset.])
+  ({[.g] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.a-k : {(u64 val) (u64 val) (u64 val)} -> (u64 val) =
+ ([tid k j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [t.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [reg.])
+  ({[.reg] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.div [hi.])
+  ({[.hi] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.mul [offset.])
+  ({[.k] [.t]} stdlib.models.memory.u64.add [kt.])
+  ({[.kt] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.b-row : {(u64 val) (u64 val)} -> (u64 val) =
+ ([tid j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.div [g.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [reg.])
+  ({[.reg] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.div [hi.])
+  ({[.hi] (const.u64.0x0000000000000008)} stdlib.models.memory.u64.mul [offset.])
+  ({[.g] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.b-k : {(u64 val) (u64 val) (u64 val)} -> (u64 val) =
+ ([tid k j.]
+  ({[.tid] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [t.])
+  ({[.j] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.rem [reg.])
+  ({[.reg] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.rem [hi.])
+  ({[.hi] (const.u64.0x0000000000000004)} stdlib.models.memory.u64.mul [offset.])
+  ({[.k] [.t]} stdlib.models.memory.u64.add [kt.])
+  ({[.kt] [.offset]} stdlib.models.memory.u64.add [result.])
+  [.result]
+ ))
+(def program stdlib.qwen35.tile.dot : {({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) (bf16x2 val)} *)} *)} *)} *)} *)} *)} *) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) ({(bf16x2 val) (bf16x2 val)} *)} *)} *)} *)} *)} *)} *) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) (f32 val)} *)} *)} *)} *)} *)} *)} *)} -> ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) ({(f32 val) (f32 val)} *)} *)} *)} *)} *)} *)} *) =
+ ([a b acc.]
+  ([.a] *.elim [a0 atail0.])
+  ([.atail0] *.elim [a1 atail1.])
+  ([.atail1] *.elim [a2 atail2.])
+  ([.atail2] *.elim [a3 atail3.])
+  ([.atail3] *.elim [a4 atail4.])
+  ([.atail4] *.elim [a5 atail5.])
+  ([.atail5] *.elim [a6 a7.])
+  ([.b] *.elim [b0 btail0.])
+  ([.btail0] *.elim [b1 btail1.])
+  ([.btail1] *.elim [b2 btail2.])
+  ([.btail2] *.elim [b3 btail3.])
+  ([.btail3] *.elim [b4 btail4.])
+  ([.btail4] *.elim [b5 btail5.])
+  ([.btail5] *.elim [b6 b7.])
+  ([.acc] *.elim [c0 ctail0.])
+  ([.ctail0] *.elim [c1 ctail1.])
+  ([.ctail1] *.elim [c2 ctail2.])
+  ([.ctail2] *.elim [c3 ctail3.])
+  ([.ctail3] *.elim [c4 ctail4.])
+  ([.ctail4] *.elim [c5 ctail5.])
+  ([.ctail5] *.elim [c6 c7.])
+  ({[.a0] [.a1] [.a2] [.a3]} mma.m16n8k16.bf16.a.pack [af.])
+  ({[.b0] [.b1]} mma.m16n8k16.bf16.b.pack [bf0.])
+  ({[.c0] [.c1] [.c2] [.c3]} mma.m16n8k16.f32.acc.pack [cf0.])
+  ({[.af] [.bf0] [.cf0]} mma.m16n8k16.bf16-f32 [df0.])
+  ({[.df0] (const.u32.0x00000000)} mma.m16n8k16.f32.acc.get [d0.])
+  ({[.df0] (const.u32.0x00000001)} mma.m16n8k16.f32.acc.get [d1.])
+  ({[.df0] (const.u32.0x00000002)} mma.m16n8k16.f32.acc.get [d2.])
+  ({[.df0] (const.u32.0x00000003)} mma.m16n8k16.f32.acc.get [d3.])
+  ({[.b2] [.b3]} mma.m16n8k16.bf16.b.pack [bf1.])
+  ({[.c4] [.c5] [.c6] [.c7]} mma.m16n8k16.f32.acc.pack [cf1.])
+  ({[.af] [.bf1] [.cf1]} mma.m16n8k16.bf16-f32 [df1.])
+  ({[.df1] (const.u32.0x00000000)} mma.m16n8k16.f32.acc.get [d4.])
+  ({[.df1] (const.u32.0x00000001)} mma.m16n8k16.f32.acc.get [d5.])
+  ({[.df1] (const.u32.0x00000002)} mma.m16n8k16.f32.acc.get [d6.])
+  ({[.df1] (const.u32.0x00000003)} mma.m16n8k16.f32.acc.get [d7.])
+  ({[.d6] [.d7]} *.intro [p6.])
+  ({[.d5] [.p6]} *.intro [p5.])
+  ({[.d4] [.p5]} *.intro [p4.])
+  ({[.d3] [.p4]} *.intro [p3.])
+  ({[.d2] [.p3]} *.intro [p2.])
+  ({[.d1] [.p2]} *.intro [p1.])
+  ({[.d0] [.p1]} *.intro [p0.])
+  [.p0]
+ ))

@@ -1,24 +1,26 @@
+#[allow(dead_code)]
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
 use catena_models::{
     catena::InferenceOptions, hfhub::download_gguf, model::Model, tokenizer::QwenTokenizer,
 };
 
 #[test]
-#[ignore = "requires gfx11 HIP GPU and a cached BF16 Qwen3.5 MoE model"]
+#[ignore = "requires a supported HIP or CUDA GPU and a cached BF16 Qwen3.5 model"]
 fn compile_accelerated_model() -> anyhow::Result<()> {
-    use catena_lang::runtime::{GpuDialect, Runtime};
+    use catena_lang::runtime::Runtime;
     use catena_models::catena::{
         compile_sources, generated_model_source_for_options, runtime_sources,
     };
-    let selector = std::env::var("QWEN35_MODEL")
-        .unwrap_or_else(|_| "unsloth/Qwen3.6-35B-A3B-GGUF:BF16".into());
+    let selector = std::env::var("QWEN35_MODEL").unwrap_or_else(|_| default_model().into());
     let checkpoint = download_gguf(&selector)?;
     let config = catena_models::checkpoint::read_gguf_model_config(&checkpoint.primary)?;
     let source = generated_model_source_for_options(
         &config,
         InferenceOptions::default().with_wmma_prefill(true),
     )?;
-    let module = compile_sources(runtime_sources(&source), GpuDialect::Hip)?;
-    let mut runtime = Runtime::new(GpuDialect::Hip)?;
+    let module = compile_sources(runtime_sources(&source), tiles::dialect())?;
+    let mut runtime = Runtime::new(tiles::dialect())?;
     runtime.load(module)?;
     Ok(())
 }
@@ -67,10 +69,9 @@ fn run(selector: &str, wmma: bool, cases: &[Case]) -> anyhow::Result<Vec<ResultR
 }
 
 #[test]
-#[ignore = "requires gfx11 HIP GPU and a cached BF16 Qwen3.5 MoE model"]
+#[ignore = "requires a supported HIP or CUDA GPU and a cached BF16 Qwen3.5 model"]
 fn wmma_prefill_matches_simt_model() -> anyhow::Result<()> {
-    let selector = std::env::var("QWEN35_MODEL")
-        .unwrap_or_else(|_| "unsloth/Qwen3.6-35B-A3B-GGUF:BF16".to_owned());
+    let selector = std::env::var("QWEN35_MODEL").unwrap_or_else(|_| default_model().to_owned());
     let tokenizer = QwenTokenizer::from_gguf(download_gguf(&selector)?.primary)?
         .ok_or_else(|| anyhow::anyhow!("missing tokenizer"))?;
     let paragraph = "The river flows through the valley, carrying water from the mountains to the sea. People have built towns along its banks for centuries. Explain how seasonal rainfall affects the river and the surrounding farmland. ";
@@ -196,4 +197,11 @@ fn dense_wmma_prefill_diagnostics() -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+fn default_model() -> &'static str {
+    match tiles::dialect() {
+        catena_lang::runtime::GpuDialect::Cuda => "unsloth/Qwen3.5-2B-GGUF:BF16",
+        catena_lang::runtime::GpuDialect::Hip => "unsloth/Qwen3.6-35B-A3B-GGUF:BF16",
+    }
 }

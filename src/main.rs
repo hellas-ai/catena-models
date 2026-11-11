@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, value_enum, default_value_t = KernelKind::Fused)]
     kernels: KernelKind,
 
-    /// Use RDNA3 WMMA prefill (enabled by default; CUDA requires CATENA_WMMA_EMULATE=1).
+    /// Use native matrix-core prefill on HIP or CUDA (enabled by default).
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
 
@@ -103,13 +103,6 @@ impl Args {
 }
 
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
-    let dialect = catena_models::model::configured_gpu_dialect()?;
-    ensure!(
-        !args.wmma_prefill_enabled()
-            || dialect == catena_lang::runtime::GpuDialect::Hip
-            || std::env::var_os("CATENA_WMMA_EMULATE").is_some_and(|value| value == "1"),
-        "WMMA prefill requires the HIP backend on gfx11 or CATENA_WMMA_EMULATE=1; use --no-wmma-prefill for SIMT"
-    );
     Ok(InferenceOptions::default()
         .with_kernels(args.kernels)
         .with_wmma_prefill(args.wmma_prefill_enabled()))
