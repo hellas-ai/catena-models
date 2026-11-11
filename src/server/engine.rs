@@ -23,6 +23,8 @@ use std::{
 };
 use tokio::sync::mpsc;
 
+const DEFAULT_MAX_OUTPUT_TOKENS: usize = 32 * 1024;
+
 #[derive(Clone, Debug)]
 pub struct Generation {
     pub messages: Vec<Value>,
@@ -349,7 +351,7 @@ impl QwenBackend {
         }
         let max_tokens = request
             .max_tokens
-            .unwrap_or_else(|| 512.min(self.ctx_size - tokens.len()));
+            .unwrap_or_else(|| DEFAULT_MAX_OUTPUT_TOKENS.min(self.ctx_size - tokens.len()));
         let required = tokens
             .len()
             .checked_add(max_tokens)
@@ -479,7 +481,7 @@ impl QwenBackend {
 
 impl Backend for QwenBackend {
     fn generate(&mut self, mut request: Generation, sink: &Sink) -> Result<(), Failure> {
-        let budget = request.max_tokens.unwrap_or(512);
+        let budget = request.max_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
         let mut prompt_tokens = 0;
         let mut completion_tokens = 0;
         let mut reasoning_tokens = 0;

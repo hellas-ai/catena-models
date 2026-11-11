@@ -62,7 +62,9 @@ Chat requests support:
   and zero frequency/presence penalties are accepted. Other values are rejected.
   `seed` is accepted but has no effect because decoding has no random state.
 - `max_completion_tokens` or `max_tokens`; if both appear they must agree.
-  The default is the smaller of 512 and the remaining context. Explicit output
+  The default is the smaller of 32,768 and the remaining context, including
+  reasoning and tool-call tokens. Responses uses the same default when
+  `max_output_tokens` is omitted. Explicit output
   limits plus prompt tokens must fit `--ctx-size`; history is never truncated.
   Server mode does not use the one-shot `--max-new-tokens` or `--ignore-eos` flags.
 - Up to four nonempty `stop` strings. Stop text and model end markers are omitted
