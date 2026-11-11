@@ -657,25 +657,17 @@ mod tests {
         let end = accelerated[linear + 1..].find("(def program ").unwrap() + linear + 1;
         let full = &accelerated[full..linear];
         let linear = &accelerated[linear..end];
-        assert_eq!(
-            full.matches("} stdlib.qwen35.batch.wmma-project [").count(),
-            3
-        );
+        assert_eq!(full.matches("} stdlib.qwen35.dense.project [").count(), 3);
         assert!(full.contains("} stdlib.qwen35.wmma.attention.run ["));
         for body in [full, linear] {
-            assert!(body.contains("} stdlib.qwen35.wmma.projection.gate ["));
+            assert!(body.contains("} stdlib.qwen35.dense.projection.gate ["));
             assert_eq!(
-                body.matches("} stdlib.qwen35.wmma.projection.residual [")
+                body.matches("} stdlib.qwen35.dense.projection.residual [")
                     .count(),
                 2
             );
         }
-        assert_eq!(
-            linear
-                .matches("} stdlib.qwen35.batch.wmma-project [")
-                .count(),
-            4
-        );
+        assert_eq!(linear.matches("} stdlib.qwen35.dense.project [").count(), 4);
         assert!(!linear.contains("} stdlib.qwen35.batch.project ["));
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("stdlib.qwen35.tile.dot.fold"));

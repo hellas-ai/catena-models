@@ -649,6 +649,10 @@ fn source_with_scope(
     if config.architecture == ModelArchitecture::Qwen35Moe {
         kernels.push_str(include_str!("../catena/qwen35_full_prepare.hex"));
     }
+    if config.architecture == ModelArchitecture::Qwen35Dense && wmma.projections {
+        kernels.push_str(include_str!("../catena/lfm3_wmma.hex"));
+        kernels.push_str(include_str!("../catena/qwen35_dense.hex"));
+    }
     for (key, value) in [
         ("KEY_DIM", key_dim),
         ("KEY_HEADS", key_heads),
@@ -808,6 +812,11 @@ fn source_with_scope(
             .replace("} qwen35.l2 [", "} qwen35.coop-l2 [")
             .replace("} qwen35.gated-norm [", "} qwen35.coop-gated [")
             .replace("} qwen35.delta [", "} qwen35.fused-delta [");
+    }
+    if !moe && options.wmma_prefill && key_dim <= 256 && value_dim <= 256 {
+        s = s
+            .replace("} qwen35.l2 [", "} qwen35.coop-l2 [")
+            .replace("} qwen35.gated-norm [", "} qwen35.coop-gated [");
     }
     if !moe && key_dim == 128 {
         s = s.replace("} qwen35.delta [", "} qwen35.fused-delta [");
@@ -1096,6 +1105,9 @@ mod tests {
         let accelerated = source_with_scope(&config, options.with_wmma_prefill(true), "all")?;
         assert!(!accelerated.contains("bf16x2.dot-f32"));
         assert!(accelerated.contains("stdlib.qwen35.tile.dot.fold"));
+        // HIP block layouts must retain the existing projection path on CUDA.
+        let cuda = compile_sources(runtime_sources(&accelerated), GpuDialect::Cuda)?;
+        assert!(!cuda.source.contains("catena_bf16_dot"));
         let moe = source_with_scope(&ModelConfig::qwen36_35b_a3b(), options, "none")?;
         assert!(!moe.contains("bf16x2.dot-f32"));
         Ok(())
@@ -1134,13 +1146,19 @@ mod tests {
                 assert!(!generated.contains("bf16x2.dot-f32"), "{scope}");
                 let linear = definition(&generated, "stdlib.qwen35.batch.linear");
                 let (wmma, simt) = if scope == "all" { (4, 0) } else { (0, 4) };
-                assert_eq!(
-                    linear
-                        .matches("} stdlib.qwen35.batch.wmma-project [")
-                        .count(),
-                    wmma,
-                    "{scope}"
-                );
+                let projection = if config.architecture == ModelArchitecture::Qwen35Dense {
+                    "} stdlib.qwen35.dense.project ["
+                } else {
+                    "} stdlib.qwen35.batch.wmma-project ["
+                };
+                assert_eq!(linear.matches(projection).count(), wmma, "{scope}");
+                let scan =
+                    if config.architecture == ModelArchitecture::Qwen35Dense && scope == "all" {
+                        "} stdlib.qwen35.dense.scan-l8 ["
+                    } else {
+                        "} stdlib.qwen35.batch.scan ["
+                    };
+                assert!(linear.contains(scan), "{scope}");
                 assert_eq!(
                     linear.matches("} stdlib.qwen35.batch.project [").count(),
                     simt,
@@ -1611,16 +1629,7 @@ fn emit_entry(
         "logits",
     );
     free(s, "normalized-final", "logits", "logits-final");
-    call(
-        s,
-        &["logits-final"],
-        if config.architecture == ModelArchitecture::Qwen35Moe {
-            "qwen3.fused.argmax"
-        } else {
-            "qwen3.argmax"
-        },
-        "token",
-    );
+    call(s, &["logits-final"], "qwen3.fused.argmax", "token");
     let mut result = vec!["cache-result", "shadow-final"];
     if moe {
         result.extend(SCRATCH);

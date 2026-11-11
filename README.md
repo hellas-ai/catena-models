@@ -53,6 +53,10 @@ matrix-core projections. CUDA uses native `mma.sync` instructions; HIP uses WMMA
 Dense models also use WMMA gate/up/down FFN projections; MoE models use grouped
 expert projections. DeltaNet's QKV, Z, alpha, and beta input projections use WMMA
 during prefill; token decode and the vocabulary projection retain SIMT arithmetic.
+Dense HIP prefill selects larger block projections and an eight-lane DeltaNet
+scan; small or unaligned input shapes and CUDA retain the existing projection fallback.
+Dense vocabulary selection uses the shared parallel argmax helper. MoE kernel
+selection is unchanged. See [dense performance measurements](QWEN35_DENSE_PERFORMANCE.md).
 WMMA changes accumulation order and can change logits and generated tokens.
 Set `CATENA_WMMA_COMPONENTS=safe` to use the exact tiled attention variant and,
 for MoE, exact experts. Dense FFNs retain SIMT arithmetic in this safe selection.
