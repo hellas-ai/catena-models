@@ -31,32 +31,25 @@ pub fn core_sources() -> impl Iterator<Item = &'static str> {
 pub fn runtime_sources(model: &str) -> impl Iterator<Item = &str> {
     core_sources().map(|s| -> &str { s }).chain([model])
 }
-pub fn compile(
-    raw: metacat::theory::RawTheorySet,
+/// The complete program `compile_sources` builds from `sources` for
+/// `dialect`: the sources plus the dialect's tile helpers, pruned to what the
+/// exported programs reach.
+pub fn program_sources<'a>(
+    sources: impl IntoIterator<Item = &'a str>,
     dialect: catena_lang::runtime::GpuDialect,
-) -> Result<catena_lang::runtime::RuntimeModule> {
-    let raw = raw.merge(tile_sources(dialect))?;
-    let raw = prepare_sources(raw)?;
-    let module = catena_lang::compile::compile(
-        &mut catena_lang::report::CompileReport::new(raw),
-        catena_lang::codegen::CodegenKind::Default,
-        dialect,
-    )?;
-    if let Some(path) = std::env::var_os("CATENA_QWEN3_CPP") {
-        std::fs::write(path, &module.source)?;
-    }
-    Ok(module)
+) -> Result<metacat::theory::RawTheorySet> {
+    let raw =
+        metacat::theory::RawTheorySet::from_texts(sources.into_iter().chain(tile_texts(dialect)))?;
+    prepare_sources(raw)
 }
-
-fn tile_sources(dialect: catena_lang::runtime::GpuDialect) -> metacat::theory::RawTheorySet {
-    metacat::theory::RawTheorySet::from_texts([
+fn tile_texts(dialect: catena_lang::runtime::GpuDialect) -> [&'static str; 2] {
+    [
         include_str!("catena/qwen35_tile.hex"),
         match dialect {
             catena_lang::runtime::GpuDialect::Cuda => include_str!("catena/qwen35_tile_cuda.hex"),
             catena_lang::runtime::GpuDialect::Hip => include_str!("catena/qwen35_tile_hip.hex"),
         },
-    ])
-    .expect("valid tile helper definitions")
+    ]
 }
 /// Compile source texts through the persistent compiler module cache.
 /// The cache includes this adapter's source-pruning policy and saves the full ABI.
@@ -67,22 +60,22 @@ pub fn compile_sources<'a>(
     use catena_lang::{codegen::CodegenKind, runtime::ModuleCache};
     let started = std::time::Instant::now();
     let sources = sources.into_iter().collect::<Vec<_>>();
-    let build = || {
-        compile(
-            metacat::theory::RawTheorySet::from_texts(sources.iter().copied())?,
+    let build = || -> Result<_> {
+        let raw = program_sources(sources.iter().copied(), dialect)?;
+        let report = &mut catena_lang::report::CompileReport::new(raw);
+        Ok(catena_lang::compile::compile(
+            report,
+            CodegenKind::Default,
             dialect,
-        )
+        )?)
     };
     let module = match ModuleCache::from_sources(&sources, CodegenKind::Default, dialect) {
-        Some(cache) => cache
-            .with_context(include_str!("catena.rs"))
-            .with_context(include_str!("catena/qwen35_tile.hex"))
-            .with_context(match dialect {
-                catena_lang::runtime::GpuDialect::Cuda => {
-                    include_str!("catena/qwen35_tile_cuda.hex")
-                }
-                catena_lang::runtime::GpuDialect::Hip => include_str!("catena/qwen35_tile_hip.hex"),
-            })
+        Some(cache) => tile_texts(dialect)
+            .into_iter()
+            .fold(
+                cache.with_context(include_str!("catena.rs")),
+                |cache, tile| cache.with_context(tile),
+            )
             .get_or_compile(build)?,
         None => build()?,
     };
