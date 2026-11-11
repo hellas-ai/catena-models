@@ -74,6 +74,12 @@ fn compile_attention_config_for(kind: u8, dialect: GpuDialect) -> anyhow::Result
     }
     source.push_str(r#"(def program test-attention : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
       ([query cache qg start kb vb.] {[.query] [.cache] [.qg] [.start] [.kb] [.vb]} stdlib.qwen35.wmma.attention.run))"#);
+    source.push_str(r#"
+(def program test-softmax : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([scores prob keys stages shared rows.] {[.scores] [.prob] [.keys] [.stages] [.shared] [.rows]} stdlib.qwen35.wmma.attention.normalize))
+(def program test-stream-softmax : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+ ([scores prob keys stages shared rows.] {[.scores] [.prob] [.keys] [.stages] [.shared] [.rows]} stdlib.qwen35.wmma.attention.normalize-stream))
+"#);
     if exact {
         source = source.replace(
             "stdlib.qwen35.wmma.attention.run))",
@@ -131,7 +137,7 @@ fn check_kind(kind: u8) -> anyhow::Result<()> {
     let mut runtime = Runtime::new(tiles::dialect())?;
     let artifact = runtime.load(compile_attention_config(kind)?)?;
     let round = |x: f32| bf16_to_f32(f32_to_bf16(x));
-    for (rows, start) in [(1, 0), (17, 3), (65, 0)] {
+    for (rows, start) in [(1, 0), (17, 3), (65, 0), (1, 16200)] {
         let keys = rows + start;
         let capacity = keys + 1;
         let vb = capacity * KV * D;
@@ -211,4 +217,86 @@ fn cuda_toolkit_compiles() -> anyhow::Result<()> {
         compile_attention_config_for(0, GpuDialect::Cuda)?,
         "attention",
     )
+}
+
+#[test]
+#[ignore = "requires a supported HIP or CUDA GPU"]
+fn long_context_softmax_matches_cpu() -> anyhow::Result<()> {
+    let mut runtime = Runtime::new(tiles::dialect())?;
+    let artifact = runtime.load(compile_attention_config(0)?)?;
+    // Dispatcher boundary, former AMD/CUDA shared-memory boundaries, and the
+    // checkpoint's maximum context. Also exercise non-power-of-two row lengths.
+    for keys in [
+        17usize, 8192, 8193, 12032, 16112, 16128, 16200, 16208, 16384, 32768, 131072, 262144,
+    ] {
+        let rows = 2;
+        let live = rows * QH * keys;
+        let mut scores = vec![f32::NAN; live + 37];
+        let mut expected = Vec::with_capacity(live);
+        for row in 0..rows * QH {
+            let visible = if row % 3 == 0 { 1 } else { keys - row % 7 };
+            // Uniform rows check exact BF16 probabilities. Other rows cover
+            // stable exponentiation, causal -infinity masks, and varied maxima.
+            let values = (0..visible)
+                .map(|k| {
+                    if row % 2 == 0 {
+                        0.0
+                    } else {
+                        ((k * 13 + row * 7) % 97) as f32 / 8.0 - 6.0
+                    }
+                })
+                .collect::<Vec<_>>();
+            let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let ex = values
+                .iter()
+                .map(|x| f64::from(*x - max).exp())
+                .collect::<Vec<_>>();
+            let sum = ex.iter().sum::<f64>();
+            for key in 0..keys {
+                scores[row * keys + key] = if key < visible {
+                    values[key]
+                } else {
+                    f32::NEG_INFINITY
+                };
+                expected.push(if key < visible {
+                    f32_to_bf16((ex[key] / sum) as f32)
+                } else {
+                    0
+                });
+            }
+        }
+        for entry in ["test-softmax", "test-stream-softmax"] {
+            let [Value::MemOwn(out)] = artifact.exec(
+                entry,
+                [
+                    runtime.mem_f32(&scores)?.into(),
+                    runtime.mem_u16(&vec![0x7fc0; live + 37])?.into(),
+                    (keys as u64).into(),
+                    (keys.next_power_of_two().trailing_zeros() as u64).into(),
+                    ((keys + 256) as u64).into(),
+                    (rows as u64).into(),
+                ],
+            )?
+            else {
+                anyhow::bail!("softmax output ABI")
+            };
+            let actual = out.try_to_u16_vec()?;
+            for (i, (&a, &b)) in actual[..live].iter().zip(&expected).enumerate() {
+                let row = i / keys;
+                let tolerance = u16::from(row % 2 == 1);
+                anyhow::ensure!(
+                    a.abs_diff(b) <= tolerance,
+                    "{entry}: keys={keys} row={row} key={} got={} expected={}",
+                    i % keys,
+                    bf16_to_f32(a),
+                    bf16_to_f32(b)
+                );
+            }
+            anyhow::ensure!(
+                actual[live..].iter().all(|v| *v == 0x7fc0),
+                "output padding modified"
+            );
+        }
+    }
+    Ok(())
 }
