@@ -69,39 +69,6 @@
   ({[.fold-result] [.truth]} *.intro)
  ))
 
-(def program stdlib.qwen35.online.context : {(({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons) perf.memory perf.block ({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.type.Shared) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ({(u64 val) ({(f32 val) (f32 val)} *)} *)} -> ({(f32 val) (f32 val)} *) =
- ([shared cache first keys vb maximum pair.]
-  ([.pair] *.elim [i acc.])
-  ([.acc] *.elim [den value.])
-  ({[.i] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.add [index.])
-  ({[.shared] [.index]} stdlib.models.coop.read [score.])
-  ({[.score] [.maximum]} stdlib.models.memory.f32.sub [shifted.])
-  ({[.shifted]} stdlib.models.math.exp [prob.])
-  ({[.first] [.i]} stdlib.models.memory.u64.add [key.])
-  ({[.key] [.keys]} stdlib.models.memory.u64.less [valid.])
-  ({[.valid] [.key] (const.u64.0x0000000000000000)} stdlib.models.memory.select-u64 [safe.])
-  ({[.safe] (const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.models.memory.u64.mul [stride.])
-  ({[.vb] [.stride]} stdlib.models.memory.u64.add [vi.])
-  ({[.cache] [.vi]} stdlib.models.memory.own-read-bf16 [v.])
-  ([.v] bf16.to-f32 [vf.])
-  ({[.prob] [.vf]} stdlib.models.memory.f32.mul [product.])
-  ({[.den] [.prob]} stdlib.models.memory.f32.add [next-den.])
-  ({[.value] [.product]} stdlib.models.memory.f32.add [next-value.])
-  ({[.next-den] [.next-value]} *.intro)
- ))
-
-(def program stdlib.qwen35.online.context.fold : {(({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons) perf.memory perf.block ({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.type.Shared) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (f32 val) ({({master.index32 u32} :) ({({(f32 val) (f32 val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(f32 val) (f32 val)} *) (prop.Truth |-)} *) =
- ([shared cache first keys vb maximum pair.]
-  ([.pair] *.elim [index rest.])
-  ([.rest] *.elim [fold-value proofs.])
-  ([.proofs] *.elim [less truth.])
-  ([.less] unsafe.discard unit.elim)
-  ([.index] :.forget stdlib.models.memory.u32.to-u64 [i.])
-  ({[.i] [.fold-value]} *.intro [arguments.])
-  ({[.shared] [.cache] [.first] [.keys] [.vb] [.maximum] [.arguments]} stdlib.qwen35.online.context [fold-result.])
-  ({[.fold-result] [.truth]} *.intro)
- ))
-
 (def program stdlib.qwen35.online.weights : {(({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons) perf.memory perf.block ({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.type.Shared) val) (f32 val) ({(u64 val) ({(f32 val) perf.phase} *)} *)} -> ({(f32 val) perf.phase} *) =
  ([shared maximum pair.]
   ([.pair] *.elim [i acc.])

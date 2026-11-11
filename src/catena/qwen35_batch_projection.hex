@@ -1,29 +1,6 @@
 # Batched SIMT BF16 projections. Weights retain the default 256-lane reduction order.
 # Eight prompt tokens share each weight load. Tail reads clamp and stores mask.
 # Residual and SwiGLU epilogues preserve BF16 rounding. Barriers are block uniform.
-(def program stdlib.qwen35.batch.dot : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) ({(u64 val) (f32 val)} *)} -> (f32 val) =
- ([input weight base lane input-base pair.]
-  ([.pair] *.elim [i acc.])
-  ({[.i] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.mul [stride.])
-  ({[.stride] [.lane]} stdlib.models.memory.u64.add [ix.])
-  ({[.base] [.ix]} stdlib.models.memory.u64.add [wi.])
-  ({[.input-base] [.ix]} stdlib.models.memory.u64.add [input-index.])
-  ({[.input] [.input-index]} stdlib.models.memory.own-read-bf16x2 [a.])
-  ({[.weight] [.wi]} stdlib.models.memory.ref-read-bf16x2 [b.])
-  ({[.a] [.b] [.acc]} bf16x2.dot-f32 [sum.])
-  [.sum]
- ))
-(def program stdlib.qwen35.batch.dot.fold : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) ({({master.index u64} :) ({(f32 val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
- ([input weight base lane input-base pair.]
-  ([.pair] *.elim [index rest.])
-  ([.rest] *.elim [value proofs.])
-  ([.proofs] *.elim [less truth.])
-  ([.less] unsafe.discard unit.elim)
-  ([.index] :.forget [i.])
-  ({[.i] [.value]} *.intro [arguments.])
-  ({[.input] [.weight] [.base] [.lane] [.input-base] [.arguments]} stdlib.qwen35.batch.dot [result.])
-  ({[.result] [.truth]} *.intro)
- ))
 (def program stdlib.qwen35.batch.dot-dual : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) ({(u64 val) ({(f32 val) (f32 val)} *)} *)} -> ({(f32 val) (f32 val)} *) =
  ([input weight weight2 base lane input-base pair.]
   ([.pair] *.elim [i acc.])

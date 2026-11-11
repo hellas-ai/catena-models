@@ -18,18 +18,6 @@
  [.t1]
 ))
 
-(def program tts.read-f32-r : {((cap.ref mem) val) (u64 val)} -> (f32 val)
-= ([x i.]
- ({[.x] [.i]} stdlib.models.memory.ref-read-f32 [t1.])
- [.t1]
-))
-
-(def program tts.read-u64 : {((cap.own mem) val) (u64 val)} -> (u64 val)
-= ([x i.]
- ({[.x] [.i]} stdlib.models.memory.own-read-u64 [t1.])
- [.t1]
-))
-
 (def program tts.read-u64-r : {((cap.ref mem) val) (u64 val)} -> (u64 val)
 = ([x i.]
  ({[.x] [.i]} stdlib.models.memory.ref-read-u64 [t1.])
@@ -352,20 +340,6 @@
  ))
 
 
-(def program stdlib.tts.copy.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.copy.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
 (def program stdlib.tts.copy.into : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
  ([input-arg-0 input-arg-1 input-arg-2 out work.]
  ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
@@ -378,92 +352,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.length-header.element : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out element.]
- ([.element] [i.])
- ({[.input-arg-1] (const.u64.0x0000000000000001)} stdlib.models.memory.u64.sub [t1.])
- ({[.input-arg-0] [.t1]} tts.read-f32 [t2.])
- ({[.out] [.element] [.t2]} stdlib.models.memory.write-f32 [t3.])
- ([.t3] unit.elim)
- (unit.intro)
- ))
-
-
-(def program stdlib.tts.length-header.yes : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.element]} stdlib.tts.length-header.element)
- ))
-
-
-(def program stdlib.tts.length-header.no : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.length-header.launch : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.length-header.yes.4 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.length-header.no.4 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.length-header.host : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work]} partial.stdlib.tts.length-header.launch.5 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.length-header.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 work elements.]
- ([.elements] stdlib.models.memory.alloc-f32 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.length-header.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.length-header.into : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.length-header.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.length-header : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val)
-= ([boundaries rows count.]
- ({[.boundaries] [.rows] [.count] [.count] [.count]} stdlib.tts.length-header.run [t1.])
- [.t1]
-))
 
 (def program tts.log : {(f32 val)} -> (f32 val)
 = ([x.]
@@ -744,18 +632,6 @@
  ))
 
 
-(def program stdlib.tts.noise.into : {(u32 val) (u32 val) (u32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.out] [.work] [.grid]} partial.stdlib.tts.noise.host.7 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.noise : {(u32 val) (u32 val) (u32 val) (u64 val)} -> ((cap.own mem) val)
 = ([seed0 seed1 stream count.]
  ({[.seed0] [.seed1] [.stream] [.count] [.count] [.count]} stdlib.tts.noise.run [t1.])
@@ -834,18 +710,6 @@
  ))
 
 
-(def program stdlib.tts.relu.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.relu.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.relu : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([x count.]
  ({[.x] [.count] [.count] [.count]} stdlib.tts.relu.run [t1.])
@@ -866,82 +730,6 @@
  ([.t7] unit.elim)
  (unit.intro)
  ))
-
-
-(def program stdlib.tts.leaky.yes : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.element]} stdlib.tts.leaky.element)
- ))
-
-
-(def program stdlib.tts.leaky.no : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.leaky.launch : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.leaky.yes.4 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.leaky.no.4 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.leaky.host : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work]} partial.stdlib.tts.leaky.launch.5 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.leaky.run : {((cap.own mem) val) (f32 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.leaky.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.leaky.into : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.leaky.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.leaky : {((cap.own mem) val) (f32 val) (u64 val)} -> ((cap.own mem) val)
-= ([x slope count.]
- ({[.x] [.slope] [.count] [.count] [.count]} stdlib.tts.leaky.run [t1.])
- [.t1]
-))
 
 
 (def program stdlib.tts.gelu.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
@@ -1014,110 +802,9 @@
  ))
 
 
-(def program stdlib.tts.gelu.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.gelu.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.gelu : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([x count.]
  ({[.x] [.count] [.count] [.count]} stdlib.tts.gelu.run [t1.])
- [.t1]
-))
-
-
-(def program stdlib.tts.tanh-buffer.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
- ([input-arg-0 input-arg-1 out element.]
- ([.element] [i.])
- ({[.input-arg-0] [.i]} tts.read-bf16 [t1.])
- ([.t1] bf16.to-f32 [t2.])
- ([.t2] tts.tanh [t3.])
- ([.t3] f32.to-bf16 [t4.])
- ({[.out] [.element] [.t4]} stdlib.models.memory.write-bf16 [t5.])
- ([.t5] unit.elim)
- (unit.intro)
- ))
-
-
-(def program stdlib.tts.tanh-buffer.yes : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.element]} stdlib.tts.tanh-buffer.element)
- ))
-
-
-(def program stdlib.tts.tanh-buffer.no : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.tanh-buffer.launch : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.tanh-buffer.yes.3 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.tanh-buffer.no.3 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.tanh-buffer.host : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.work]} partial.stdlib.tts.tanh-buffer.launch.4 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.tanh-buffer.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.tanh-buffer.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.tanh-buffer.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.tanh-buffer.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.tanh-buffer : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
-= ([x count.]
- ({[.x] [.count] [.count] [.count]} stdlib.tts.tanh-buffer.run [t1.])
  [.t1]
 ))
 
@@ -1195,18 +882,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.add.into : {((cap.own mem) val) ((cap.own mem) val) (f32 val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.add.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.add : {((cap.own mem) val) ((cap.own mem) val) (f32 val) (f32 val) (u64 val)} -> ((cap.own mem) val)
 = ([x y a b count.]
@@ -1292,18 +967,6 @@
  ))
 
 
-(def program stdlib.tts.bias.into : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.bias.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.bias : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x bias cols use-bias count.]
  ({[.x] [.bias] [.cols] [.use-bias] [.count] [.count] [.count]} stdlib.tts.bias.run [t1.])
@@ -1326,82 +989,6 @@
  ([.t9] unit.elim)
  (unit.intro)
  ))
-
-
-(def program stdlib.tts.slice.yes : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.element]} stdlib.tts.slice.element)
- ))
-
-
-(def program stdlib.tts.slice.no : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.slice.launch : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out]} partial.stdlib.tts.slice.yes.6 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out]} partial.stdlib.tts.slice.no.6 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.slice.host : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work]} partial.stdlib.tts.slice.launch.7 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.slice.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.slice.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.slice.into : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.slice.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.slice : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
-= ([x source-cols offset cols count.]
- ({[.x] [.source-cols] [.offset] [.cols] [.count] [.count] [.count]} stdlib.tts.slice.run [t1.])
- [.t1]
-))
 
 
 (def program stdlib.tts.concat.element : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
@@ -1430,82 +1017,6 @@
  ))
 
 
-(def program stdlib.tts.concat.yes : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.element]} stdlib.tts.concat.element)
- ))
-
-
-(def program stdlib.tts.concat.no : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.concat.launch : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out]} partial.stdlib.tts.concat.yes.6 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out]} partial.stdlib.tts.concat.no.6 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.concat.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work]} partial.stdlib.tts.concat.launch.7 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.concat.run : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.concat.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.concat.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.concat.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.concat : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
-= ([x y cx cy count.]
- ({[.x] [.y] [.cx] [.cy] [.count] [.count] [.count]} stdlib.tts.concat.run [t1.])
- [.t1]
-))
-
-
 (def program stdlib.tts.flip.element : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
  ([input-arg-0 input-arg-1 input-arg-2 out element.]
  ([.element] [i.])
@@ -1524,82 +1035,6 @@
  ))
 
 
-(def program stdlib.tts.flip.yes : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.element]} stdlib.tts.flip.element)
- ))
-
-
-(def program stdlib.tts.flip.no : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.flip.launch : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.flip.yes.4 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out]} partial.stdlib.tts.flip.no.4 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.flip.host : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work]} partial.stdlib.tts.flip.launch.5 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.flip.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.flip.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.flip.into : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.flip.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.flip : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val)
-= ([x cols count.]
- ({[.x] [.cols] [.count] [.count] [.count]} stdlib.tts.flip.run [t1.])
- [.t1]
-))
-
-
 (def program stdlib.tts.waveform.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
  ([input-arg-0 input-arg-1 out element.]
  ([.element] [i.])
@@ -1610,169 +1045,6 @@
  ([.t4] unit.elim)
  (unit.intro)
  ))
-
-
-(def program stdlib.tts.waveform.yes : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.element]} stdlib.tts.waveform.element)
- ))
-
-
-(def program stdlib.tts.waveform.no : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.waveform.launch : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.waveform.yes.3 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.waveform.no.3 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.waveform.host : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.work]} partial.stdlib.tts.waveform.launch.4 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.waveform.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 work elements.]
- ([.elements] stdlib.models.memory.alloc-f32 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.waveform.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.waveform.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.waveform.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.waveform : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
-= ([x count.]
- ({[.x] [.count] [.count] [.count]} stdlib.tts.waveform.run [t1.])
- [.t1]
-))
-
-
-(def program stdlib.tts.to-f32.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
- ([input-arg-0 input-arg-1 out element.]
- ([.element] [i.])
- ({[.input-arg-0] [.i]} tts.read-bf16 [t1.])
- ([.t1] bf16.to-f32 [t2.])
- ({[.out] [.element] [.t2]} stdlib.models.memory.write-f32 [t3.])
- ([.t3] unit.elim)
- (unit.intro)
- ))
-
-
-(def program stdlib.tts.to-f32.yes : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.element]} stdlib.tts.to-f32.element)
- ))
-
-
-(def program stdlib.tts.to-f32.no : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.to-f32.launch : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.to-f32.yes.3 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.to-f32.no.3 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.to-f32.host : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.work]} partial.stdlib.tts.to-f32.launch.4 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.to-f32.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 work elements.]
- ([.elements] stdlib.models.memory.alloc-f32 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.to-f32.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.to-f32.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.to-f32.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.to-f32 : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
-= ([x count.]
- ({[.x] [.count] [.count] [.count]} stdlib.tts.to-f32.run [t1.])
- [.t1]
-))
 
 
 (def program stdlib.tts.patch.element : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
@@ -1884,18 +1156,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.patch.into : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 input-arg-7 input-arg-8 input-arg-9 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.input-arg-7] [.input-arg-8] [.input-arg-9] [.out] [.work] [.grid]} partial.stdlib.tts.patch.host.13 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.patch : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x frames ci kernel dilation stride pad transpose offset count.]
@@ -2221,18 +1481,6 @@
  ))
 
 
-(def program stdlib.tts.depthwise.into : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out] [.work] [.grid]} partial.stdlib.tts.depthwise.host.10 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.depthwise : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x w bias frames cols dilation count.]
  ({[.x] [.w] [.bias] [.frames] [.cols] [.dilation] [.count] [.count] [.count]} stdlib.tts.depthwise.run [t1.])
@@ -2352,18 +1600,6 @@
  ))
 
 
-(def program stdlib.tts.scores.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.scores.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.scores : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([q k rel rows count reduction.]
  ({[.q] [.k] [.rel] [.rows] [.reduction] [.count] [.count]} stdlib.tts.scores.run [t1.])
@@ -2457,18 +1693,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.softmax-max.into : {((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.softmax-max.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.softmax-max : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x cols count reduction.]
@@ -2567,18 +1791,6 @@
  ))
 
 
-(def program stdlib.tts.softmax-sum.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.out] [.work] [.grid]} partial.stdlib.tts.softmax-sum.host.7 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.softmax-sum : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x maximum cols count reduction.]
  ({[.x] [.maximum] [.cols] [.reduction] [.count] [.count]} stdlib.tts.softmax-sum.run [t1.])
@@ -2658,18 +1870,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.softmax-value.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.softmax-value.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.softmax-value : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x maximum denominator cols count.]
@@ -2799,18 +1999,6 @@
  ))
 
 
-(def program stdlib.tts.context.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.context.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.context : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([prob value rel rows count reduction.]
  ({[.prob] [.value] [.rel] [.rows] [.reduction] [.count] [.count]} stdlib.tts.context.run [t1.])
@@ -2885,18 +2073,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.from-f32.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.from-f32.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.from-f32 : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([x count.]
@@ -3396,18 +2572,6 @@
  ))
 
 
-(def program stdlib.tts.spline.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.spline.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.spline : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([y params count.]
  ({[.y] [.params] [.count] [.count] [.count]} stdlib.tts.spline.run [t1.])
@@ -3486,18 +2650,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.slice-f32.into : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.slice-f32.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.slice-f32 : {((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x source-cols offset cols count.]
@@ -3579,18 +2731,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.join-f32.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.join-f32.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.join-f32 : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([x y count.]
@@ -3679,18 +2819,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.affine.into : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.out] [.work] [.grid]} partial.stdlib.tts.affine.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.affine : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (f32 val) (u64 val)} -> ((cap.own mem) val)
 = ([x mean logs scale count.]
@@ -3791,18 +2919,6 @@
  ))
 
 
-(def program stdlib.tts.durations.into : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.durations.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program tts.durations : {((cap.own mem) val) (f32 val) (u64 val)} -> ((cap.own mem) val)
 = ([x rate count.]
  ({[.x] [.rate] [.count] [.count] [.count]} stdlib.tts.durations.run [t1.])
@@ -3896,18 +3012,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.cumulative.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.cumulative.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.cumulative : {((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val)
 = ([x count reduction.]
@@ -4043,82 +3147,6 @@
  ))
 
 
-(def program stdlib.tts.expanded.yes : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out] [.element]} stdlib.tts.expanded.element)
- ))
-
-
-(def program stdlib.tts.expanded.no : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.expanded.launch : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out]} partial.stdlib.tts.expanded.yes.8 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out]} partial.stdlib.tts.expanded.no.8 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.expanded.host : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out] [.work]} partial.stdlib.tts.expanded.launch.9 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.expanded.run : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out] [.work] [.grid]} partial.stdlib.tts.expanded.host.10 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.expanded.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 input-arg-3 input-arg-4 input-arg-5 input-arg-6 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.input-arg-3] [.input-arg-4] [.input-arg-5] [.input-arg-6] [.out] [.work] [.grid]} partial.stdlib.tts.expanded.host.10 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.expanded : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (f32 val) (u64 val) (u64 val)} -> ((cap.own mem) val)
-= ([boundaries stats noise frames scale rows count.]
- ({[.boundaries] [.stats] [.noise] [.frames] [.scale] [.rows] [.count] [.count] [.count]} stdlib.tts.expanded.run [t1.])
- [.t1]
-))
-
-
 (def program stdlib.tts.gate.element : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
  ([input-arg-0 input-arg-1 out element.]
  ([.element] [i.])
@@ -4139,82 +3167,6 @@
  ([.t14] unit.elim)
  (unit.intro)
  ))
-
-
-(def program stdlib.tts.gate.yes : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- ([.unit] unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.element]} stdlib.tts.gate.element)
- ))
-
-
-(def program stdlib.tts.gate.no : {((cap.own mem) val) (u64 val) ((cap.own mem) val) ({(u64 val) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out pair.]
- ([.pair] *.elim [element proofs.])
- ([.proofs] *.elim [proof unit.])
- ([.proof] unsafe.discard unit.elim)
- [.unit]
- ))
-
-
-(def program stdlib.tts.gate.launch : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({({master.block ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid} stdlib.gpu.geometry.type.Block)} :) (({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2) master.grid master.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
- ([input-arg-0 input-arg-1 out work thread.]
- ([.thread] stdlib.models.memory.thread-index [element.])
- ({[.element] [.work]} stdlib.models.memory.u64.less [in-bounds.])
- ({[.in-bounds] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.gate.yes.3 [yes.])
- ({[.input-arg-0] [.input-arg-1] [.out]} partial.stdlib.tts.gate.no.3 [no.])
- ({[.condition] [.element] [.yes] [.no] unit.intro} core.if)
- ))
-
-
-(def program stdlib.tts.gate.host : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val) ({master.grid ({({master.blocks master.one} stdlib.gpu.geometry.sort.D2) ({master.threads master.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input-arg-0 input-arg-1 out work grid pair.]
- ([.pair] *.elim [step rest.])
- ([.rest] *.elim [value proofs.])
- ([.proofs] *.elim [less truth.])
- ([.less] unsafe.discard unit.elim)
- ({[.input-arg-0] [.input-arg-1] [.out] [.work]} partial.stdlib.tts.gate.launch.4 [kernel.])
- ({[.grid] [.kernel]} unsafe.launch)
- (unit.elim)
- ({[.value] [.truth]} *.intro)
- ))
-
-
-(def program stdlib.tts.gate.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 work elements.]
- ([.elements] stdlib.models.memory.alloc-bf16 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.gate.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-
-(def program stdlib.tts.gate.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.out] [.work] [.grid]} partial.stdlib.tts.gate.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program tts.gate : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val)
-= ([x count.]
- ({[.x] [.count] [.count] [.count]} stdlib.tts.gate.run [t1.])
- [.t1]
-))
 
 
 (def program stdlib.tts.embedding.element : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
@@ -4291,18 +3243,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.embedding.into : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.embedding.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.embedding : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val)
 = ([tokens w count.]
@@ -4383,18 +3323,6 @@
  [.result]
  ))
 
-
-(def program stdlib.tts.scale-flip.into : {((cap.own mem) val) (f32 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input-arg-0 input-arg-1 input-arg-2 out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input-arg-0] [.input-arg-1] [.input-arg-2] [.out] [.work] [.grid]} partial.stdlib.tts.scale-flip.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 
 (def program tts.scale-flip : {((cap.own mem) val) (f32 val) (u64 val)} -> ((cap.own mem) val)
 = ([x scale count.]

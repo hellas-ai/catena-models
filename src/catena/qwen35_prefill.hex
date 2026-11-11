@@ -67,13 +67,6 @@
   ({[.input] [.out] [.base] (const.u64.0x0000000000000000) (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen35.prefill.copy-range)
  ))
 
-(def program stdlib.qwen35.prefill.store-row : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input batch row.]
-  ({[.row] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.models.memory.u64.mul [base.])
-  ({[.input] [.batch] (const.u64.0x0000000000000000) [.base] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.qwen35.prefill.copy-range [written.])
-  ({[.input] [.written]} stdlib.models.resources.free-bf16-before)
- ))
-
 (def program stdlib.qwen35.prefill.embedding : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> 1 =
  ([tokens weight out token-index index.]
   ({[.index] (const.u64.0x{{HIDDEN_SIZE}})} stdlib.models.memory.u64.div [row.])
