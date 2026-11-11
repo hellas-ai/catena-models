@@ -19,7 +19,9 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 mod server;
 
 #[derive(Debug, Parser)]
-#[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
+#[command(
+    about = "Qwen and LFM3 text and Qwen3.5 image generation with native Catena GPU execution"
+)]
 struct Args {
     /// Serve text chat through the OpenAI Chat Completions and Responses APIs.
     #[arg(long, conflicts_with_all = ["prompt", "image", "bench", "generate_entrypoint", "ignore_eos", "max_new_tokens"])]

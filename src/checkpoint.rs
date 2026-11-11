@@ -395,6 +395,7 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     );
     let _tensor_count = cursor.usize_u64("tensor count")?;
     let metadata_count = cursor.usize_u64("metadata count")?;
+    let mut lfm_arrays = HashMap::new();
     let mut mrope_sections = None;
     let mut architecture = None;
     let mut model_name = None;
@@ -432,6 +433,10 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
                 sections[i] = usize::try_from(array[i].as_u64().context("invalid RoPE section")?)?;
             }
             mrope_sections = Some(sections);
+        } else if key == "lfm3.attention.head_count_kv"
+            || key == "lfm3.attention.sliding_window_pattern"
+        {
+            lfm_arrays.insert(key, cursor.json_value(ty)?);
         } else if is_model_scalar_key(&key) {
             let value = match ty {
                 ValueType::F32 => ScalarMetadata::Float(cursor.f32()?),
@@ -445,11 +450,14 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     }
     let architecture_name = architecture.context("GGUF is missing general.architecture")?;
     let architecture = match architecture_name.as_str() {
+        "lfm3" => ModelArchitecture::Lfm3,
         "qwen3" => ModelArchitecture::Qwen3Dense,
         "qwen35" => ModelArchitecture::Qwen35Dense,
         "qwen35moe" => ModelArchitecture::Qwen35Moe,
         other => {
-            bail!("unsupported GGUF architecture {other:?}; expected qwen3, qwen35, or qwen35moe")
+            bail!(
+                "unsupported GGUF architecture {other:?}; expected qwen3, qwen35, qwen35moe, or lfm3"
+            )
         }
     };
     let prefix = architecture_name.as_str();
@@ -485,6 +493,37 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         num_nextn_layers < total_layers,
         "GGUF next-token layer count must be smaller than block count"
     );
+    let lfm3 = if architecture == ModelArchitecture::Lfm3 {
+        let heads = lfm_arrays
+            .get("lfm3.attention.head_count_kv")
+            .context("missing LFM3 KV-head array")?
+            .as_array()
+            .context("LFM3 KV heads must be an array")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|x| usize::try_from(x).ok())
+                    .context("invalid LFM3 KV head count")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sliding_layers = lfm_arrays
+            .get("lfm3.attention.sliding_window_pattern")
+            .context("missing LFM3 sliding pattern")?
+            .as_array()
+            .context("LFM3 sliding pattern must be an array")?
+            .iter()
+            .map(|v| v.as_bool().context("invalid LFM3 sliding flag"))
+            .collect::<Result<Vec<_>>>()?;
+        Some(crate::spec::Lfm3Config {
+            kv_heads: heads,
+            sliding_layers,
+            sliding_window: u("attention.sliding_window")?,
+            sliding_rope_theta: f("rope.freq_base_swa")?,
+            conv_kernel: u("shortconv.l_cache")?,
+        })
+    } else {
+        None
+    };
     let config = ModelConfig {
         model_name,
         architecture,
@@ -494,7 +533,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         hidden_size: u("embedding_length")?,
         intermediate_size: if matches!(
             architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Lfm3
+                | ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
         ) {
             u("feed_forward_length")?
         } else {
@@ -503,7 +544,12 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         num_layers: total_layers - num_nextn_layers,
         num_nextn_layers,
         num_attention_heads: u("attention.head_count")?,
-        num_key_value_heads: u("attention.head_count_kv")?,
+        num_key_value_heads: if let Some(l) = &lfm3 {
+            *l.kv_heads.iter().max().context("empty LFM3 layers")?
+        } else {
+            u("attention.head_count_kv")?
+        },
+        lfm3,
         head_dim,
         max_position_embeddings: u("context_length")?,
         rms_norm_eps: f("attention.layer_norm_rms_epsilon")?,
@@ -528,7 +574,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         linear_inner_size: optional_u("ssm.inner_size")?,
         output_weight_tied: matches!(
             architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Lfm3
+                | ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
         ),
         eos_token_id,
     };
@@ -538,6 +586,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
 
 fn is_model_scalar_key(key: &str) -> bool {
     [
+        ".attention.sliding_window",
+        ".rope.freq_base_swa",
+        ".shortconv.l_cache",
         ".vocab_size",
         ".embedding_length",
         ".feed_forward_length",

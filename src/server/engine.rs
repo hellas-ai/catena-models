@@ -175,7 +175,8 @@ impl QwenBackend {
         let template = tokenizer
             .chat_template()
             .ok_or_else(|| anyhow::anyhow!("checkpoint has no tokenizer.chat_template"))?;
-        let prompt = Prompt::new(template.into())?;
+        let prompt = Prompt::new(template.into())?
+            .with_special_tokens(tokenizer.bos_token(), tokenizer.eos_token());
         // Exercise the template before expensive compilation and before listening.
         prompt
             .render(

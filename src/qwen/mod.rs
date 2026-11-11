@@ -30,6 +30,9 @@ const U64: &str = "(u64 val)";
 const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 
 pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
+    if config.architecture == ModelArchitecture::Lfm3 {
+        return crate::lfm3::validate(config, options);
+    }
     if options.wmma_prefill {
         ensure!(
             matches!(
@@ -151,10 +154,10 @@ pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions)
     Ok(s)
 }
 
-fn c(n: usize) -> String {
+pub(crate) fn c(n: usize) -> String {
     format!("(const.u64.0x{n:016X})")
 }
-fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
+pub(crate) fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
     write!(s, "  ({{").unwrap();
     for arg in args {
         if arg.starts_with('(') {
@@ -165,7 +168,7 @@ fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
     }
     writeln!(s, "}} {op} [{outputs}.])").unwrap();
 }
-fn header(s: &mut String, name: &str, inputs: &[(&str, &str)], output: &str) {
+pub(crate) fn header(s: &mut String, name: &str, inputs: &[(&str, &str)], output: &str) {
     writeln!(
         s,
         "(def program {name} : {{{}}} -> {output} =",

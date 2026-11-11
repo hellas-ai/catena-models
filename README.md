@@ -1,12 +1,12 @@
 # Catena inference
 
 Native Catena GPU inference for Qwen3 dense and Qwen3.5/3.6 dense or MoE text
-models, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
+models, LFM3 text, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
 All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
 shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
-their normal meanings. Qwen tokenizers and model dimensions come from GGUF.
+their normal meanings. Text tokenizers and model dimensions come from GGUF.
 BF16/F32 checkpoint weights retain their native storage.
 
 ## GPU selection
@@ -87,6 +87,29 @@ F32 recurrent workspace are preserved.
 [Image handling](docs/qwen35-images.md),
 [kernel details and historical measurements](docs/qwen-kernels.md), and
 [prefill measurements](PREFILL_BENCHMARKS.md).
+
+## LFM3 text
+
+The BF16 text checkpoint uses the same CLI and chat server:
+
+```bash
+cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --prompt 'The capital of France is' -n 32
+cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --serve --ctx-size 4096 --port 8000
+```
+
+HIP WMMA accelerates batched projections and attention. Single-token decode
+uses portable F32 reductions, without packed BF16 dot instructions. Use
+`--no-wmma-prefill` for the SIMT comparison path. The model reads layer types,
+sliding windows, RoPE factors, tokenizer, and chat template from GGUF. Sessions
+retain convolution history and attention caches across appended prompts and
+checkpoint/resume. Vision, audio, omni, and CUDA optimization are deferred.
+
+The CLI takes a raw text prefix; server requests use the embedded chat template,
+including its BOS token and optional thinking. The server's existing greedy
+sampling policy applies.
+
+To run the focused checkpoint/compiler and GPU checks, set `LFM3_GGUF` to the
+cached BF16 file and run `cargo test -r --test lfm3 -- --ignored --nocapture`.
 
 ## Benchmarks and validation
 

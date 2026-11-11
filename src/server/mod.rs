@@ -78,10 +78,7 @@ pub fn run(
         let listener = tokio::net::TcpListener::bind((config.host, config.port))
             .await
             .context("binding HTTP listener")?;
-        eprintln!(
-            "Qwen chat server ready at http://{}/v1",
-            listener.local_addr()?
-        );
+        eprintln!("Chat server ready at http://{}/v1", listener.local_addr()?);
         let signal = shutdown.clone();
         axum::serve(listener, api::router(state))
             .with_graceful_shutdown(async move {

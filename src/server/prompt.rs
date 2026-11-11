@@ -4,6 +4,8 @@ use serde_json::Value;
 
 pub struct Prompt {
     environment: Environment<'static>,
+    bos_token: String,
+    eos_token: String,
 }
 impl Prompt {
     pub fn new(template: String) -> anyhow::Result<Self> {
@@ -16,8 +18,23 @@ impl Prompt {
                 Err(Error::new(ErrorKind::InvalidOperation, message))
             },
         );
+        // Generation blocks annotate training masks; inference renders their body.
+        let template = template
+            .replace("{%- generation -%}", "")
+            .replace("{%- endgeneration -%}", "")
+            .replace("{% generation %}", "")
+            .replace("{% endgeneration %}", "");
         environment.add_template_owned("chat", template)?;
-        Ok(Self { environment })
+        Ok(Self {
+            environment,
+            bos_token: "<|endoftext|>".into(),
+            eos_token: "<|im_end|>".into(),
+        })
+    }
+    pub fn with_special_tokens(mut self, bos: &str, eos: &str) -> Self {
+        self.bos_token = bos.into();
+        self.eos_token = eos.into();
+        self
     }
     pub fn render(
         &self,
@@ -41,7 +58,7 @@ impl Prompt {
             .render(context! {
                 messages => messages, tools => tools, enable_thinking => thinking,
                 add_generation_prompt => add_generation_prompt, add_vision_id => false,
-                bos_token => "<|endoftext|>", eos_token => "<|im_end|>",
+                bos_token => &self.bos_token, eos_token => &self.eos_token,
             })
             .map_err(|e| format!("chat template: {e:#}"))
     }
@@ -51,6 +68,33 @@ impl Prompt {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn lfm3_template_renders_bos_thinking_and_tool_replay() {
+        let prompt = Prompt::new(include_str!("../../tests/fixtures/lfm3_chat.jinja").into())
+            .unwrap()
+            .with_special_tokens("<|startoftext|>", "<|im_end|>");
+        let messages = [json!({"role":"user","content":"Hello"})];
+        let text = prompt.render(&messages, &[], false).unwrap();
+        assert!(text.starts_with("<|startoftext|><|im_start|>user\nHello"));
+        assert!(text.ends_with("<|im_start|>assistant\n<think></think>"));
+        assert!(
+            prompt
+                .render(&messages, &[], true)
+                .unwrap()
+                .ends_with("<think>")
+        );
+        let tools: Vec<Tool> = serde_json::from_value(json!([{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}])).unwrap();
+        let messages = [
+            messages[0].clone(),
+            json!({"role":"assistant","content":"", "tool_calls":[{"type":"function","function":{"name":"read","arguments":{"path":"a.rs"}}}]}),
+            json!({"role":"tool","content":"contents"}),
+        ];
+        let replay = prompt.render(&messages, &tools, false).unwrap();
+        assert!(replay.contains("<function=read>"));
+        assert!(replay.contains("<parameter=path>\na.rs\n</parameter>"));
+        assert!(replay.contains("<tool_response>\ncontents\n</tool_response>"));
+    }
+
     #[test]
     fn upstream_templates_render_text_thinking_and_tool_replay() {
         let tools:Vec<Tool>=serde_json::from_value(json!([{"type":"function","function":{"name":"read","parameters":{"type":"object","properties":{"path":{"type":"string"}}}}}])).unwrap();

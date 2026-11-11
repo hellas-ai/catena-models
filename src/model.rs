@@ -15,7 +15,7 @@ use crate::{
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 
-/// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
+/// Loaded text-model runtime and registered native-dtype GGUF mapping.
 pub struct Model {
     runtime: Runtime,
     artifact: Artifact,
@@ -104,7 +104,7 @@ impl Model {
         };
         let (runtime, artifact) =
             crate::catena::load_runtime(runtime_sources(&model_source), dialect)
-                .context("failed to compile the Qwen3 Catena GPU program")?;
+                .context("failed to compile the text-model Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
@@ -160,6 +160,7 @@ impl Model {
             .model_name
             .as_deref()
             .unwrap_or(match self.config.architecture {
+                ModelArchitecture::Lfm3 => "LFM3 text",
                 ModelArchitecture::Qwen3Dense => "Qwen3 dense",
                 ModelArchitecture::Qwen35Dense => "Qwen3.5 dense",
                 ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
