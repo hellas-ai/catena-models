@@ -139,17 +139,6 @@
   [. x5]
  ))
 
-(def program stdlib.models.memory.u32.max : {(u32 val) (u32 val)} -> (u32 val) =
- ([a b.]
-  ([.] stdlib.numeric.numeric.u32 [x0.])
-  ([.] unit.intro meta.master.left [x1.])
-  ([.a x1] smolcat.value.named_at [x2.])
-  ([.] unit.intro meta.master.right [x3.])
-  ([.b x3] smolcat.value.named_at [x4.])
-  ([.x2 x4 x0] stdlib.numeric.max :.forget [x5.])
-  [. x5]
- ))
-
 (def program stdlib.models.memory.u32.less : {(u32 val) (u32 val)} -> (bool val) =
  ([a b.]
   ([.] stdlib.numeric.numeric.u32 [x0.])
@@ -513,39 +502,6 @@
   ([.yes no] *.intro [x2.])
   ([.] name.stdlib.models.memory.select-own.yes lift [x3.])
   ([.] name.stdlib.models.memory.select-own.no lift [x4.])
-  ([.x1] :.forget [x5.])
-  ([.] unit.intro [x6.])
-  ([.x5 x2 x3 x4 x6] core.if [x7.])
-  [. x7]
- ))
-
-(def program stdlib.models.memory.select-unit.yes : {({({1 1} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> 1 =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x0] *.elim [x2 x3.])
-  ([.x1] *.elim [x4 x5.])
-  ([.x4] unsafe.discard unit.elim)
-  ([.x5] unit.elim)
-  [. x2]
- ))
-
-(def program stdlib.models.memory.select-unit.no : {({({1 1} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> 1 =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x0] *.elim [x2 x3.])
-  ([.x1] *.elim [x4 x5.])
-  ([.x4] unsafe.discard unit.elim)
-  ([.x5] unit.elim)
-  [. x3]
- ))
-
-(def program stdlib.models.memory.select-unit : {(bool val) 1 1} -> 1 =
- ([condition yes no.]
-  ([.] unit.intro meta.master.predicate [x0.])
-  ([.condition x0] smolcat.value.named_at [x1.])
-  ([.yes no] *.intro [x2.])
-  ([.] name.stdlib.models.memory.select-unit.yes lift [x3.])
-  ([.] name.stdlib.models.memory.select-unit.no lift [x4.])
   ([.x1] :.forget [x5.])
   ([.] unit.intro [x6.])
   ([.x5 x2 x3 x4 x6] core.if [x7.])
@@ -957,41 +913,6 @@
   [. x4]
  ))
 
-(def program stdlib.models.memory.fold-count-step : {({(u32 val) ({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *)} *)} -> ({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x1] *.elim [x2 x3.])
-  ([.x3] *.elim [x4 x5.])
-  ([.x5] *.elim [x6 x7.])
-  ([.x4 x2] stdlib.models.memory.u64.less_equal [x8.])
-  ([.x2 x4] stdlib.models.memory.u64.sub [x9.])
-  ([.x8 x9 x2] stdlib.models.memory.select-u64 [x10.])
-  ([.] const.u32.0x00000000 [x11.])
-  ([.x8 x6 x11] stdlib.models.memory.select-u32 [x12.])
-  ([.x7 x12] stdlib.models.memory.u32.add [x13.])
-  ([.] const.u64.0x0000000000000002 [x14.])
-  ([.x4 x14] stdlib.models.memory.u64.div [x15.])
-  ([.] const.u32.0x00000002 [x16.])
-  ([.x6 x16] stdlib.models.memory.u32.div [x17.])
-  ([.x17 x13] *.intro [x18.])
-  ([.x15 x18] *.intro [x19.])
-  ([.x10 x19] *.intro [x20.])
-  [. x20]
- ))
-
-(def program stdlib.models.memory.fold-count-step.master-fold-u32 : {({({master.index u32} :) ({({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(u64 val) ({(u64 val) ({(u32 val) (u32 val)} *)} *)} *) (prop.Truth |-)} *) =
- ([pair.]
-  ([.pair] *.elim [x0 x1.])
-  ([.x1] *.elim [x2 x3.])
-  ([.x3] *.elim [x4 x5.])
-  ([.x4] unsafe.discard unit.elim)
-  ([.x0] :.forget [x6.])
-  ([.x6 x2] *.intro [x7.])
-  ([.x7] stdlib.models.memory.fold-count-step [x8.])
-  ([.x8 x5] *.intro [x9.])
-  [. x9]
- ))
-
 # Checked loop-count narrowing lowers to one bounds check and a native cast.
 (def program stdlib.models.memory.fold-count-u32 : {(u64 val)} -> (u32 val) =
  ([count.] [.count] stdlib.numeric.u64_to_u32))
@@ -1004,14 +925,6 @@
   ([.] unit.intro meta.bf16numeric.right [rid.])
   ([.b rid] smolcat.value.named_at [y.])
   ([.x y e] stdlib.numeric.+ :.forget)))
-(def program stdlib.models.memory.bf16.sub : {(bf16 val) (bf16 val)} -> (bf16 val) =
- ([a b.]
-  ([.] stdlib.numeric.numeric.bf16 [e.])
-  ([.] unit.intro meta.bf16numeric.left [id.])
-  ([.a id] smolcat.value.named_at [x.])
-  ([.] unit.intro meta.bf16numeric.right [rid.])
-  ([.b rid] smolcat.value.named_at [y.])
-  ([.x y e] stdlib.numeric.- :.forget)))
 (def program stdlib.models.memory.bf16.mul : {(bf16 val) (bf16 val)} -> (bf16 val) =
  ([a b.]
   ([.] stdlib.numeric.numeric.bf16 [e.])
@@ -1020,20 +933,6 @@
   ([.] unit.intro meta.bf16numeric.right [rid.])
   ([.b rid] smolcat.value.named_at [y.])
   ([.x y e] stdlib.numeric.* :.forget)))
-(def program stdlib.models.memory.bf16.div : {(bf16 val) (bf16 val)} -> (bf16 val) =
- ([a b.]
-  ([.] stdlib.numeric.numeric.bf16 [e.])
-  ([.] unit.intro meta.bf16numeric.left [id.])
-  ([.a id] smolcat.value.named_at [x.])
-  ([.] unit.intro meta.bf16numeric.right [rid.])
-  ([.b rid] smolcat.value.named_at [y.])
-  ([.x y e] stdlib.numeric./ :.forget)))
-(def program stdlib.models.memory.bf16.neg : (bf16 val) -> (bf16 val) =
- ([a.]
-  ([.] stdlib.numeric.signed.bf16 [e.])
-  ([.] unit.intro meta.bf16numeric.value [id.])
-  ([.a id] smolcat.value.named_at [x.])
-  ([.x e] stdlib.numeric.negate :.forget)))
 (def program stdlib.models.memory.bf16.exp : (bf16 val) -> (bf16 val) =
  (bf16.to-f32 stdlib.models.math.exp f32.to-bf16))
 (def program stdlib.models.memory.u32.equal : {(u32 val) (u32 val)} -> (bool val) =

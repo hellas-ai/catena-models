@@ -306,24 +306,6 @@
   ([.write-proof] unsafe.discard unit.elim)
   (unit.intro)
  ))
-(def program stdlib.qwen35.wmma.attention.softmax.host : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({(u64 val) ((cap.own mem) val)} *)} -> ((cap.own mem) val) =
- ([input out columns stages shared-count grid memory pair.]
-  ([.pair] *.elim [i acc.])
-  ({[.input] [.out] [.columns] [.stages] [.shared-count] [.memory]} partial.stdlib.qwen35.wmma.attention.softmax.kernel.6 [kernel.])
-  ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
-  [.acc]
- ))
-(def program stdlib.qwen35.wmma.attention.softmax.host.fold : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index u64} :) ({((cap.own mem) val) ({(({master.index master.end} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
- ([input out columns stages shared-count grid memory pair.]
-  ([.pair] *.elim [index rest.])
-  ([.rest] *.elim [value proofs.])
-  ([.proofs] *.elim [less truth.])
-  ([.less] unsafe.discard unit.elim)
-  ([.index] :.forget [i.])
-  ({[.i] [.value]} *.intro [arguments.])
-  ({[.input] [.out] [.columns] [.stages] [.shared-count] [.grid] [.memory] [.arguments]} stdlib.qwen35.wmma.attention.softmax.host [result.])
-  ({[.result] [.truth]} *.intro)
- ))
 (def program stdlib.qwen35.wmma.attention.normalize-shared.kernel : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
  ([scores prob keys stages shared-count rows memory thread.]
   ({[.scores] [.prob] [.keys] [.stages] [.shared-count] [.memory] [.thread]} stdlib.qwen35.wmma.attention.softmax.kernel)

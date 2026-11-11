@@ -142,11 +142,3 @@
   ({[.cache] [.phase]} meta.master.after-own [cache-ready.])
   {[.query-ready] [.cache-ready]}
  ))
-
-(def program stdlib.qwen35.batch.full-prepare-reuse : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
- ([qg key value start cache qw kw key-target value-target out.]
-  ({[.qg] [.key] [.value] [.start] [.cache] [.qw] [.kw] [.key-target] [.value-target] [.out]} stdlib.qwen35.batch.full-prepare-launch [prepared.])
-  ([.prepared] meta.master.complete-own [query-ready phase.])
-  ({[.cache] [.phase]} meta.master.after-own [cache-ready.])
-  {[.query-ready] [.cache-ready]}
- ))

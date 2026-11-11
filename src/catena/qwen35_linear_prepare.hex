@@ -162,18 +162,6 @@
   [.complete]
  ))
 
-(def program qwen35.linear-prepare : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
- ([qkv cache weight conv-base position.]
-  ({(const.u64.0x{{QKV_SIZE}})} stdlib.models.memory.alloc-bf16 [out.])
-  ({(const.u64.0x{{KEY_SIZE}})} stdlib.models.memory.alloc-bf16 [query.])
-  ({(const.u64.0x{{KEY_SIZE}})} stdlib.models.memory.alloc-bf16 [key.])
-  ({[.qkv] [.cache] [.weight] [.conv-base] [.position] [.out] [.query] [.key]} qwen35.linear-prepare-launch [conv.])
-  ([.conv] meta.master.complete-own [ready phase.])
-  ({[.query] [.phase]} meta.master.after-own [query-ready.])
-  ({[.key] [.phase]} meta.master.after-own [key-ready.])
-  {[.ready] [.query-ready] [.key-ready]}
- ))
-
 (def program qwen35.linear-prepare-reuse : {((cap.own mem) val) ((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} -> {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)} =
  ([qkv cache weight conv-base position out query key.]
   ({[.qkv] [.cache] [.weight] [.conv-base] [.position] [.out] [.query] [.key]} qwen35.linear-prepare-launch [conv.])
