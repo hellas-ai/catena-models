@@ -101,12 +101,15 @@ cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --prompt 'The capital of Fr
 cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --serve --ctx-size 4096 --port 8000
 ```
 
-HIP WMMA accelerates batched projections and attention. Single-token decode
+HIP WMMA and CUDA `mma.sync` accelerate batched projections and attention.
+Set `CATENA_GPU_DIALECT=cuda` for NVIDIA sm_80+ GPUs, including the VL model.
+Single-token decode
 uses portable F32 reductions, without packed BF16 dot instructions. Use
 `--no-wmma-prefill` for the SIMT comparison path. The model reads layer types,
 sliding windows, RoPE factors, tokenizer, and chat template from GGUF. Sessions
 retain convolution history and attention caches across appended prompts and
-checkpoint/resume. Audio, omni, and CUDA optimization are deferred.
+checkpoint/resume. Audio and omni models are deferred. CUDA compilation is
+checked offline; CUDA execution and performance remain unverified on hardware.
 
 The CLI takes a raw text prefix; server requests use the embedded chat template,
 including its BOS token and optional thinking. The server's existing greedy

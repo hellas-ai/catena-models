@@ -1164,3 +1164,25 @@ fn emit_qkvg(s: &mut String, cfg: &ModelConfig, fast: bool) {
         writeln!(e.s, "  [.{result}]\n ))").unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires LFM3_VL_GGUF pointing to the cached BF16 language checkpoint"]
+    fn multimodal_graph_compiles() -> anyhow::Result<()> {
+        let path = std::path::PathBuf::from(std::env::var("LFM3_VL_GGUF")?);
+        let cfg = crate::checkpoint::read_gguf_model_config(&path)?;
+        let source = super::multimodal_source(
+            &cfg,
+            crate::catena::InferenceOptions::default().with_wmma_prefill(true),
+        )?;
+        let dialect = crate::model::configured_gpu_dialect()?;
+        let module =
+            crate::catena::compile_sources(crate::catena::runtime_sources(&source), dialect)?;
+        if dialect == catena_lang::runtime::GpuDialect::Cuda {
+            assert!(module.source.contains("mma.sync.aligned.m16n8k16"));
+            assert!(!module.source.contains("catena_wmma_mma"));
+        }
+        Ok(())
+    }
+}
