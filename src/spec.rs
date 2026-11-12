@@ -362,6 +362,7 @@ impl ModelConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightDtype {
+    F16,
     F32,
     Bf16,
 }

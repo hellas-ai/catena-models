@@ -1,9 +1,9 @@
-//! Native Qwen3.5 still-image encoding and single-turn prompt preparation.
+//! Native Qwen3.5 and LFM3 still-image encoding and single-turn prompt preparation.
 mod config;
 mod graph;
 pub mod image;
 mod kernels;
-pub use config::VisionConfig;
+pub use config::{ImageResize, VisionConfig, VisionKind};
 
 use crate::{
     checkpoint::{Checkpoint, GgufDtype},
@@ -28,6 +28,7 @@ pub struct VisionModel {
     dialect: GpuDialect,
 }
 pub struct ImageEmbedding {
+    pub(crate) kind: VisionKind,
     pub(crate) values: MemOwn,
     pub(crate) grid: [usize; 3],
     pub(crate) width: usize,
@@ -65,13 +66,13 @@ impl VisionModel {
         config.validate()?;
         let specs = config.weight_specs(path)?;
         let checkpoint = Checkpoint::open_inventory(path, &specs, None, dialect)
-            .context("loading vision/projector GGUF (convert F16/quantized projectors with --mmproj --outtype bf16)")?;
+            .context("loading vision/projector GGUF (convert quantized projectors with --mmproj --outtype bf16)")?;
         let mut names: Vec<_> = specs.iter().map(|s| s.gguf_name.clone()).collect();
         names.push("__zero".into());
         let source = kernels::source(&config, &names);
         let (runtime, artifact) =
             crate::catena::load_runtime(crate::catena::runtime_sources(&source), dialect)
-                .context("compiling Qwen3.5 vision graph")?;
+                .context("compiling vision encoder/projector graph")?;
         let weights = specs
             .iter()
             .map(|s| checkpoint.tensor_view(s))
@@ -80,7 +81,9 @@ impl VisionModel {
         // Vision kernels accept F32 matrices. Widen BF16 once on the GPU;
         // keep the immutable GGUF mapping alive for native F32 tensors.
         for (i, tensor) in weights.iter().enumerate() {
-            if tensor.dtype == GgufDtype::Bf16 {
+            if tensor.dtype == GgufDtype::F16 {
+                converted.insert(i, runtime.mem_f32(&checkpoint.f16_values(tensor)?)?);
+            } else if tensor.dtype == GgufDtype::Bf16 {
                 let mem = one_memory(artifact.exec_values(
                     "vision.widen-bf16",
                     vec![
@@ -91,10 +94,17 @@ impl VisionModel {
                 converted.insert(i, mem);
             }
         }
-        let zero = runtime.mem_f32(&vec![0.0; config.hidden_size])?;
+        let zero_width = if config.kind == VisionKind::Lfm3 {
+            (4 * config.hidden_size)
+                .max(config.intermediate_size)
+                .max(config.output_size)
+        } else {
+            config.hidden_size
+        };
+        let zero = runtime.mem_f32(&vec![0.0; zero_width])?;
         let dim = config.hidden_size / config.heads;
         let inv: Vec<_> = (0..dim / 4)
-            .map(|i| 10000_f32.powf(-4. * i as f32 / dim as f32))
+            .map(|i| config.rope_theta.powf(-4. * i as f32 / dim as f32))
             .collect();
         let frequencies = runtime.mem_f32(&inv)?;
         Ok(Self {
@@ -170,6 +180,9 @@ impl VisionModel {
                         && (w.iter().sum::<f32>() - 1.).abs() < 1e-5),
             "invalid image pixels or interpolation weights"
         );
+        if self.config.kind == VisionKind::Lfm3 {
+            ensure!(patches.positions.chunks_exact(2).enumerate().all(|(i,p)|p == [(i/patches.grid[2]) as u64,(i%patches.grid[2]) as u64]),"LFM3 vision patches must be in raster order");
+        }
         let pixels = self.runtime.mem_f32(&patches.pixels)?;
         let positions = self.runtime.mem_u64(&patches.positions)?;
         let indices = self.runtime.mem_u64(&patches.bilinear_indices)?;
@@ -181,6 +194,9 @@ impl VisionModel {
             coefficients.as_ref().into(),
             self.frequencies.as_ref().into(),
         ];
+        if self.config.kind == VisionKind::Lfm3 {
+            args.push((patches.grid[2] as u64).into());
+        }
         for (i, tensor) in self.weights.iter().enumerate() {
             args.push(
                 if let Some(mem) = self.converted.get(&i) {
@@ -200,6 +216,7 @@ impl VisionModel {
         );
         eprintln!("vision encoding: {:.2?}", started.elapsed());
         Ok(ImageEmbedding {
+            kind: self.config.kind,
             values,
             grid: patches.grid,
             width: self.config.output_size,
@@ -230,6 +247,13 @@ impl PreparedMultimodalPrompt {
             !images.is_empty(),
             "multimodal prompt requires at least one image"
         );
+        ensure!(
+            images.iter().all(|image| image.kind == images[0].kind),
+            "cannot mix projector families"
+        );
+        if images[0].kind == VisionKind::Lfm3 {
+            return Self::lfm3(tokenizer, prompt, images);
+        }
         let start = tokenizer.special_token_id("<|vision_start|>")?;
         let end = tokenizer.special_token_id("<|vision_end|>")?;
         let pad = tokenizer.special_token_id("<|image_pad|>")?;
@@ -272,6 +296,86 @@ impl PreparedMultimodalPrompt {
             "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
         )?);
         let (positions, next_rope_position) = prompt_positions(tokens.len(), &spans, &images)?;
+        Ok(Self {
+            tokens,
+            positions,
+            spans,
+            images,
+            next_rope_position,
+        })
+    }
+
+    fn lfm3(tokenizer: &QwenTokenizer, prompt: &str, images: Vec<ImageEmbedding>) -> Result<Self> {
+        let pad = tokenizer.special_token_id("<|image|>")?;
+        let reserved = [
+            pad,
+            tokenizer.special_token_id("<|vision_start|>")?,
+            tokenizer.special_token_id("<|vision_end|>")?,
+            tokenizer.special_token_id("<|video|>")?,
+        ];
+        let content = tokenizer.encode_without_special_tokens(prompt.trim())?;
+        ensure!(
+            !content.iter().any(|id| reserved.contains(id)),
+            "prompt text contains reserved vision tokens"
+        );
+        let mut environment = minijinja::Environment::new();
+        environment
+            .set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
+        environment.add_function(
+            "raise_exception",
+            |message: String| -> Result<String, minijinja::Error> {
+                Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    message,
+                ))
+            },
+        );
+        let template = tokenizer
+            .chat_template()
+            .context("LFM3-VL checkpoint is missing its chat template")?;
+        let template = template
+            .replace("{%- generation -%}", "")
+            .replace("{%- endgeneration -%}", "")
+            .replace("{% generation %}", "")
+            .replace("{% endgeneration %}", "");
+        environment.add_template_owned("chat", template)?;
+        let mut content = images
+            .iter()
+            .map(|_| serde_json::json!({"type":"image"}))
+            .collect::<Vec<_>>();
+        content.push(serde_json::json!({"type":"text","text":prompt.trim()}));
+        let rendered=environment.get_template("chat")?.render(minijinja::context! { messages=>[serde_json::json!({"role":"user","content":content})],tools=>Vec::<serde_json::Value>::new(), enable_thinking=>false, add_generation_prompt=>true, bos_token=>tokenizer.bos_token(),eos_token=>tokenizer.eos_token() })?;
+        let raw = tokenizer.encode_without_special_tokens(&rendered)?;
+        let mut tokens = Vec::new();
+        let mut spans = Vec::new();
+        for token in raw {
+            if token == pad {
+                let image = images
+                    .get(spans.len())
+                    .context("chat template produced extra image markers")?;
+                let len = image.token_count();
+                ensure!(len > 0, "empty image embedding");
+                spans.push(ImageSpan {
+                    start: tokens.len(),
+                    len,
+                });
+                tokens.resize(
+                    tokens
+                        .len()
+                        .checked_add(len)
+                        .context("image prompt length overflow")?,
+                    pad,
+                );
+            } else {
+                tokens.push(token);
+            }
+        }
+        ensure!(
+            spans.len() == images.len(),
+            "chat template image marker count mismatch"
+        );
+        let positions = (0..tokens.len()).map(|i| [i as u64; 3]).collect();
+        let next_rope_position = tokens.len() as u64;
         Ok(Self {
             tokens,
             positions,

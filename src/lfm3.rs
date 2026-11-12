@@ -528,6 +528,77 @@ pub(crate) fn source(cfg: &ModelConfig, options: InferenceOptions) -> Result<Str
     Ok(s)
 }
 
+/// Add an embedding-input entrypoint while retaining the ordinary text graph.
+/// Image and text rows share the same linear RoPE positions and decoder state.
+pub(crate) fn multimodal_source(cfg: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    let mut s = source(cfg, options)?;
+    let original = definitions(&s, &["qwen3:"]);
+    let mut args = vec![
+        ("hidden", OWN),
+        ("positions", REF),
+        ("cache", OWN),
+        ("history", OWN),
+        ("capacity", U),
+        ("start", U),
+        ("sequence", U),
+    ];
+    let specs = weight_specs(cfg)?;
+    let names = (0..specs.len())
+        .map(|i| format!("w{i}"))
+        .collect::<Vec<_>>();
+    args.extend(names.iter().map(|n| (n.as_str(), REF)));
+    let mut entry = String::new();
+    header(
+        &mut entry,
+        "qwen3.multimodal",
+        &args,
+        &format!("{{{OWN} {OWN} {OWN} {OWN}}}"),
+    );
+    let mut body = original[original.find("  ({").unwrap()..].to_owned();
+    let mut row_call = String::new();
+    call(
+        &mut row_call,
+        &["tokens"],
+        "stdlib.models.memory.ref-count-u64",
+        "v0",
+    );
+    let mut embed_call = String::new();
+    call(
+        &mut embed_call,
+        &["tokens", "w0", &c(0)],
+        "stdlib.qwen35.prefill.embed",
+        "v1",
+    );
+    ensure!(
+        body.contains(&row_call) && body.contains(&embed_call),
+        "LFM3 embedding entrypoint template changed"
+    );
+    let rows = format!(
+        "  ([.hidden] stdlib.models.memory.own-count-bf16 [hidden-count.])\n  ({{[.hidden-count] {}}} stdlib.models.memory.u64.div [v0.])\n",
+        c(cfg.hidden_size)
+    );
+    body = body
+        .replace(&row_call, &rows)
+        .replace(&embed_call, "  ([.hidden] [v1.])\n");
+    entry.push_str(&body);
+    s.push_str(&entry);
+    header(
+        &mut s,
+        "qwen3.embedding",
+        &[("tokens", REF), ("weight", REF)],
+        OWN,
+    );
+    call(
+        &mut s,
+        &["tokens", "weight", &c(0)],
+        "stdlib.qwen35.prefill.embed",
+        "embedding",
+    );
+    s.push_str("  [.embedding]\n ))\n");
+    s.push_str(include_str!("catena/lfm3_multimodal.hex"));
+    Ok(s)
+}
+
 fn emit_projection(s: &mut String, wmma: bool) {
     for (branch, proof, op) in [
         (

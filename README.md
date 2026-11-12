@@ -1,7 +1,7 @@
 # Catena inference
 
 Native Catena GPU inference for Qwen3 dense and Qwen3.5/3.6 dense or MoE text
-models, LFM3 text, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
+models, LFM3 text and images, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
 All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
@@ -92,7 +92,7 @@ F32 recurrent workspace are preserved.
 [kernel details and historical measurements](docs/qwen-kernels.md), and
 [prefill measurements](PREFILL_BENCHMARKS.md).
 
-## LFM3 text
+## LFM3 text and images
 
 The BF16 text checkpoint uses the same CLI and chat server:
 
@@ -106,11 +106,23 @@ uses portable F32 reductions, without packed BF16 dot instructions. Use
 `--no-wmma-prefill` for the SIMT comparison path. The model reads layer types,
 sliding windows, RoPE factors, tokenizer, and chat template from GGUF. Sessions
 retain convolution history and attention caches across appended prompts and
-checkpoint/resume. Vision, audio, omni, and CUDA optimization are deferred.
+checkpoint/resume. Audio, omni, and CUDA optimization are deferred.
 
 The CLI takes a raw text prefix; server requests use the embedded chat template,
 including its BOS token and optional thinking. The server's existing greedy
 sampling policy applies.
+
+For still-image understanding, use the VL checkpoint and the existing image options:
+
+```bash
+cargo run -r -- --model LiquidAI/LFM3-VL-2B-GGUF:BF16 \
+  --image photo.jpg --prompt 'Describe this image.' -n 128
+```
+
+The companion BF16 projector downloads automatically. Multiple `--image` arguments
+preserve image order; `--image-max-pixels` can reduce vision encoding cost.
+The CLI and `PreparedMultimodalPrompt` API use the checkpoint's image chat template.
+See [LFM3 image support](LFM3_VISION.md) for implementation and validation details.
 
 To run the focused checkpoint/compiler and GPU checks, set `LFM3_GGUF` to the
 cached BF16 file and run `cargo test -r --test lfm3 -- --ignored --nocapture`.
