@@ -117,13 +117,21 @@ pub fn generated_model_source_for_options(
     config: &ModelConfig,
     options: InferenceOptions,
 ) -> Result<String> {
-    crate::qwen::source(config, options)
+    if config.architecture == crate::spec::ModelArchitecture::Lfm3 {
+        crate::lfm3::source(config, options)
+    } else {
+        crate::qwen::source(config, options)
+    }
 }
 pub(crate) fn generated_multimodal_source(
     config: &ModelConfig,
     options: InferenceOptions,
 ) -> Result<String> {
-    crate::qwen::multimodal_source(config, options)
+    if config.architecture == crate::spec::ModelArchitecture::Lfm3 {
+        crate::lfm3::multimodal_source(config, options)
+    } else {
+        crate::qwen::multimodal_source(config, options)
+    }
 }
 /// Keep primitive declarations and exported programs, following callback dependencies.
 pub fn prepare_sources(

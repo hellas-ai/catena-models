@@ -41,7 +41,11 @@ pub(super) fn emit(
     wmma: WmmaStages,
 ) {
     let moe = cfg.architecture == ModelArchitecture::Qwen35Moe;
-    let project = if wmma.projections {
+    let dense_blocks = !moe && wmma.projections;
+    let dense_scan = dense_blocks && cfg.linear_inner_size.unwrap().is_multiple_of(16);
+    let project = if dense_blocks {
+        "stdlib.qwen35.dense.project"
+    } else if wmma.projections {
         "stdlib.qwen35.batch.wmma-project"
     } else {
         "stdlib.qwen35.batch.project"
@@ -188,7 +192,9 @@ pub(super) fn emit(
             &c(cfg.hidden_size),
             "hidden",
         ],
-        if wmma.projections && cfg.query_size().is_multiple_of(16) {
+        if dense_blocks && cfg.query_size().is_multiple_of(16) {
+            "stdlib.qwen35.dense.projection.residual"
+        } else if wmma.projections && cfg.query_size().is_multiple_of(16) {
             "stdlib.qwen35.wmma.projection.residual"
         } else {
             "stdlib.qwen35.batch.residual"
@@ -213,7 +219,9 @@ pub(super) fn emit(
                 &c(cfg.intermediate_size),
                 "w9",
             ],
-            if wmma.projections {
+            if dense_blocks {
+                "stdlib.qwen35.dense.projection.gate"
+            } else if wmma.projections {
                 "stdlib.qwen35.wmma.projection.gate"
             } else {
                 "stdlib.qwen35.batch.gate"
@@ -230,7 +238,9 @@ pub(super) fn emit(
                 &c(cfg.hidden_size),
                 "attention-ready",
             ],
-            if wmma.projections {
+            if dense_blocks {
+                "stdlib.qwen35.dense.projection.residual"
+            } else if wmma.projections {
                 "stdlib.qwen35.wmma.projection.residual"
             } else {
                 "stdlib.qwen35.batch.residual"
@@ -315,7 +325,11 @@ pub(super) fn emit(
             "shadow",
             "shadow-base",
         ],
-        "stdlib.qwen35.batch.scan",
+        if dense_scan {
+            "stdlib.qwen35.dense.scan-l8"
+        } else {
+            "stdlib.qwen35.batch.scan"
+        },
         "core",
     );
     call(
@@ -349,7 +363,9 @@ pub(super) fn emit(
             &c(cfg.hidden_size),
             "hidden",
         ],
-        if wmma.projections && cfg.linear_inner_size.unwrap().is_multiple_of(16) {
+        if dense_blocks && cfg.linear_inner_size.unwrap().is_multiple_of(16) {
+            "stdlib.qwen35.dense.projection.residual"
+        } else if wmma.projections && cfg.linear_inner_size.unwrap().is_multiple_of(16) {
             "stdlib.qwen35.wmma.projection.residual"
         } else {
             "stdlib.qwen35.batch.residual"
@@ -375,7 +391,9 @@ pub(super) fn emit(
                 &c(cfg.intermediate_size),
                 "w12",
             ],
-            if wmma.projections {
+            if dense_blocks {
+                "stdlib.qwen35.dense.projection.gate"
+            } else if wmma.projections {
                 "stdlib.qwen35.wmma.projection.gate"
             } else {
                 "stdlib.qwen35.batch.gate"
@@ -392,7 +410,9 @@ pub(super) fn emit(
                 &c(cfg.hidden_size),
                 "attention-ready",
             ],
-            if wmma.projections {
+            if dense_blocks {
+                "stdlib.qwen35.dense.projection.residual"
+            } else if wmma.projections {
                 "stdlib.qwen35.wmma.projection.residual"
             } else {
                 "stdlib.qwen35.batch.residual"

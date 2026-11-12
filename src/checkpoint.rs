@@ -34,6 +34,7 @@ const CUDA_MEMCPY_HOST_TO_DEVICE: c_int = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GgufDtype {
+    F16,
     F32,
     Bf16,
 }
@@ -42,15 +43,16 @@ impl GgufDtype {
     fn from_ggml_type(value: u32) -> Result<Self> {
         match value {
             0 => Ok(Self::F32),
+            1 => Ok(Self::F16),
             30 => Ok(Self::Bf16),
-            other => bail!("unsupported GGUF tensor type {other}; expected F32 or BF16"),
+            other => bail!("unsupported GGUF tensor type {other}; expected F32, BF16 or F16"),
         }
     }
 
     fn element_size(self) -> usize {
         match self {
             Self::F32 => 4,
-            Self::Bf16 => 2,
+            Self::Bf16 | Self::F16 => 2,
         }
     }
 }
@@ -227,6 +229,28 @@ impl Checkpoint {
         })
     }
 
+    /// Small F16 vision patchifiers are widened once at load time.
+    pub(crate) fn f16_values(&self, view: &TensorView) -> Result<Vec<f32>> {
+        ensure!(view.dtype == GgufDtype::F16, "expected an F16 tensor");
+        let file = self
+            .files
+            .get(view.file_index)
+            .context("unknown GGUF shard")?;
+        let end = view
+            .file_offset
+            .checked_add(view.byte_len)
+            .context("tensor range overflow")?;
+        let bytes = file
+            .file
+            .bytes
+            .get(view.file_offset..end)
+            .context("tensor range out of bounds")?;
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|b| crate::weights::f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+            .collect())
+    }
+
     pub fn storage_byte_len(&self) -> usize {
         self.files.iter().map(|file| file.file.bytes.len()).sum()
     }
@@ -361,6 +385,12 @@ pub fn read_gguf_model_config(path: impl AsRef<Path>) -> Result<ModelConfig> {
     config.output_weight_tied = true;
     for path in paths {
         let gguf = GgufFile::open(&path)?;
+        ensure!(
+            gguf.tensors
+                .values()
+                .all(|tensor| tensor.dtype != GgufDtype::F16),
+            "language GGUF weights must be BF16/F32; F16 is supported only for vision tensors"
+        );
         if gguf.tensors.contains_key("output.weight") {
             config.output_weight_tied = false;
         }
@@ -395,6 +425,7 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     );
     let _tensor_count = cursor.usize_u64("tensor count")?;
     let metadata_count = cursor.usize_u64("metadata count")?;
+    let mut lfm_arrays = HashMap::new();
     let mut mrope_sections = None;
     let mut architecture = None;
     let mut model_name = None;
@@ -432,6 +463,10 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
                 sections[i] = usize::try_from(array[i].as_u64().context("invalid RoPE section")?)?;
             }
             mrope_sections = Some(sections);
+        } else if key == "lfm3.attention.head_count_kv"
+            || key == "lfm3.attention.sliding_window_pattern"
+        {
+            lfm_arrays.insert(key, cursor.json_value(ty)?);
         } else if is_model_scalar_key(&key) {
             let value = match ty {
                 ValueType::F32 => ScalarMetadata::Float(cursor.f32()?),
@@ -445,11 +480,14 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
     }
     let architecture_name = architecture.context("GGUF is missing general.architecture")?;
     let architecture = match architecture_name.as_str() {
+        "lfm3" => ModelArchitecture::Lfm3,
         "qwen3" => ModelArchitecture::Qwen3Dense,
         "qwen35" => ModelArchitecture::Qwen35Dense,
         "qwen35moe" => ModelArchitecture::Qwen35Moe,
         other => {
-            bail!("unsupported GGUF architecture {other:?}; expected qwen3, qwen35, or qwen35moe")
+            bail!(
+                "unsupported GGUF architecture {other:?}; expected qwen3, qwen35, qwen35moe, or lfm3"
+            )
         }
     };
     let prefix = architecture_name.as_str();
@@ -485,6 +523,37 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         num_nextn_layers < total_layers,
         "GGUF next-token layer count must be smaller than block count"
     );
+    let lfm3 = if architecture == ModelArchitecture::Lfm3 {
+        let heads = lfm_arrays
+            .get("lfm3.attention.head_count_kv")
+            .context("missing LFM3 KV-head array")?
+            .as_array()
+            .context("LFM3 KV heads must be an array")?
+            .iter()
+            .map(|v| {
+                v.as_u64()
+                    .and_then(|x| usize::try_from(x).ok())
+                    .context("invalid LFM3 KV head count")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let sliding_layers = lfm_arrays
+            .get("lfm3.attention.sliding_window_pattern")
+            .context("missing LFM3 sliding pattern")?
+            .as_array()
+            .context("LFM3 sliding pattern must be an array")?
+            .iter()
+            .map(|v| v.as_bool().context("invalid LFM3 sliding flag"))
+            .collect::<Result<Vec<_>>>()?;
+        Some(crate::spec::Lfm3Config {
+            kv_heads: heads,
+            sliding_layers,
+            sliding_window: u("attention.sliding_window")?,
+            sliding_rope_theta: f("rope.freq_base_swa")?,
+            conv_kernel: u("shortconv.l_cache")?,
+        })
+    } else {
+        None
+    };
     let config = ModelConfig {
         model_name,
         architecture,
@@ -494,7 +563,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         hidden_size: u("embedding_length")?,
         intermediate_size: if matches!(
             architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Lfm3
+                | ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
         ) {
             u("feed_forward_length")?
         } else {
@@ -503,7 +574,12 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         num_layers: total_layers - num_nextn_layers,
         num_nextn_layers,
         num_attention_heads: u("attention.head_count")?,
-        num_key_value_heads: u("attention.head_count_kv")?,
+        num_key_value_heads: if let Some(l) = &lfm3 {
+            *l.kv_heads.iter().max().context("empty LFM3 layers")?
+        } else {
+            u("attention.head_count_kv")?
+        },
+        lfm3,
         head_dim,
         max_position_embeddings: u("context_length")?,
         rms_norm_eps: f("attention.layer_norm_rms_epsilon")?,
@@ -528,7 +604,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
         linear_inner_size: optional_u("ssm.inner_size")?,
         output_weight_tied: matches!(
             architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Lfm3
+                | ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
         ),
         eos_token_id,
     };
@@ -538,6 +616,9 @@ fn parse_gguf_model_config(bytes: &[u8]) -> Result<ModelConfig> {
 
 fn is_model_scalar_key(key: &str) -> bool {
     [
+        ".attention.sliding_window",
+        ".rope.freq_base_swa",
+        ".shortconv.l_cache",
         ".vocab_size",
         ".embedding_length",
         ".feed_forward_length",
@@ -686,6 +767,7 @@ impl GgufFile {
             spec.name
         );
         let expected_dtype = match spec.dtype {
+            WeightDtype::F16 => GgufDtype::F16,
             WeightDtype::F32 => GgufDtype::F32,
             WeightDtype::Bf16 => GgufDtype::Bf16,
         };

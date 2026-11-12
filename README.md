@@ -1,12 +1,12 @@
 # Catena inference
 
 Native Catena GPU inference for Qwen3 dense and Qwen3.5/3.6 dense or MoE text
-models, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
+models, LFM3 text and images, Qwen3.5 images, Whisper ASR, Flux2 Klein, and MMS English TTS.
 All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
 shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
-their normal meanings. Qwen tokenizers and model dimensions come from GGUF.
+their normal meanings. Text tokenizers and model dimensions come from GGUF.
 BF16/F32 checkpoint weights retain their native storage.
 
 ## GPU selection
@@ -53,6 +53,10 @@ matrix-core projections. CUDA uses native `mma.sync` instructions; HIP uses WMMA
 Dense models also use WMMA gate/up/down FFN projections; MoE models use grouped
 expert projections. DeltaNet's QKV, Z, alpha, and beta input projections use WMMA
 during prefill; token decode and the vocabulary projection retain SIMT arithmetic.
+Dense HIP prefill selects larger block projections and an eight-lane DeltaNet
+scan; small or unaligned input shapes and CUDA retain the existing projection fallback.
+Dense vocabulary selection uses the shared parallel argmax helper. MoE kernel
+selection is unchanged. See [dense performance measurements](QWEN35_DENSE_PERFORMANCE.md).
 WMMA changes accumulation order and can change logits and generated tokens.
 Set `CATENA_WMMA_COMPONENTS=safe` to use the exact tiled attention variant and,
 for MoE, exact experts. Dense FFNs retain SIMT arithmetic in this safe selection.
@@ -87,6 +91,41 @@ F32 recurrent workspace are preserved.
 [Image handling](docs/qwen35-images.md),
 [kernel details and historical measurements](docs/qwen-kernels.md), and
 [prefill measurements](PREFILL_BENCHMARKS.md).
+
+## LFM3 text and images
+
+The BF16 text checkpoint uses the same CLI and chat server:
+
+```bash
+cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --prompt 'The capital of France is' -n 32
+cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --serve --ctx-size 4096 --port 8000
+```
+
+HIP WMMA accelerates batched projections and attention. Single-token decode
+uses portable F32 reductions, without packed BF16 dot instructions. Use
+`--no-wmma-prefill` for the SIMT comparison path. The model reads layer types,
+sliding windows, RoPE factors, tokenizer, and chat template from GGUF. Sessions
+retain convolution history and attention caches across appended prompts and
+checkpoint/resume. Audio, omni, and CUDA optimization are deferred.
+
+The CLI takes a raw text prefix; server requests use the embedded chat template,
+including its BOS token and optional thinking. The server's existing greedy
+sampling policy applies.
+
+For still-image understanding, use the VL checkpoint and the existing image options:
+
+```bash
+cargo run -r -- --model LiquidAI/LFM3-VL-2B-GGUF:BF16 \
+  --image photo.jpg --prompt 'Describe this image.' -n 128
+```
+
+The companion BF16 projector downloads automatically. Multiple `--image` arguments
+preserve image order; `--image-max-pixels` can reduce vision encoding cost.
+The CLI and `PreparedMultimodalPrompt` API use the checkpoint's image chat template.
+See [LFM3 image support](LFM3_VISION.md) for implementation and validation details.
+
+To run the focused checkpoint/compiler and GPU checks, set `LFM3_GGUF` to the
+cached BF16 file and run `cargo test -r --test lfm3 -- --ignored --nocapture`.
 
 ## Benchmarks and validation
 

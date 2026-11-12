@@ -30,6 +30,9 @@ const U64: &str = "(u64 val)";
 const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 
 pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
+    if config.architecture == ModelArchitecture::Lfm3 {
+        return crate::lfm3::validate(config, options);
+    }
     if options.wmma_prefill {
         ensure!(
             matches!(
@@ -151,10 +154,10 @@ pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions)
     Ok(s)
 }
 
-fn c(n: usize) -> String {
+pub(crate) fn c(n: usize) -> String {
     format!("(const.u64.0x{n:016X})")
 }
-fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
+pub(crate) fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
     write!(s, "  ({{").unwrap();
     for arg in args {
         if arg.starts_with('(') {
@@ -165,7 +168,7 @@ fn call(s: &mut String, args: &[&str], op: &str, outputs: &str) {
     }
     writeln!(s, "}} {op} [{outputs}.])").unwrap();
 }
-fn header(s: &mut String, name: &str, inputs: &[(&str, &str)], output: &str) {
+pub(crate) fn header(s: &mut String, name: &str, inputs: &[(&str, &str)], output: &str) {
     writeln!(
         s,
         "(def program {name} : {{{}}} -> {output} =",
@@ -654,25 +657,17 @@ mod tests {
         let end = accelerated[linear + 1..].find("(def program ").unwrap() + linear + 1;
         let full = &accelerated[full..linear];
         let linear = &accelerated[linear..end];
-        assert_eq!(
-            full.matches("} stdlib.qwen35.batch.wmma-project [").count(),
-            3
-        );
+        assert_eq!(full.matches("} stdlib.qwen35.dense.project [").count(), 3);
         assert!(full.contains("} stdlib.qwen35.wmma.attention.run ["));
         for body in [full, linear] {
-            assert!(body.contains("} stdlib.qwen35.wmma.projection.gate ["));
+            assert!(body.contains("} stdlib.qwen35.dense.projection.gate ["));
             assert_eq!(
-                body.matches("} stdlib.qwen35.wmma.projection.residual [")
+                body.matches("} stdlib.qwen35.dense.projection.residual [")
                     .count(),
                 2
             );
         }
-        assert_eq!(
-            linear
-                .matches("} stdlib.qwen35.batch.wmma-project [")
-                .count(),
-            4
-        );
+        assert_eq!(linear.matches("} stdlib.qwen35.dense.project [").count(), 4);
         assert!(!linear.contains("} stdlib.qwen35.batch.project ["));
         let original = source(&config, InferenceOptions::default())?;
         assert!(!original.contains("stdlib.qwen35.tile.dot.fold"));

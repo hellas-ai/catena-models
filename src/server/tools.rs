@@ -86,7 +86,12 @@ pub fn parse_call(body: &str, tools: &[Tool]) -> Result<Call, String> {
     let args = arguments
         .as_object()
         .ok_or("tool arguments must be a JSON object")?;
-    validate_arguments(args, &tool.function.parameters)?;
+    // These calls execute on the client. Non-strict schemas describe the tool;
+    // a model's argument mistake must reach the client for tool-error recovery.
+    if let Err(error) = validate_arguments(args, &tool.function.parameters) {
+        tracing::debug!(target: "catena_models::server::protocol", tool=%name,
+            %arguments, %error, "forwarding non-strict tool arguments that do not match the schema");
+    }
     Ok(Call {
         name,
         arguments: arguments.to_string(),
@@ -117,7 +122,7 @@ fn parse_xml(body: &str, tools: &[Tool]) -> Result<(String, Value), String> {
         let raw = value.strip_prefix('\n').unwrap_or(value);
         let raw = raw.strip_suffix('\n').unwrap_or(raw);
         let schema = &tool.function.parameters["properties"][key];
-        let value = xml_value(raw, schema)?;
+        let value = xml_value(raw, schema);
         args.insert(key.to_owned(), value);
         rest = after.trim_start();
     }
@@ -127,9 +132,9 @@ fn parse_xml(body: &str, tools: &[Tool]) -> Result<(String, Value), String> {
     Ok((name.to_owned(), Value::Object(args)))
 }
 
-fn xml_value(raw: &str, schema: &Value) -> Result<Value, String> {
+fn xml_value(raw: &str, schema: &Value) -> Value {
     if schema["type"] == "string" {
-        return Ok(Value::String(raw.into()));
+        return Value::String(raw.into());
     }
     if let Some(variants) = schema
         .get("anyOf")
@@ -137,23 +142,13 @@ fn xml_value(raw: &str, schema: &Value) -> Result<Value, String> {
         .and_then(Value::as_array)
     {
         for variant in variants {
-            if let Ok(v) = xml_value(raw, variant)
-                && matches_type(&v, variant)
-            {
-                return Ok(v);
+            let value = xml_value(raw, variant);
+            if matches_type(&value, variant) {
+                return value;
             }
         }
-        return Err("tool parameter does not match declared alternatives".into());
     }
-    let parsed = serde_json::from_str(raw.trim());
-    if schema.get("type").is_none() {
-        return Ok(parsed.unwrap_or_else(|_| Value::String(raw.into())));
-    }
-    let value = parsed.map_err(|e| format!("invalid typed tool parameter: {e}"))?;
-    if !matches_type(&value, schema) {
-        return Err("tool parameter type mismatch".into());
-    }
-    Ok(value)
+    serde_json::from_str(raw.trim()).unwrap_or_else(|_| Value::String(raw.into()))
 }
 fn matches_type(value: &Value, schema: &Value) -> bool {
     let matches = |ty: &str| match ty {
@@ -178,7 +173,7 @@ fn validate_arguments(args: &Map<String, Value>, schema: &Value) -> Result<(), S
     if let Some(required) = schema["required"].as_array() {
         for key in required {
             if !key.as_str().is_some_and(|key| args.contains_key(key)) {
-                return Err("model omitted a required tool argument".into());
+                return Err(format!("model omitted a required tool argument: {key}"));
             }
         }
     }
@@ -212,9 +207,26 @@ mod tests {
         assert!(parse_call(r#"{"name":"edit","arguments":{"text":"hi"}}"#, &t).is_ok());
         assert!(parse_call(r#"{"name":"edit","arguments":"{\"text\":\"hi\"}"}"#, &t).is_ok());
         for body in [
-            r#"{"name":"bad","arguments":{}}"#,
             r#"{"name":"edit","arguments":{}}"#,
-            "<function=edit><parameter=count>bad</parameter></function>",
+            "<function=edit></function>",
+        ] {
+            assert_eq!(parse_call(body, &t).unwrap().arguments, "{}");
+        }
+        for body in [
+            r#"{"name":"edit","arguments":{"count":"bad","extra":true}}"#,
+            "<function=edit><parameter=count>bad</parameter><parameter=extra>true</parameter></function>",
+        ] {
+            let call = parse_call(body, &t).unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(&call.arguments).unwrap(),
+                json!({"count":"bad","extra":true})
+            );
+        }
+        for body in [
+            r#"{"name":"bad","arguments":{}}"#,
+            r#"{"name":"edit","arguments":[]}"#,
+            "<function=edit><parameter=text>unclosed</function>",
+            "<function=edit><parameter=text>a</parameter><parameter=text>b</parameter></function>",
             "<function=edit>",
             "{}",
         ] {

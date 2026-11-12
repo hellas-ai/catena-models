@@ -191,9 +191,12 @@ for _ in range(8):
                          "content": result})
 ```
 
-Tool names and JSON object arguments are checked, including required arguments
-and basic declared property types. This is not a constrained JSON-schema
-sampler. Tool-definition `strict=true`, forced/required tool choices, non-function tools,
+Tool names and JSON object argument syntax are checked. Function calls with missing,
+unknown, or incorrectly typed arguments are forwarded unchanged for client-side
+validation and tool-error recovery; they do not fail the response stream. XML
+parameters use the declared types to decode values where possible. Schema
+mismatches appear in opt-in protocol debug logs. This is not a constrained
+JSON-schema sampler. Tool-definition `strict=true`, forced/required tool choices, non-function tools,
 Chat Completions structured-output controls, logprobs, and non-neutral logits/sampling controls are
 rejected explicitly. A malformed generated tool call returns an error rather
 than exposing internal tool markup as answer text.

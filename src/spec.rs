@@ -5,6 +5,7 @@ use anyhow::{Result, ensure};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelArchitecture {
     Qwen3Dense,
+    Lfm3,
     Qwen35Dense,
     Qwen35Moe,
 }
@@ -13,11 +14,24 @@ pub enum ModelArchitecture {
 pub enum LayerType {
     FullAttention,
     LinearAttention,
+    Convolution,
+    SlidingAttention,
+}
+
+/// Layer metadata specific to the LFM3 text operator stack.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lfm3Config {
+    pub kv_heads: Vec<usize>,
+    pub sliding_layers: Vec<bool>,
+    pub sliding_window: usize,
+    pub sliding_rope_theta: f32,
+    pub conv_kernel: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelConfig {
     pub model_name: Option<String>,
+    pub lfm3: Option<Lfm3Config>,
     pub architecture: ModelArchitecture,
     pub vocabulary_size: usize,
     pub hidden_size: usize,
@@ -56,12 +70,15 @@ impl ModelConfig {
     pub fn is_dense(&self) -> bool {
         matches!(
             self.architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ModelArchitecture::Lfm3
+                | ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
         )
     }
 
     pub fn qwen3_0_6b() -> Self {
         Self {
+            lfm3: None,
             model_name: Some("Qwen3-0.6B".into()),
             architecture: ModelArchitecture::Qwen3Dense,
             vocabulary_size: 151_936,
@@ -101,6 +118,7 @@ impl ModelConfig {
 
     pub fn qwen35_0_8b() -> Self {
         Self {
+            lfm3: None,
             model_name: Some("Qwen3.5-0.8B".into()),
             architecture: ModelArchitecture::Qwen35Dense,
             vocabulary_size: 248_320,
@@ -132,6 +150,7 @@ impl ModelConfig {
 
     pub fn qwen36_35b_a3b() -> Self {
         Self {
+            lfm3: None,
             model_name: Some("Qwen3.6-35B-A3B".into()),
             architecture: ModelArchitecture::Qwen35Moe,
             vocabulary_size: 248_320,
@@ -180,9 +199,11 @@ impl ModelConfig {
             "attention head count must be divisible by KV head count"
         );
         match self.architecture {
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense => ensure!(
+            ModelArchitecture::Lfm3
+            | ModelArchitecture::Qwen3Dense
+            | ModelArchitecture::Qwen35Dense => ensure!(
                 self.num_experts == 0 && self.experts_per_token == 0,
-                "dense Qwen metadata must not define routed experts"
+                "dense model metadata must not define routed experts"
             ),
             ModelArchitecture::Qwen35Moe => {
                 ensure!(self.num_experts > 0, "GGUF expert count must be non-zero");
@@ -200,6 +221,30 @@ impl ModelConfig {
             self.rope_dimension_count > 0 && self.rope_dimension_count <= self.head_dim,
             "rotary dimension must be within the attention head"
         );
+        if self.architecture == ModelArchitecture::Lfm3 {
+            let l = self
+                .lfm3
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing LFM3 layer metadata"))?;
+            ensure!(
+                l.kv_heads.len() == self.num_layers && l.sliding_layers.len() == self.num_layers,
+                "LFM3 layer metadata length mismatch"
+            );
+            ensure!(
+                l.conv_kernel > 1
+                    && l.sliding_window > 0
+                    && l.sliding_rope_theta.is_finite()
+                    && l.sliding_rope_theta > 0.0,
+                "invalid LFM3 convolution/window/RoPE parameters"
+            );
+            for (&heads, &sliding) in l.kv_heads.iter().zip(&l.sliding_layers) {
+                ensure!(
+                    (heads == 0 && !sliding)
+                        || (heads > 0 && self.num_attention_heads.is_multiple_of(heads)),
+                    "invalid LFM3 attention layer"
+                );
+            }
+        }
         if self.is_qwen35() {
             for (name, value) in [
                 ("full-attention interval", self.full_attention_interval),
@@ -228,6 +273,15 @@ impl ModelConfig {
     }
 
     pub fn layer_type(&self, layer: usize) -> LayerType {
+        if let Some(l) = &self.lfm3 {
+            return if l.kv_heads[layer] == 0 {
+                LayerType::Convolution
+            } else if l.sliding_layers[layer] {
+                LayerType::SlidingAttention
+            } else {
+                LayerType::FullAttention
+            };
+        }
         match self.full_attention_interval {
             Some(n) if (layer + 1).is_multiple_of(n) => LayerType::FullAttention,
             Some(_) => LayerType::LinearAttention,
@@ -253,7 +307,10 @@ impl ModelConfig {
             .checked_add(self.linear_inner_size?)
     }
     pub fn kv_cache_elements_per_token(&self) -> Result<usize> {
-        self.num_layers
+        let layers = self.lfm3.as_ref().map_or(self.num_layers, |l| {
+            l.kv_heads.iter().filter(|&&n| n > 0).count()
+        });
+        layers
             .checked_mul(2)
             .and_then(|value| value.checked_mul(self.num_key_value_heads))
             .and_then(|value| value.checked_mul(self.head_dim))
@@ -263,6 +320,14 @@ impl ModelConfig {
         let kv = capacity
             .checked_mul(self.kv_cache_elements_per_token()?)
             .ok_or_else(|| anyhow::anyhow!("KV cache element count overflowed"))?;
+        if let Some(l) = &self.lfm3 {
+            let conv_layers = l.kv_heads.iter().filter(|&&n| n == 0).count();
+            return conv_layers
+                .checked_mul(l.conv_kernel - 1)
+                .and_then(|n| n.checked_mul(self.hidden_size))
+                .and_then(|n| kv.checked_add(n))
+                .ok_or_else(|| anyhow::anyhow!("LFM3 cache size overflowed"));
+        }
         if !self.is_qwen35() {
             return Ok(kv);
         }
@@ -297,6 +362,7 @@ impl ModelConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WeightDtype {
+    F16,
     F32,
     Bf16,
 }
@@ -374,6 +440,9 @@ fn layer_tensor(
 
 pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
     c.validate()?;
+    if c.architecture == ModelArchitecture::Lfm3 {
+        return lfm3_weight_specs(c);
+    }
     let mut out = vec![TensorSpec::one(
         "model.embed_tokens.weight".into(),
         "token_embd.weight".into(),
@@ -389,6 +458,11 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
             vec![c.hidden_size],
         ));
         match (c.architecture, c.layer_type(l)) {
+            (ModelArchitecture::Lfm3, _) => unreachable!(),
+            (
+                ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe,
+                LayerType::Convolution | LayerType::SlidingAttention,
+            ) => unreachable!("invalid Qwen layer type"),
             (ModelArchitecture::Qwen3Dense, _)
             | (ModelArchitecture::Qwen35Dense, LayerType::FullAttention)
             | (ModelArchitecture::Qwen35Moe, LayerType::FullAttention) => {
@@ -632,5 +706,101 @@ pub fn weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
             vec![c.vocabulary_size, c.hidden_size],
         ),
     ]);
+    Ok(out)
+}
+
+fn lfm3_weight_specs(c: &ModelConfig) -> Result<Vec<TensorSpec>> {
+    let mut out = vec![TensorSpec::one(
+        "model.embed_tokens.weight".into(),
+        "token_embd.weight".into(),
+        WeightDtype::Bf16,
+        vec![c.vocabulary_size, c.hidden_size],
+    )];
+    for (l, &heads) in c.lfm3.as_ref().unwrap().kv_heads.iter().enumerate() {
+        for name in [
+            "attn_norm",
+            "post_attention_norm",
+            "ffn_norm",
+            "post_ffw_norm",
+        ] {
+            out.push(layer_tensor(
+                l,
+                &format!("{name}.weight"),
+                &format!("{name}.weight"),
+                WeightDtype::F32,
+                vec![c.hidden_size],
+            ));
+        }
+        let matrices = if heads == 0 {
+            vec![
+                ("shortconv.in_proj", 3 * c.hidden_size, c.hidden_size),
+                ("shortconv.out_proj", c.hidden_size, c.hidden_size),
+            ]
+        } else {
+            vec![
+                ("attn_q", c.query_size(), c.hidden_size),
+                ("attn_k", heads * c.head_dim, c.hidden_size),
+                ("attn_v", heads * c.head_dim, c.hidden_size),
+                ("attn_gate", c.num_attention_heads, c.hidden_size),
+                ("attn_output", c.hidden_size, c.query_size()),
+            ]
+        };
+        for (name, rows, cols) in matrices.into_iter().chain([
+            ("ffn_gate", c.intermediate_size, c.hidden_size),
+            ("ffn_up", c.intermediate_size, c.hidden_size),
+            ("ffn_down", c.hidden_size, c.intermediate_size),
+        ]) {
+            out.push(layer_tensor(
+                l,
+                &format!("{name}.weight"),
+                &format!("{name}.weight"),
+                WeightDtype::Bf16,
+                vec![rows, cols],
+            ));
+        }
+        if heads == 0 {
+            out.push(layer_tensor(
+                l,
+                "shortconv.conv.weight",
+                "shortconv.conv.weight",
+                WeightDtype::F32,
+                vec![c.hidden_size, c.lfm3.as_ref().unwrap().conv_kernel],
+            ));
+        } else {
+            for name in ["attn_q_norm", "attn_k_norm"] {
+                out.push(layer_tensor(
+                    l,
+                    &format!("{name}.weight"),
+                    &format!("{name}.weight"),
+                    WeightDtype::F32,
+                    vec![c.head_dim],
+                ));
+            }
+        }
+    }
+    out.push(TensorSpec::one(
+        "model.norm.weight".into(),
+        "output_norm.weight".into(),
+        WeightDtype::F32,
+        vec![c.hidden_size],
+    ));
+    out.push(TensorSpec::one(
+        "rope_freqs.weight".into(),
+        "rope_freqs.weight".into(),
+        WeightDtype::F32,
+        vec![c.head_dim / 2],
+    ));
+    // Keep the output head last, matching the model runtime's weight ABI.
+    out.push(TensorSpec::one(
+        "lm_head.weight".into(),
+        if c.output_weight_tied {
+            "token_embd.weight"
+        } else {
+            "output.weight"
+        }
+        .into(),
+        WeightDtype::Bf16,
+        vec![c.vocabulary_size, c.hidden_size],
+    ));
     Ok(out)
 }

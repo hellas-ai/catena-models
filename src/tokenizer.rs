@@ -22,6 +22,7 @@ use tokenizers::{
 use crate::checkpoint::{GgufTokenizerMetadata, read_gguf_tokenizer_metadata};
 
 const QWEN2_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const LFM2_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 const QWEN35_SPLIT_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+|\p{N}| ?[^\s\p{L}\p{M}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 pub type QwenDecodeStream<'a> = DecodeStream<
@@ -36,6 +37,8 @@ pub type QwenDecodeStream<'a> = DecodeStream<
 pub struct QwenTokenizer {
     inner: Tokenizer,
     chat_template: Option<String>,
+    bos_token: Option<String>,
+    eos_token: Option<String>,
 }
 
 impl QwenTokenizer {
@@ -47,6 +50,8 @@ impl QwenTokenizer {
         Ok(Self {
             inner,
             chat_template: None,
+            bos_token: None,
+            eos_token: None,
         })
     }
 
@@ -63,9 +68,12 @@ impl QwenTokenizer {
             metadata.model
         );
         let split_pattern = match metadata.pre.as_deref() {
+            Some("lfm2") => LFM2_SPLIT_PATTERN,
             Some("qwen2") => QWEN2_SPLIT_PATTERN,
             Some("qwen35") => QWEN35_SPLIT_PATTERN,
-            other => bail!("unsupported GGUF pre-tokenizer {other:?}; expected qwen2 or qwen35"),
+            other => {
+                bail!("unsupported GGUF pre-tokenizer {other:?}; expected qwen2, qwen35, or lfm2")
+            }
         };
         ensure!(
             metadata.tokens.len() <= u32::MAX as usize,
@@ -101,7 +109,9 @@ impl QwenTokenizer {
                 Ok((left.to_owned(), right.to_owned()))
             })
             .collect::<Result<Vec<_>>>()?;
+        let is_lfm = metadata.pre.as_deref() == Some("lfm2");
         let bpe = BPE::builder()
+            .ignore_merges(is_lfm)
             .vocab_and_merges(vocab, merges)
             .build()
             .map_err(|error| anyhow::anyhow!(error.to_string()))
@@ -114,9 +124,11 @@ impl QwenTokenizer {
             false,
         )
         .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("failed to build Qwen pre-tokenizer regex")?;
+        .context("failed to build GGUF pre-tokenizer regex")?;
         let mut inner = Tokenizer::new(bpe);
-        inner.with_normalizer(Some(NFC));
+        if !is_lfm {
+            inner.with_normalizer(Some(NFC));
+        }
         inner.with_pre_tokenizer(Some(PreSequence::new(vec![
             PreTokenizerWrapper::from(split),
             PreTokenizerWrapper::from(byte_level),
@@ -165,6 +177,12 @@ impl QwenTokenizer {
         inner.add_tokens(&user_tokens);
         Ok(Self {
             inner,
+            bos_token: metadata
+                .bos_token_id
+                .and_then(|id| metadata.tokens.get(id as usize).cloned()),
+            eos_token: metadata
+                .eos_token_id
+                .and_then(|id| metadata.tokens.get(id as usize).cloned()),
             chat_template: metadata.chat_template,
         })
     }
@@ -172,6 +190,13 @@ impl QwenTokenizer {
     /// Model-provided Jinja template, when loaded from a GGUF checkpoint.
     pub fn chat_template(&self) -> Option<&str> {
         self.chat_template.as_deref()
+    }
+
+    pub fn bos_token(&self) -> &str {
+        self.bos_token.as_deref().unwrap_or("<|endoftext|>")
+    }
+    pub fn eos_token(&self) -> &str {
+        self.eos_token.as_deref().unwrap_or("<|im_end|>")
     }
 
     pub fn special_token_id(&self, token: &str) -> Result<u64> {

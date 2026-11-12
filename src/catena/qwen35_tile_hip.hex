@@ -76,3 +76,7 @@
   ({[.d0] [.p1]} *.intro [p0.])
   [.p0]
  ))
+
+# Block WMMA projections currently use the HIP wave32 fragment layout.
+(def program stdlib.qwen35.tile.block-layout : 1 -> (u64 val) =
+ (unit.elim (const.u64.0x0000000000000001)))

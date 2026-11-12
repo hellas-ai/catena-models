@@ -19,7 +19,7 @@ use clap::{CommandFactory, FromArgMatches, Parser};
 mod server;
 
 #[derive(Debug, Parser)]
-#[command(about = "Qwen text and Qwen3.5 image generation with native Catena GPU execution")]
+#[command(about = "Qwen and LFM3 text and image understanding with native Catena GPU execution")]
 struct Args {
     /// Serve text chat through the OpenAI Chat Completions and Responses APIs.
     #[arg(long, conflicts_with_all = ["prompt", "image", "bench", "generate_entrypoint", "ignore_eos", "max_new_tokens"])]
@@ -75,7 +75,7 @@ struct Args {
     )]
     model: String,
 
-    /// Still images, in order, preceding the text in one Qwen3.5 user message.
+    /// Still images, in order, preceding the text in one user message.
     #[arg(long, value_name = "PATH", conflicts_with_all = ["bench", "generate_entrypoint"])]
     image: Vec<PathBuf>,
 
@@ -164,11 +164,17 @@ fn main() -> Result<()> {
     let projector = if !args.image.is_empty() {
         let config = read_gguf_model_config(&gguf_path)?;
         ensure!(
-            config.is_qwen35(),
-            "image inputs require a Qwen3.5 dense or MoE model"
+            config.is_qwen35()
+                || config.architecture == catena_models::spec::ModelArchitecture::Lfm3,
+            "image inputs require a Qwen3.5 or LFM3 model"
         );
         let path = download_mmproj(args.mmproj_model.as_deref().unwrap_or(&args.model))?;
         let vision_config = catena_models::vision::VisionConfig::from_gguf(&path)?;
+        ensure!(
+            (vision_config.kind == catena_models::vision::VisionKind::Lfm3)
+                == (config.architecture == catena_models::spec::ModelArchitecture::Lfm3),
+            "projector family does not match language model"
+        );
         ensure!(
             vision_config.output_size == config.hidden_size,
             "projector output width does not match language model"

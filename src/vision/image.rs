@@ -1,4 +1,4 @@
-use super::VisionConfig;
+use super::{ImageResize, VisionConfig, VisionKind};
 use anyhow::{Context, Result, bail, ensure};
 use std::{fs::File, io::BufReader, path::Path};
 
@@ -31,7 +31,7 @@ impl ImagePatches {
             config.min_pixels,
             config.max_pixels,
         )?;
-        let rgb = resize_rgb(rgb, w, h, rw, rh);
+        let rgb = resize_rgb_mode(rgb, w, h, rw, rh, config.resize);
         let gh = rh / config.patch_size;
         let gw = rw / config.patch_size;
         let p = config.patch_size;
@@ -40,50 +40,49 @@ impl ImagePatches {
         let mut positions = Vec::with_capacity(gh * gw * 2);
         let mut bilinear_indices = Vec::with_capacity(gh * gw * 4);
         let mut bilinear_weights = Vec::with_capacity(gh * gw * 4);
-        for by in 0..gh / m {
-            for bx in 0..gw / m {
-                for dy in 0..m {
-                    for dx in 0..m {
-                        let y = by * m + dy;
-                        let x = bx * m + dx;
-                        positions.extend([y as u64, x as u64]);
-                        for c in 0..3 {
-                            for py in 0..p {
-                                for px in 0..p {
-                                    let value =
-                                        rgb[((y * p + py) * rw + x * p + px) * 3 + c] as f32;
-                                    pixels.push((value / 255. - config.mean[c]) / config.std[c]);
-                                }
-                            }
-                        }
-                        let sy =
-                            y as f32 * (config.position_side - 1) as f32 / (gh - 1).max(1) as f32;
-                        let sx =
-                            x as f32 * (config.position_side - 1) as f32 / (gw - 1).max(1) as f32;
-                        let y0 = sy.floor() as usize;
-                        let x0 = sx.floor() as usize;
-                        let y1 = (y0 + 1).min(config.position_side - 1);
-                        let x1 = (x0 + 1).min(config.position_side - 1);
-                        let fy = sy - y0 as f32;
-                        let fx = sx - x0 as f32;
-                        bilinear_indices.extend(
-                            [
-                                y0 * config.position_side + x0,
-                                y0 * config.position_side + x1,
-                                y1 * config.position_side + x0,
-                                y1 * config.position_side + x1,
-                            ]
-                            .map(|v| v as u64),
-                        );
-                        bilinear_weights.extend([
-                            (1. - fy) * (1. - fx),
-                            (1. - fy) * fx,
-                            fy * (1. - fx),
-                            fy * fx,
-                        ]);
+        for patch in 0..gh * gw {
+            let (y, x) = if config.kind == VisionKind::Lfm3 {
+                (patch / gw, patch % gw)
+            } else {
+                let block = patch / (m * m);
+                let inner = patch % (m * m);
+                (
+                    block / (gw / m) * m + inner / m,
+                    block % (gw / m) * m + inner % m,
+                )
+            };
+            positions.extend([y as u64, x as u64]);
+            for c in 0..3 {
+                for py in 0..p {
+                    for px in 0..p {
+                        let value = rgb[((y * p + py) * rw + x * p + px) * 3 + c] as f32;
+                        pixels.push((value / 255. - config.mean[c]) / config.std[c]);
                     }
                 }
             }
+            let sy = y as f32 * (config.position_side - 1) as f32 / (gh - 1).max(1) as f32;
+            let sx = x as f32 * (config.position_side - 1) as f32 / (gw - 1).max(1) as f32;
+            let y0 = sy.floor() as usize;
+            let x0 = sx.floor() as usize;
+            let y1 = (y0 + 1).min(config.position_side - 1);
+            let x1 = (x0 + 1).min(config.position_side - 1);
+            let fy = sy - y0 as f32;
+            let fx = sx - x0 as f32;
+            bilinear_indices.extend(
+                [
+                    y0 * config.position_side + x0,
+                    y0 * config.position_side + x1,
+                    y1 * config.position_side + x0,
+                    y1 * config.position_side + x1,
+                ]
+                .map(|v| v as u64),
+            );
+            bilinear_weights.extend([
+                (1. - fy) * (1. - fx),
+                (1. - fy) * fx,
+                fy * (1. - fx),
+                fy * fx,
+            ]);
         }
         Ok(Self {
             pixels,
@@ -190,35 +189,73 @@ fn cubic(x: f64) -> f64 {
         0.
     }
 }
-fn coefficients(input: usize, output: usize) -> Vec<(usize, Vec<i64>)> {
+fn coefficients(input: usize, output: usize, mode: ImageResize) -> Vec<(usize, Vec<i64>)> {
     let scale = input as f64 / output as f64;
     let filter_scale = scale.max(1.);
-    let support = 2. * filter_scale;
-    (0..output)
+    let bilinear = mode == ImageResize::TorchBilinear;
+    let support = (if bilinear { 1. } else { 2. }) * filter_scale;
+    let raw: Vec<_> = (0..output)
         .map(|i| {
             let center = (i as f64 + 0.5) * scale;
             let start = ((center - support + 0.5) as isize).max(0) as usize;
             let end = ((center + support + 0.5) as usize).min(input);
             let weights: Vec<_> = (start..end)
-                .map(|j| cubic((j as f64 - center + 0.5) / filter_scale))
+                .map(|j| {
+                    let x = (j as f64 - center + 0.5) / filter_scale;
+                    if bilinear {
+                        (1. - x.abs()).max(0.)
+                    } else {
+                        cubic(x)
+                    }
+                })
                 .collect();
             let sum: f64 = weights.iter().sum();
             (
                 start,
-                weights
-                    .into_iter()
-                    .map(|v| (v / sum * 4194304.).round() as i64)
+                weights.into_iter().map(|v| v / sum).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    let mut precision = 22;
+    if mode != ImageResize::PillowBicubic {
+        let max = raw
+            .iter()
+            .flat_map(|(_, w)| w)
+            .copied()
+            .fold(0_f64, f64::max);
+        precision = 0;
+        while precision < 22 && ((0.5 + max * (1_u64 << (precision + 1)) as f64) as u64) < (1 << 15)
+        {
+            precision += 1;
+        }
+    }
+    raw.into_iter()
+        .map(|(start, w)| {
+            (
+                start,
+                w.into_iter()
+                    .map(|v| {
+                        (v * (1_u64 << precision) as f64).round() as i64
+                            * (1_i64 << (22 - precision))
+                    })
                     .collect(),
             )
         })
         .collect()
 }
 /// Pillow-compatible antialiased bicubic resizing, including 8-bit intermediate rounding.
-fn resize_rgb(rgb: &[u8], w: usize, h: usize, rw: usize, rh: usize) -> Vec<u8> {
+fn resize_rgb_mode(
+    rgb: &[u8],
+    w: usize,
+    h: usize,
+    rw: usize,
+    rh: usize,
+    mode: ImageResize,
+) -> Vec<u8> {
     let horizontal = if w == rw {
         rgb.to_vec()
     } else {
-        let coeff = coefficients(w, rw);
+        let coeff = coefficients(w, rw, mode);
         let mut out = vec![0; rw * h * 3];
         for y in 0..h {
             for (x, (start, weights)) in coeff.iter().enumerate() {
@@ -238,7 +275,7 @@ fn resize_rgb(rgb: &[u8], w: usize, h: usize, rw: usize, rh: usize) -> Vec<u8> {
     if h == rh {
         return horizontal;
     }
-    let coeff = coefficients(h, rh);
+    let coeff = coefficients(h, rh, mode);
     let mut out = vec![0; rw * rh * 3];
     for (y, (start, weights)) in coeff.iter().enumerate() {
         for x in 0..rw {
@@ -281,6 +318,11 @@ mod reference_tests {
         let reference: serde_json::Value =
             serde_json::from_str(include_str!("../../tests/fixtures/qwen35-images.json"))?;
         let config = VisionConfig {
+            kind: VisionKind::Qwen35,
+            resize: ImageResize::PillowBicubic,
+            kv_heads: 12,
+            conv_layers: vec![],
+            rope_theta: 1e4,
             hidden_size: 768,
             intermediate_size: 3072,
             output_size: 1024,

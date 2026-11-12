@@ -83,6 +83,62 @@ fn events(wire: &str) -> Vec<Value> {
 }
 
 #[test]
+fn non_strict_missing_tool_argument_completes_the_response_stream() {
+    use super::{output::OutputParser, responses_output::Output};
+    let tool = json!({"type":"function","name":"exec_command","strict":false,
+        "parameters":{"type":"object","properties":{"cmd":{"type":"string"},"workdir":{"type":"string"}},
+            "required":["cmd"],"additionalProperties":false}});
+    for (call, expected) in [
+        ("<function=exec_command>\n</function>", json!({})),
+        (
+            r#"{"name":"exec_command","arguments":{"workdir":"/tmp"}}"#,
+            json!({"workdir":"/tmp"}),
+        ),
+    ] {
+        let prepared = request(json!({"tools":[tool.clone()],"reasoning":{"effort":"medium"}}))
+            .prepare("test")
+            .unwrap();
+        let mut parser = OutputParser::new(true, prepared.generation.tools, true);
+        let mut output = Output::new(
+            Arc::from("test"),
+            prepared.custom,
+            prepared.settings,
+            true,
+            None,
+        );
+        for ch in format!("Inspect the repository.</think><tool_call>{call}</tool_call>").chars() {
+            for delta in parser.push(&ch.to_string()).unwrap() {
+                output.delta(delta).unwrap();
+            }
+        }
+        assert_eq!(parser.calls, 1);
+        assert!(parser.finish(false).unwrap().is_empty());
+        output.finish("tool_calls", 10, 20, 5, 0, 0).unwrap();
+        let completed = output.events.back().unwrap();
+        assert_eq!(completed["type"], "response.completed");
+        let call = &completed["response"]["output"][1];
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["name"], "exec_command");
+        assert_eq!(
+            serde_json::from_str::<Value>(call["arguments"].as_str().unwrap()).unwrap(),
+            expected
+        );
+        assert!(
+            output
+                .events
+                .iter()
+                .any(|event| event["type"] == "response.function_call_arguments.done")
+        );
+        assert!(
+            !output
+                .events
+                .iter()
+                .any(|event| event["type"] == "response.failed")
+        );
+    }
+}
+
+#[test]
 fn codex_client_metadata_is_accepted_without_changing_model_input() {
     let original = request(json!({})).prepare("test").unwrap();
     for metadata in [

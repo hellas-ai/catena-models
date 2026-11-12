@@ -15,7 +15,7 @@ use crate::{
     spec::{ModelArchitecture, ModelConfig, weight_specs},
 };
 
-/// Loaded Qwen3 runtime and registered native-dtype GGUF mapping.
+/// Loaded text-model runtime and registered native-dtype GGUF mapping.
 pub struct Model {
     runtime: Runtime,
     artifact: Artifact,
@@ -58,7 +58,7 @@ impl Model {
         Self::load_impl(gguf_path, options, dialect, false)
     }
 
-    /// Compile the additional embedding/MRoPE entrypoint for image-conditioned sessions.
+    /// Compile the additional embedding-input entrypoint for image-conditioned sessions.
     pub fn load_gguf_with_multimodal_options(
         gguf_path: impl AsRef<Path>,
         options: InferenceOptions,
@@ -104,7 +104,7 @@ impl Model {
         };
         let (runtime, artifact) =
             crate::catena::load_runtime(runtime_sources(&model_source), dialect)
-                .context("failed to compile the Qwen3 Catena GPU program")?;
+                .context("failed to compile the text-model Catena GPU program")?;
         let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
         let mut weights = Vec::with_capacity(specs.len());
         let mut mapped_bf16_bytes = 0_usize;
@@ -116,6 +116,7 @@ impl Model {
                 .with_context(|| format!("failed to locate {}", spec.name))?;
             if counted_tensors.insert(spec.gguf_name) {
                 match view.dtype {
+                    GgufDtype::F16 => anyhow::bail!("F16 language weights are unsupported"),
                     GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
                     GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
                 }
@@ -160,6 +161,7 @@ impl Model {
             .model_name
             .as_deref()
             .unwrap_or(match self.config.architecture {
+                ModelArchitecture::Lfm3 => "LFM3 text",
                 ModelArchitecture::Qwen3Dense => "Qwen3 dense",
                 ModelArchitecture::Qwen35Dense => "Qwen3.5 dense",
                 ModelArchitecture::Qwen35Moe => "Qwen3.5/3.6 MoE",
@@ -498,8 +500,9 @@ impl Session<'_> {
     ) -> Result<(MemOwn, u64)> {
         ensure!(self.position == 0, "a session can only be prefilled once");
         ensure!(
-            self.model.config.is_qwen35(),
-            "image inputs require Qwen3.5 dense or MoE"
+            self.model.config.is_qwen35()
+                || self.model.config.architecture == ModelArchitecture::Lfm3,
+            "image inputs require Qwen3.5 or LFM3"
         );
         ensure!(
             self.model.multimodal,
@@ -532,6 +535,70 @@ impl Session<'_> {
                     && image.values.byte_len() == (span.len * image.width * 4) as u64,
                 "image embedding length mismatch"
             );
+        }
+        let lfm3 = self.model.config.architecture == ModelArchitecture::Lfm3;
+        ensure!(
+            prompt
+                .images
+                .iter()
+                .all(|image| (image.kind == crate::vision::VisionKind::Lfm3) == lfm3),
+            "projector family does not match language model"
+        );
+        if lfm3 {
+            let tokens = self.model.runtime.mem_u64(&prompt.tokens)?;
+            let mut hidden = match self
+                .model
+                .artifact
+                .exec_values(
+                    "qwen3.embedding",
+                    vec![
+                        tokens.as_ref().into(),
+                        self.model
+                            .checkpoint
+                            .gpu_ref(&self.model.weights[0])?
+                            .into(),
+                    ],
+                )?
+                .pop()
+            {
+                Some(Value::MemOwn(hidden)) => hidden,
+                _ => anyhow::bail!("LFM3 embedding ABI mismatch"),
+            };
+            for (image, span) in prompt.images.iter().zip(&prompt.spans) {
+                hidden = match self
+                    .model
+                    .artifact
+                    .exec_values(
+                        "qwen3.mm-insert-image",
+                        vec![
+                            hidden.into(),
+                            image.values.as_ref().into(),
+                            (span.start as u64).into(),
+                            (image.width as u64).into(),
+                        ],
+                    )?
+                    .pop()
+                {
+                    Some(Value::MemOwn(hidden)) => hidden,
+                    _ => anyhow::bail!("LFM3 image insertion ABI mismatch"),
+                };
+            }
+            let state = self
+                .state
+                .take()
+                .context("session state unavailable after failed execution")?;
+            let (state, logits, token) = self.model.cached_embedding_outputs(
+                hidden,
+                [0; 3],
+                0,
+                self.capacity,
+                state,
+                prompt.tokens.len(),
+            )?;
+            self.state = Some(state);
+            self.position = prompt.tokens.len();
+            self.next_rope_position = Some(prompt.next_rope_position);
+            return Ok((logits, token));
         }
         let mut result = None;
         let mut image_index = 0;

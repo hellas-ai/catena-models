@@ -226,3 +226,32 @@ pub(crate) fn startup_timing(stage: &str, start: std::time::Instant) {
 pub fn bf16_to_f32(x: u16) -> f32 {
     f32::from_bits((x as u32) << 16)
 }
+
+/// IEEE half precision, including subnormals and non-finite values.
+pub(crate) fn f16_to_f32(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 31);
+    let mantissa = u32::from(bits & 1023);
+    if exponent == 0 {
+        let value = mantissa as f32 * 2_f32.powi(-24);
+        if sign == 0 { value } else { -value }
+    } else {
+        f32::from_bits(
+            sign | (if exponent == 31 { 255 } else { exponent + 112 } << 23) | (mantissa << 13),
+        )
+    }
+}
+
+#[cfg(test)]
+mod half_tests {
+    #[test]
+    fn half_conversion_covers_special_values_and_subnormals() {
+        use super::f16_to_f32;
+        assert_eq!(f16_to_f32(0x3c00), 1.);
+        assert_eq!(f16_to_f32(0xc000), -2.);
+        assert_eq!(f16_to_f32(1), 2_f32.powi(-24));
+        assert_eq!(f16_to_f32(0x8000).to_bits(), (-0_f32).to_bits());
+        assert_eq!(f16_to_f32(0x7c00), f32::INFINITY);
+        assert!(f16_to_f32(0x7e00).is_nan());
+    }
+}

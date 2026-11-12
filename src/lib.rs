@@ -2,6 +2,7 @@ pub mod catena;
 pub mod checkpoint;
 pub mod flux;
 pub mod hfhub;
+mod lfm3;
 pub mod model;
 mod qwen;
 mod session_graph;
