@@ -1,14 +1,15 @@
 //! One 256x256 same-latent VAE comparison, independent of text and denoising.
 use anyhow::{Result, ensure};
-use catena_lang::runtime::{GpuDialect, Runtime, Value};
+use catena_lang::runtime::{Runtime, Value};
 use catena_models::{
     catena::{compile_sources, runtime_sources},
     flux::{config, graph, vae::VaeDecoder},
+    model::configured_gpu_dialect,
     weights::Weights,
 };
 use std::{path::PathBuf, time::Instant};
 #[test]
-#[ignore = "requires gfx11 HIP GPU and cached Klein weights; only decodes 256x256"]
+#[ignore = "requires a supported HIP/CUDA GPU and cached Klein weights; only decodes 256x256"]
 fn decode_saved_256() -> Result<()> {
     let dir =
         PathBuf::from(std::env::var("FLUX_VAE_REFERENCE").unwrap_or("/tmp/flux-vae-256".into()));
@@ -57,8 +58,11 @@ fn decode_saved_256() -> Result<()> {
             .replace("} flux.vae-linear-f32-orr", "} flux.linear-f32-orr")
             .replace("} flux.vae-attention-f32-ooo", "} flux.attention-f32-ooo");
         let source = graph::bundle(&program.source);
-        let mut runtime = Runtime::new(GpuDialect::Hip)?;
-        let artifact = runtime.load(compile_sources(runtime_sources(&source), GpuDialect::Hip)?)?;
+        let mut runtime = Runtime::new(configured_gpu_dialect()?)?;
+        let artifact = runtime.load(compile_sources(
+            runtime_sources(&source),
+            configured_gpu_dialect()?,
+        )?)?;
         let mut weights = Weights::open(&snapshot.join("vae/diffusion_pytorch_model.safetensors"))?;
         weights.prepare(&runtime, &program.weights, true)?;
         let input = runtime.mem_u16(&latent)?;

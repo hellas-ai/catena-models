@@ -1,4 +1,7 @@
-use catena_lang::runtime::{GpuDialect, Runtime, Value};
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
+
+use catena_lang::runtime::{Runtime, Value};
 use catena_models::{
     catena::{compile_sources, core_sources},
     weights::{bf16_to_f32, f32_to_bf16},
@@ -16,23 +19,22 @@ fn linear_compiles() -> anyhow::Result<()> {
     assert!(s.contains("} stdlib.models.math.dot-pair-f32 ["));
     let module = compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?;
-    assert!(
-        module
-            .source
-            .contains("__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32")
-    );
+    tiles::check_native(&module, tiles::dialect());
+    if tiles::dialect() == catena_lang::runtime::GpuDialect::Cuda {
+        tiles::check_toolkit(module, "flux_linear")?;
+    }
     Ok(())
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP/CUDA GPU"]
 fn linear_matches_cpu() -> anyhow::Result<()> {
     let s = source();
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let module = rt.load(compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     for (m, k, n) in [
         (1, 32, 17),
@@ -95,21 +97,24 @@ fn attention_compiles() -> anyhow::Result<()> {
         core_sources()
             .map(|s| -> &str { s })
             .chain([source.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?;
-    assert!(module.source.contains("catena_wmma_f32x8_t{{"));
+    tiles::check_native(&module, tiles::dialect());
+    if tiles::dialect() == catena_lang::runtime::GpuDialect::Cuda {
+        tiles::check_toolkit(module, "flux_attention")?;
+    }
     Ok(())
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP/CUDA GPU"]
 fn attention_matches_cpu() -> anyhow::Result<()> {
     let source = attention_source();
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let module = rt.load(compile_sources(
         core_sources()
             .map(|s| -> &str { s })
             .chain([source.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     let dim = 128;
     for (rows, keys, heads, kvheads, causal, valid) in [

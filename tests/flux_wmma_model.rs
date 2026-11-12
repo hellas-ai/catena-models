@@ -6,7 +6,7 @@ use catena_models::flux::{
 };
 
 #[test]
-#[ignore = "requires gfx11 GPU and cached Flux Klein 4B weights; renders only 256x256"]
+#[ignore = "requires a supported HIP/CUDA GPU and cached Flux Klein 4B weights; renders only 256x256"]
 fn default_pipeline_256() -> Result<()> {
     let snapshot = config::snapshot("black-forest-labs/FLUX.2-klein-4B")?;
     let output = std::env::var_os("FLUX_WMMA_OUTPUT")

@@ -2,7 +2,7 @@
 use anyhow::{Context, Result, ensure};
 
 #[test]
-#[ignore = "requires HIP GPU, model weights, FLUX_TEST_REFERENCE and FLUX_TEST_DUMP directories"]
+#[ignore = "requires HIP or CUDA GPU, model weights, FLUX_TEST_REFERENCE and FLUX_TEST_DUMP directories"]
 fn cached_components_match_reference() -> Result<()> {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
