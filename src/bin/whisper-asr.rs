@@ -56,8 +56,13 @@ fn main() -> Result<()> {
     let samples = whisper::audio::read_wav(&wav)?;
     if a.features_only {
         ensure!(a.dump_dir.is_some(), "--features-only requires --dump-dir");
-        let mel = whisper::audio::log_mel(&samples)?;
-        whisper::dump_f32(a.dump_dir.as_deref(), "log_mel", &mel, &[3000, 80])?;
+        let mel = whisper::audio::log_mel(&samples, config.num_mel_bins)?;
+        whisper::dump_f32(
+            a.dump_dir.as_deref(),
+            "log_mel",
+            &mel,
+            &[whisper::audio::FRAMES, config.num_mel_bins],
+        )?;
         return Ok(());
     }
     let model = Whisper::load_with_debug(&model_dir, a.timings, a.dump_dir.is_some())?;

@@ -43,7 +43,7 @@ impl Config {
             self.model_type == "whisper"
                 && self.d_model > 0
                 && self.d_model.is_multiple_of(2)
-                && self.num_mel_bins == 80
+                && [80, 128].contains(&self.num_mel_bins)
                 && self.encoder_layers > 0
                 && self.decoder_layers > 0
                 && self.encoder_attention_heads > 0
@@ -57,7 +57,7 @@ impl Config {
                 && self.vocab_size > 0
                 && self.activation_function == "gelu"
                 && !self.scale_embedding,
-            "expected an 80-mel Whisper model with matching encoder/decoder head and FFN dimensions, GELU, and a 1500-position encoder (128-mel large-v3 models are unsupported)"
+            "expected an 80- or 128-mel Whisper model with matching encoder/decoder head and FFN dimensions, GELU, and a 1500-position encoder"
         );
         ensure!(
             (self.decoder_start_token_id as usize) < self.vocab_size
@@ -283,7 +283,7 @@ impl Whisper {
     }
     pub fn encode(&self, features: &[f32]) -> Result<MemOwn> {
         ensure!(
-            features.len() == audio::FRAMES * audio::MELS,
+            features.len() == audio::FRAMES * self.config.num_mel_bins,
             "wrong mel feature dimensions"
         );
         let mut args = vec![self.runtime.mem_u16(&bf16(features))?.into()];
@@ -354,13 +354,13 @@ impl Whisper {
             })
             .transpose()?;
         let start = Instant::now();
-        let features = audio::log_mel(samples)?;
+        let features = audio::log_mel(samples, self.config.num_mel_bins)?;
         let preprocessing = start.elapsed();
         dump_f32(
             options.dump_dir.as_deref(),
             "log_mel",
             &features,
-            &[3000, 80],
+            &[audio::FRAMES, self.config.num_mel_bins],
         )?;
         let features = self.runtime.mem_f32(&features)?;
         let (language_mask, text_mask, begin_mask) = self
@@ -509,6 +509,25 @@ mod tests {
             bf16(&[f32::from_bits(0x3f808000), f32::from_bits(0x3f818000)]),
             [0x3f80, 0x3f82]
         );
+    }
+
+    #[test]
+    fn config_accepts_metadata_mel_dimensions() {
+        let mut config: Config = serde_json::from_value(serde_json::json!({
+            "model_type": "whisper", "d_model": 1280, "num_mel_bins": 128,
+            "encoder_layers": 32, "decoder_layers": 4,
+            "encoder_attention_heads": 20, "decoder_attention_heads": 20,
+            "encoder_ffn_dim": 5120, "decoder_ffn_dim": 5120,
+            "max_source_positions": 1500, "max_target_positions": 448,
+            "vocab_size": 51866, "decoder_start_token_id": 50258,
+            "eos_token_id": 50257, "activation_function": "gelu"
+        }))
+        .unwrap();
+        assert!(config.validate().is_ok());
+        config.num_mel_bins = 80;
+        assert!(config.validate().is_ok());
+        config.num_mel_bins = 96;
+        assert!(config.validate().is_err());
     }
 
     #[test]

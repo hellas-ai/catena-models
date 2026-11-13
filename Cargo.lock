@@ -379,7 +379,7 @@ dependencies = [
 [[package]]
 name = "catena-lang"
 version = "0.1.0"
-source = "git+https://github.com/hellas-ai/catena-lang.git?branch=master#dfad87438018925b9b5e591f3cc8b59806e88719"
+source = "git+https://github.com/hellas-ai/catena-lang.git?rev=f47ade17aa5fe45f0d4b2f8294107dfb7a29f28f#f47ade17aa5fe45f0d4b2f8294107dfb7a29f28f"
 dependencies = [
  "anyhow",
  "bincode",
