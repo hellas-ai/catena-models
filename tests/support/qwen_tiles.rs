@@ -75,6 +75,24 @@ pub fn check_toolkit(module: RuntimeModule, name: &str) -> anyhow::Result<()> {
         .output()?;
     anyhow::ensure!(result.status.success());
     anyhow::ensure!(String::from_utf8_lossy(&result.stdout).contains("HMMA"));
+    // Match the runtime's shared-library compilation without opening a CUDA device.
+    let result = std::process::Command::new("nvcc")
+        .args([
+            "-std=c++17",
+            "-arch=sm_80",
+            "--fmad=false",
+            "--shared",
+            "-Xcompiler=-fPIC",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(dir.join("kernel.so"))
+        .output()?;
+    anyhow::ensure!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
     let result = std::process::Command::new("nvcc")
         .args(["-std=c++17", "-arch=sm_75", "--ptx"])
         .arg(&source)

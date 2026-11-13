@@ -1,5 +1,8 @@
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
+
 use anyhow::Result;
-use catena_lang::runtime::{GpuDialect, Runtime, Value};
+use catena_lang::runtime::{Runtime, Value};
 use catena_models::catena::{compile_sources, core_sources};
 fn source() -> String {
     catena_models::flux::graph::bundle(&[include_str!("../src/catena/flux_vae_wmma.hex"),r#"
@@ -14,22 +17,22 @@ fn vae_kernels_compile() -> Result<()> {
     let s = source();
     let m = compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?;
-    assert!(
-        m.source
-            .contains("__builtin_amdgcn_wmma_f32_16x16x16_bf16_w32")
-    );
+    tiles::check_native(&m, tiles::dialect());
+    if tiles::dialect() == catena_lang::runtime::GpuDialect::Cuda {
+        tiles::check_toolkit(m, "flux_vae_kernels")?;
+    }
     Ok(())
 }
 #[test]
-#[ignore = "requires gfx11 HIP GPU"]
+#[ignore = "requires a supported HIP/CUDA GPU"]
 fn convolution_and_group_norm_match_cpu() -> Result<()> {
     let s = source();
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let module = rt.load(compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     for (ci, co, h, width, ks) in [
         (32, 64, 3, 5, 1),
@@ -139,7 +142,7 @@ fn convolution_and_group_norm_match_cpu() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires gfx11 GPU; isolated large group-normalization timing"]
+#[ignore = "requires a supported HIP/CUDA GPU; isolated large group-normalization timing"]
 fn large_group_norm() -> Result<()> {
     let entry = r#"(def program test-group : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
  ([x w b cols.] {[.x] [.w] [.b] (const.u64.0x0000000000000020) [.cols] [.cols] (const.u64.0x0000000000000002) (const.u64.0x0000000000000002) (const.u32.0x358637BD u32.bitcast-f32)} flux.vae-norm-f32))"#;
@@ -149,10 +152,10 @@ fn large_group_norm() -> Result<()> {
     let s = catena_models::flux::graph::bundle(
         &[include_str!("../src/catena/flux_vae_wmma.hex"), entry, &old].join("\n"),
     );
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let m = rt.load(compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     let w = rt.mem_f32(&[1.; 32])?;
     let b = rt.mem_f32(&[0.; 32])?;

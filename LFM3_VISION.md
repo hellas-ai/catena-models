@@ -14,6 +14,32 @@ compatible projector repository. PNG and JPEG input and RGB conversion reuse the
 existing image path. Image input is available through the CLI and the library's
 `VisionModel` / `PreparedMultimodalPrompt` / session APIs.
 
+## CUDA
+
+Set `CATENA_GPU_DIALECT=cuda` to use CUDA for both the vision encoder/projector
+and the language model (sm_80+). The language path shares the portable LFM3 text
+kernels, including accelerated image-prompt prefill. The vision encoder keeps
+its existing F32 kernels, which already support both dialects; preprocessing and
+image token insertion are unchanged. HIP remains the default. CUDA execution
+and performance remain unverified on hardware.
+
+The complete vision and image-input language graphs can be compiled without a
+GPU using the cached checkpoint paths:
+
+```sh
+LFM3_VL_PROJECTOR=/path/to/mmproj-LFM3-VL-2B-BF16.gguf CATENA_GPU_DIALECT=cuda \
+  cargo test -r --lib vision::kernels::tests::lfm3_graph_compiles -- --ignored
+LFM3_VL_GGUF=/path/to/LFM3-VL-2B-BF16.gguf CATENA_GPU_DIALECT=cuda \
+  cargo test -r --lib lfm3::tests::multimodal_graph_compiles -- --ignored
+```
+
+Set `CATENA_QWEN3_CPP` to a `.cu` path to export either compiled CUDA module for
+offline nvcc checks. Both complete CUDA graphs passed nvcc 12.4 PTX, cubin, and
+shared-library compilation; the language graph contains native MMA/HMMA. The
+existing VL GPU tests also honor `CATENA_GPU_DIALECT`. The port passes the HIP
+red-image prefill/decode/resume check ("The image is red.") and retains the
+reference embedding errors reported below.
+
 ## Model path
 
 The language model reuses LFM3 text weights, tokenizer, convolution history, full

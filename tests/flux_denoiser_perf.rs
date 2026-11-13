@@ -8,7 +8,7 @@ use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
 use std::{path::PathBuf, time::Instant};
 #[test]
-#[ignore = "requires gfx11 HIP GPU, cached Klein weights, saved conditioning and a fresh baseline; only 256x256"]
+#[ignore = "requires a supported HIP/CUDA GPU, cached Klein weights, saved conditioning and a fresh baseline; only 256x256"]
 fn saved_denoiser_256() -> Result<()> {
     let dir = std::env::var_os("FLUX_DENOISER_BASELINE_DIR")
         .map(PathBuf::from)

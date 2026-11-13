@@ -101,12 +101,15 @@ cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --prompt 'The capital of Fr
 cargo run -r -- --model LiquidAI/LFM3-1.7B-GGUF:BF16 --serve --ctx-size 4096 --port 8000
 ```
 
-HIP WMMA accelerates batched projections and attention. Single-token decode
+HIP WMMA and CUDA `mma.sync` accelerate batched projections and attention.
+Set `CATENA_GPU_DIALECT=cuda` for NVIDIA sm_80+ GPUs, including the VL model.
+Single-token decode
 uses portable F32 reductions, without packed BF16 dot instructions. Use
 `--no-wmma-prefill` for the SIMT comparison path. The model reads layer types,
 sliding windows, RoPE factors, tokenizer, and chat template from GGUF. Sessions
 retain convolution history and attention caches across appended prompts and
-checkpoint/resume. Audio, omni, and CUDA optimization are deferred.
+checkpoint/resume. Audio and omni models are deferred. CUDA compilation is
+checked offline; CUDA execution and performance remain unverified on hardware.
 
 The CLI takes a raw text prefix; server requests use the embedded chat template,
 including its BOS token and optional thinking. The server's existing greedy
@@ -199,15 +202,18 @@ cargo run -r --bin flux2-klein -- \
   --prompt 'A red fox sitting in a snowy forest' --output fox.png
 ```
 
-Flux already uses WMMA by default without an extra flag. The text encoder and
-transformer use BF16 WMMA projections and fused attention on gfx11 HIP GPUs. The VAE uses WMMA convolutions, projections, and tiled
-512-channel attention, with F32 accumulation, normalization, residuals, and RGB
-output. Flux generation requires this HIP backend.
+Flux uses native BF16 matrix cores on gfx11 HIP and sm_80+ CUDA GPUs. Set
+`CATENA_GPU_DIALECT=cuda` for CUDA; HIP remains the default. The text encoder and
+transformer use tiled projections and fused attention. The VAE uses tiled
+convolutions, projections, and 512-channel attention, with F32 accumulation,
+normalization, residuals, and RGB output. CUDA kernels compile offline with
+nvcc; CUDA execution and performance have not yet been verified on hardware.
 See [WMMA implementation and measurements](FLUX_WMMA.md).
 `--width`, `--height`, `--steps`, `--seed`, and `--noise` control generation.
 `--dump-dir` exports intermediate tensors and `--startup-timings` reports startup
 costs. `--generate-entrypoint DIR` exports the three complete Hex stage assets.
-Exported assets require Catena's matching core library. Regenerate WMMA kernels
+Compile exported assets through this repository's compiler adapter, which supplies
+Catena's core library and the selected HIP/CUDA tile helpers. Regenerate WMMA kernels
 with `python3 tools/generate-flux-wmma-linear.py` and
 `python3 tools/generate-flux-wmma-attention.py`; VAE kernels use
 `python3 tools/generate-flux-vae-wmma.py` and

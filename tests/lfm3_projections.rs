@@ -1,14 +1,17 @@
 //! Focused numerical and shape benchmarks for LFM3's dense projection kernels.
 use anyhow::Result;
-use catena_lang::runtime::{GpuDialect, Runtime, Value};
+use catena_lang::runtime::{Runtime, RuntimeModule, Value};
 use catena_models::{
     catena::{compile_sources, core_sources},
     weights::{bf16_to_f32, f32_to_bf16},
 };
 
-#[test]
-#[ignore = "requires Strix Halo GPU"]
-fn projections() -> Result<()> {
+#[path = "support/qwen_tiles.rs"]
+mod tiles;
+
+type Variant = (&'static str, &'static str, bool);
+
+fn projection_module() -> Result<(RuntimeModule, Vec<Variant>)> {
     let mut entries = String::new();
     let variants = [
         ("base", "stdlib.qwen35.batch.wmma-project", false),
@@ -79,9 +82,31 @@ fn projections() -> Result<()> {
     for source in core_sources() {
         sources.push(source);
     }
-    let module = compile_sources(sources, GpuDialect::Hip)?;
+    let module = compile_sources(sources, tiles::dialect())?;
     assert!(!module.source.contains("catena_bf16_dot"));
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    Ok((module, variants))
+}
+
+#[test]
+fn projections_compile() -> Result<()> {
+    let (module, variants) = projection_module()?;
+    if variants
+        .iter()
+        .any(|(name, op, _)| name.contains("wmma") || op.contains("wmma"))
+    {
+        tiles::check_native(&module, tiles::dialect());
+        if tiles::dialect() == catena_lang::runtime::GpuDialect::Cuda {
+            tiles::check_toolkit(module, "lfm3_projections")?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires a supported HIP/CUDA GPU"]
+fn projections() -> Result<()> {
+    let (module, variants) = projection_module()?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let artifact = rt.load(module)?;
     for (rows, n, k) in [(1, 64, 256), (17, 67, 256), (65, 128, 2048)] {
         let x = (0..rows * k)

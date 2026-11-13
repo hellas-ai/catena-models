@@ -61,7 +61,6 @@ impl TextEncoder {
         Self::load_with_debug(snapshot, valid, false)
     }
     pub fn load_with_debug(snapshot: &Path, _valid: usize, debug: bool) -> Result<Self> {
-        super::validate_backend()?;
         let tc: TextConfig = read(snapshot.join("text_encoder/config.json"))?;
         let config = tc.qwen()?;
         let mut weights =

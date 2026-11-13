@@ -1,10 +1,14 @@
 //! Isolated WMMA timings; larger tensor shapes do not render images.
 use anyhow::Result;
-use catena_lang::runtime::{GpuDialect, Runtime, Value};
+#[path = "support/qwen_tiles.rs"]
+#[allow(dead_code)]
+mod tiles;
+
+use catena_lang::runtime::{Runtime, Value};
 use catena_models::catena::{compile_sources, core_sources};
 use std::time::Instant;
 #[test]
-#[ignore = "requires gfx11 HIP GPU; isolated projection timings"]
+#[ignore = "requires a supported HIP/CUDA GPU; isolated projection timings"]
 fn projection_shapes() -> Result<()> {
     let kernels = if let Ok(path) = std::env::var("FLUX_LINEAR_SOURCE") {
         std::fs::read_to_string(path)?
@@ -12,10 +16,10 @@ fn projection_shapes() -> Result<()> {
         include_str!("../src/catena/flux_wmma_linear.hex").into()
     };
     let s=catena_models::flux::graph::bundle(&[kernels.as_str(),r#"(def program bench-linear : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) = ([x w m k n.] {[.x] [.w] [.m] [.k] [.n]} flux.wmma-linear-bf16))"#].join("\n"));
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let m = rt.load(compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     for (rows, ci, co) in [
         (256, 3072, 3072),
@@ -50,7 +54,7 @@ fn projection_shapes() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires gfx11 HIP GPU; isolated attention timings"]
+#[ignore = "requires a supported HIP/CUDA GPU; isolated attention timings"]
 fn attention_shapes() -> Result<()> {
     let kernels = if let Ok(path) = std::env::var("FLUX_ATTENTION_SOURCE") {
         std::fs::read_to_string(path)?
@@ -58,10 +62,10 @@ fn attention_shapes() -> Result<()> {
         include_str!("../src/catena/flux_wmma_attention.hex").into()
     };
     let s=catena_models::flux::graph::bundle(&[kernels.as_str(),r#"(def program bench-attention : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) = ([q k v rows.] {[.q] [.k] [.v] [.rows] [.rows] (const.u64.0x0000000000000018) (const.u64.0x0000000000000018) (const.u64.0x0000000000000080) (const.u32.0x3DB504F3 u32.bitcast-f32) (const.u64.0x0000000000000000) [.rows]} flux.wmma-fused-attention-bf16))"#].join("\n"));
-    let mut rt = Runtime::new(GpuDialect::Hip)?;
+    let mut rt = Runtime::new(tiles::dialect())?;
     let m = rt.load(compile_sources(
         core_sources().map(|s| -> &str { s }).chain([s.as_str()]),
-        GpuDialect::Hip,
+        tiles::dialect(),
     )?)?;
     for rows in [768, 1536, 4608] {
         let x = rt.mem_u16(&vec![0x3e80; rows * 3072])?;

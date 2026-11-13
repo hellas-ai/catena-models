@@ -1,6 +1,6 @@
 use catena_models::{
     catena::InferenceOptions,
-    model::Model,
+    model::{Model, configured_gpu_dialect},
     tokenizer::QwenTokenizer,
     vision::{VisionConfig, VisionKind, VisionModel, image::ImagePatches},
 };
@@ -40,11 +40,11 @@ fn projector_metadata_and_template() -> anyhow::Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires HIP GPU and cached LFM3-VL BF16 projector"]
+#[ignore = "requires a supported HIP/CUDA GPU and cached LFM3-VL BF16 projector"]
 fn image_embeddings_match_reference() -> anyhow::Result<()> {
     let vision = VisionModel::load_gguf(
         cached("mmproj-LFM3-VL-2B-BF16.gguf")?,
-        catena_lang::runtime::GpuDialect::Hip,
+        configured_gpu_dialect()?,
         None,
     )?;
     for (w, h) in [(256, 256), (320, 256), (257, 193)] {
@@ -97,11 +97,11 @@ fn image_embeddings_match_reference() -> anyhow::Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires HIP GPU and cached LFM3-VL BF16 model/projector"]
+#[ignore = "requires a supported HIP/CUDA GPU and cached LFM3-VL BF16 model/projector"]
 fn image_prefill_decode_and_resume() -> anyhow::Result<()> {
     let vision = VisionModel::load_gguf(
         cached("mmproj-LFM3-VL-2B-BF16.gguf")?,
-        catena_lang::runtime::GpuDialect::Hip,
+        configured_gpu_dialect()?,
         None,
     )?;
     let path = cached("LFM3-VL-2B-BF16.gguf")?;

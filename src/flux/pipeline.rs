@@ -61,7 +61,6 @@ impl FluxPipeline {
     }
     pub fn generate(&self, o: &GenerationOptions) -> Result<()> {
         o.validate()?;
-        super::validate_backend()?;
         let total = Instant::now();
         let dump = o.dump_dir.as_deref();
         let tokens = tokenize(&self.snapshot, &o.prompt)?;

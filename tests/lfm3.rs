@@ -2,9 +2,13 @@
 use catena_models::{
     catena::{self, InferenceOptions},
     checkpoint,
-    model::Model,
+    model::{Model, configured_gpu_dialect},
     tokenizer::QwenTokenizer,
 };
+
+#[path = "support/qwen_tiles.rs"]
+#[allow(dead_code)]
+mod tiles;
 
 fn checkpoint_path() -> anyhow::Result<std::path::PathBuf> {
     if let Some(path) = std::env::var_os("LFM3_GGUF") {
@@ -59,18 +63,22 @@ fn checkpoint_metadata_and_source() -> anyhow::Result<()> {
             InferenceOptions::default().with_wmma_prefill(accelerated),
         )?;
         assert!(!source.contains("bf16x2.dot-f32"));
-        let module = catena::compile_sources(
-            catena::runtime_sources(&source),
-            catena_lang::runtime::GpuDialect::Hip,
-        )?;
+        let module =
+            catena::compile_sources(catena::runtime_sources(&source), configured_gpu_dialect()?)?;
         assert!(!module.source.contains("catena_bf16_dot"));
         assert!(!module.source.contains("__builtin_amdgcn_fdot2"));
+        if accelerated {
+            tiles::check_native(&module, configured_gpu_dialect()?);
+            if configured_gpu_dialect()? == catena_lang::runtime::GpuDialect::Cuda {
+                tiles::check_toolkit(module, "lfm3_text")?;
+            }
+        }
     }
     Ok(())
 }
 
 #[test]
-#[ignore = "requires Strix Halo GPU and cached LFM3 BF16 checkpoint"]
+#[ignore = "requires a supported HIP/CUDA GPU and cached LFM3 BF16 checkpoint"]
 fn wmma_prefill_decode_and_resume() -> anyhow::Result<()> {
     let path = checkpoint_path()?;
     let tokenizer = QwenTokenizer::from_gguf(&path)?.unwrap();
