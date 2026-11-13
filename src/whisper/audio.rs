@@ -82,10 +82,6 @@ pub fn log_mel(samples: &[f32], num_mel_bins: usize) -> Result<Vec<f32>> {
         !samples.is_empty() && samples.len() <= SAMPLES && samples.iter().all(|x| x.is_finite()),
         "invalid audio samples"
     );
-    ensure!(
-        [80, 128].contains(&num_mel_bins),
-        "expected 80 or 128 mel bins"
-    );
     let mut padded = vec![0f32; SAMPLES];
     padded[..samples.len()].copy_from_slice(samples);
     let edges: Vec<_> = (0..num_mel_bins + 2)
@@ -209,6 +205,5 @@ mod tests {
             assert!(log_mel(&[f32::NAN], bins).is_err());
             assert!(log_mel(&vec![0.; SAMPLES + 1], bins).is_err());
         }
-        assert!(log_mel(&[0.; 160], 96).is_err());
     }
 }
