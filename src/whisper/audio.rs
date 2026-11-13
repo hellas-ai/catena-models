@@ -147,6 +147,58 @@ pub fn log_mel(samples: &[f32], num_mel_bins: usize) -> Result<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Independent reference: OpenAI Whisper's published mel_filters.npz
+    // (sha256 7450ae70723a5ef9d341e3cee628c7cb0177f36ce42c44b7ed2bf3325f0f6d4c).
+    // One impulse at sample 200 has constant FFT power set by the Hann window.
+    #[test]
+    fn impulse_matches_published_filter_banks() {
+        let mut samples = [0.; 400];
+        samples[200] = 1.;
+        for (bins, expected) in [
+            (
+                80,
+                [
+                    (0, -1.4140030f32),
+                    (1, -1.4140030f32),
+                    (20, -1.4140030f32),
+                    (79, -1.4140030f32),
+                    (80, 0.5770929f32),
+                    (81, 0.5770929f32),
+                    (100, 0.5770929f32),
+                    (159, 0.5773666f32),
+                    (160, 0.3681053f32),
+                    (180, 0.3681053f32),
+                    (239, 0.3683790f32),
+                ],
+            ),
+            (
+                128,
+                [
+                    (0, -1.3668072f32),
+                    (1, -1.3668072f32),
+                    (20, -1.3668072f32),
+                    (127, -1.3668072f32),
+                    (128, 0.5013337f32),
+                    (129, 0.5988982f32),
+                    (148, 0.5666295f32),
+                    (255, 0.5774132f32),
+                    (256, 0.2923461f32),
+                    (276, 0.3576418f32),
+                    (383, 0.3684256f32),
+                ],
+            ),
+        ] {
+            let features = log_mel(&samples, bins).unwrap();
+            for (index, value) in expected {
+                assert!(
+                    (features[index] - value).abs() < 1e-5,
+                    "bins={bins} index={index}: {} != {value}",
+                    features[index]
+                );
+            }
+        }
+    }
+
     #[test]
     fn silence_and_invalid_samples() {
         for bins in [80, 128] {

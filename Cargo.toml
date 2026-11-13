@@ -32,6 +32,7 @@ rand = "0.9"
 rand_chacha = "0.9"
 rand_distr = "0.5"
 hound = "3.5"
+half = "2.7"
 rustfft = "6.4"
 
 [dev-dependencies]

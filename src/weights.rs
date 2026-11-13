@@ -112,7 +112,7 @@ impl Weights {
             t.shape
         );
         ensure!(
-            matches!(t.dtype, Dtype::BF16 | Dtype::F32),
+            matches!(t.dtype, Dtype::BF16 | Dtype::F16 | Dtype::F32),
             "{name}: unsupported dtype {:?}",
             t.dtype
         );
@@ -128,6 +128,10 @@ impl Weights {
             Dtype::BF16 => Ok(bytes
                 .chunks_exact(2)
                 .map(|b| f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16))
+                .collect()),
+            Dtype::F16 => Ok(bytes
+                .chunks_exact(2)
+                .map(|b| half::f16::from_bits(u16::from_le_bytes([b[0], b[1]])).to_f32())
                 .collect()),
             Dtype::F32 => Ok(bytes
                 .chunks_exact(4)
@@ -152,12 +156,12 @@ impl Weights {
                 self.converted
                     .insert(name.clone(), runtime.mem_f32(&self.host_f32(name)?)?);
             } else {
-                if t.dtype == Dtype::F32 {
+                if matches!(t.dtype, Dtype::F16 | Dtype::F32) {
                     self.converted
                         .insert(name.clone(), runtime.mem_u16(&bf16(&self.host_f32(name)?))?);
                     continue;
                 }
-                ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16 or F32");
+                ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16, F16 or F32");
                 // CUDA weights live in device memory. HIP can map aligned BF16
                 // tensors directly; unaligned tensors need an owned upload.
                 if runtime.dialect() == GpuDialect::Cuda || t.offset % 2 != 0 {
