@@ -6,6 +6,7 @@ use std::{collections::BTreeMap, fmt::Write};
 pub(super) const OWN: &str = "((cap.own mem) val)";
 pub(super) const REF: &str = "((cap.ref mem) val)";
 const U64: &str = "(u64 val)";
+const U32: &str = "(u32 val)";
 const PREFIX: &str = "stdlib.omnivoice.";
 const FREE_BF16: &str = "stdlib.models.resources.free-bf16-before";
 const FREE: &str = "stdlib.models.resources.free-f32-before";
@@ -339,6 +340,7 @@ fn sampler(s: &mut String, weights: &str) {
         ("frames", U64),
         ("slots", U64),
         ("seed", U64),
+        ("num-step", U32),
     ];
     let mut inputs = captures.to_vec();
     let pair = fold_arg(state);
@@ -346,9 +348,10 @@ fn sampler(s: &mut String, weights: &str) {
     header(s, "stdlib.omnivoice.step", &inputs, &fold_output(state));
     unfold(s);
     s.push_str("  ([.state] *.elim [codes remaining.])\n  ([.i32] stdlib.models.memory.u32.to-u64 [step.])\n");
+    call(s, &["num-step"], "stdlib.models.memory.u32.to-u64", "steps");
     call(
         s,
-        &["step", "slots", "remaining"],
+        &["step", "steps", "slots", "remaining"],
         "stdlib.omnivoice.schedule",
         "take",
     );
@@ -422,7 +425,7 @@ fn sampler(s: &mut String, weights: &str) {
         s,
         "step",
         &captures.map(|(name, _)| name),
-        "(const.u32.0x00000020)",
+        "[.num-step]",
         "initial",
         "result",
     );
@@ -755,6 +758,7 @@ pub(super) fn build(
         ("prefix", U64),
         ("frames", U64),
         ("seed", U64),
+        ("num-step", U32),
         ("text-embedding", REF),
         ("audio-embedding", REF),
         ("audio-heads", REF),
@@ -764,6 +768,7 @@ pub(super) fn build(
         .map(|i| format!("layer-weight{i}"))
         .collect();
     ref_inputs(&mut inputs, &layer_names);
+    let logits_input_count = inputs.len();
     inputs.extend_from_slice(&codec_args[2..]);
 
     header(&mut source, "omnivoice.synthesize", &inputs, OWN);
@@ -780,6 +785,7 @@ pub(super) fn build(
             "prefix",
             "frames",
             "seed",
+            "num-step",
         ],
         "stdlib.omnivoice.generate",
         "codes",
@@ -801,8 +807,20 @@ pub(super) fn build(
     finish(&mut source, "ready");
 
     if diagnostics {
-        let mut forward_args = inputs[..8 + config.num_layers * 11].to_vec();
-        forward_args[3] = ("codes", OWN);
+        source.push_str(
+            "(def program omnivoice.schedule : {(u64 val) (u64 val) (u64 val) (u64 val)} -> (u64 val) =
+ ([step steps slots remaining.]
+  ({[.step] [.steps] [.slots] [.remaining]} stdlib.omnivoice.schedule)
+ ))\n",
+        );
+        let forward_args = inputs[..logits_input_count]
+            .iter()
+            .filter_map(|&(name, ty)| match name {
+                "seed" => Some(("codes", OWN)),
+                "num-step" => None,
+                _ => Some((name, ty)),
+            })
+            .collect::<Vec<_>>();
         header(&mut source, "omnivoice.logits", &forward_args, OWN);
         pack_layers(&mut source, &layer_names);
         add(&mut source, "prefix", "frames", "rows");

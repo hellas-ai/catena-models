@@ -1,5 +1,5 @@
 use anyhow::{Result, ensure};
-use catena_models::omnivoice::OmniVoice;
+use catena_models::omnivoice::{DEFAULT_NUM_STEP, OmniVoice, SynthesisOptions};
 use clap::Parser;
 use std::{path::PathBuf, time::Instant};
 
@@ -10,6 +10,9 @@ struct Args {
     /// English voice directions, such as "whisper" or an experimental emotion prompt
     #[arg(long, value_name = "DIRECTIONS")]
     instruct: Option<String>,
+    /// Number of refinement steps. Fewer steps reduce synthesis time
+    #[arg(long, default_value_t = DEFAULT_NUM_STEP, value_parser = clap::value_parser!(u32).range(1..))]
+    num_step: u32,
     #[arg(long, default_value = "speech.wav")]
     output: PathBuf,
     #[arg(long, default_value_t = 0)]
@@ -30,7 +33,14 @@ fn main() -> Result<()> {
         eprintln!("load and compile {:.3}s", start.elapsed().as_secs_f64());
     }
     let start = Instant::now();
-    let audio = model.synthesize_with_instruct(&args.text, args.seed, args.instruct.as_deref())?;
+    let audio = model.synthesize_with_options(
+        &args.text,
+        args.seed,
+        SynthesisOptions {
+            instruct: args.instruct.as_deref(),
+            num_step: args.num_step,
+        },
+    )?;
     if args.timings {
         eprintln!("synthesis {:.3}s", start.elapsed().as_secs_f64());
     }

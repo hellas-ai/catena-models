@@ -1093,11 +1093,21 @@
  ([.proof] unsafe.discard unit.elim)
  [.result]
  ))
-(def program stdlib.omnivoice.timestep : {(u64 val)} -> (u64 val) =
- ([step.]
+# Build the F32 linspace from both endpoints, then apply the 0.1 time shift.
+# Q32 preserves the shifted grid used for the integer unmasking counts.
+(def program stdlib.omnivoice.timestep : {(u64 val) (u64 val)} -> (u64 val) =
+ ([step steps.]
   ({[.step]} stdlib.models.memory.fold-count-u32 [v0.])
   ({[.v0]} stdlib.models.memory.u32.to-f32 [v1.])
-  ({[.v1] (const.u32.0x3D000000 u32.bitcast-f32)} stdlib.models.memory.f32.mul [v2.])
+  ({[.steps]} stdlib.models.memory.fold-count-u32 stdlib.models.memory.u32.to-f32 [steps-f32.])
+  ({(const.u32.0x3F800000 u32.bitcast-f32) [.steps-f32]} stdlib.models.memory.f32.div [interval.])
+  ({[.v1] [.interval]} stdlib.models.memory.f32.mul [from-start.])
+  ({[.steps] [.step]} stdlib.models.memory.u64.sub [steps-to-end.])
+  ({[.steps-to-end]} stdlib.models.memory.fold-count-u32 stdlib.models.memory.u32.to-f32 [steps-to-end-f32.])
+  ({[.steps-to-end-f32] [.interval]} stdlib.models.memory.f32.mul [distance-to-end.])
+  ({(const.u32.0x3F800000 u32.bitcast-f32) [.distance-to-end]} stdlib.models.memory.f32.sub [from-end.])
+  ({[.step] [.steps-to-end]} stdlib.models.memory.u64.less [first-half.])
+  ({[.first-half] [.from-start] [.from-end]} stdlib.models.memory.select-f32 [v2.])
   ({(const.u32.0x3DCCCCCD u32.bitcast-f32) [.v2]} stdlib.models.memory.f32.mul [v3.])
   ({(const.u32.0xBF666666 u32.bitcast-f32) [.v2]} stdlib.models.memory.f32.mul [v4.])
   ({(const.u32.0x3F800000 u32.bitcast-f32) [.v4]} stdlib.models.memory.f32.add [v5.])
@@ -1107,18 +1117,18 @@
   ({[.v8]} stdlib.models.memory.u32.to-u64 [v9.])
   [.v9]
  ))
-(def program stdlib.omnivoice.schedule : {(u64 val) (u64 val) (u64 val)} -> (u64 val) =
- ([step slots remaining.]
-  ({[.step]} stdlib.omnivoice.timestep [v0.])
+(def program stdlib.omnivoice.schedule : {(u64 val) (u64 val) (u64 val) (u64 val)} -> (u64 val) =
+ ([step steps slots remaining.]
+  ({[.step] [.steps]} stdlib.omnivoice.timestep [v0.])
   ({[.step] (const.u64.0x0000000000000001)} stdlib.models.memory.u64.add [v1.])
-  ({[.v1]} stdlib.omnivoice.timestep [v2.])
+  ({[.v1] [.steps]} stdlib.omnivoice.timestep [v2.])
   ({[.v2] [.v0]} stdlib.models.memory.u64.sub [v3.])
   ({[.slots] [.v3]} stdlib.models.memory.u64.mul [v4.])
   ({[.v4] (const.u64.0x00000000FFFFFFFF)} stdlib.models.memory.u64.add [v5.])
   ({[.v5] (const.u64.0x0000000100000000)} stdlib.models.memory.u64.div [v6.])
   ({[.v6] [.remaining]} stdlib.models.memory.u64.less [v7.])
   ({[.v7] [.v6] [.remaining]} stdlib.models.memory.select-u64 [v8.])
-  ({[.step] (const.u64.0x000000000000001F)} stdlib.models.memory.u64.equal [v9.])
+  ({[.v1] [.steps]} stdlib.models.memory.u64.equal [v9.])
   ({[.v9] [.remaining] [.v8]} stdlib.models.memory.select-u64 [v10.])
   [.v10]
  ))
