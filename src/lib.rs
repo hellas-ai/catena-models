@@ -7,6 +7,7 @@ pub mod model;
 pub mod omnivoice;
 pub mod phonon;
 mod qwen;
+pub mod qwen3_tts;
 mod session_graph;
 pub mod spec;
 pub mod systemone;

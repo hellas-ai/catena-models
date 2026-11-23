@@ -285,6 +285,25 @@ Use `--instruct "whisper"` for a documented English voice attribute, or try
 `--instruct "excited and happy"` for experimental emotion prompting. The
 effect of free-form directions varies with the prompt.
 
+## Qwen3-TTS CustomVoice
+
+```bash
+cargo run -r --bin qwen3-tts -- --language English --speaker Vivian \
+  --instruct 'Speak softly and warmly.' --output speech.wav 'Hello from Catena.'
+```
+
+The default checkpoint is `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`. Select
+`--model Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` for the larger model.
+Both checkpoints accept `--instruct`, and `--language auto` lets the model
+infer the language. Speaker and language names are case-insensitive.
+
+Qwen3-TTS uses batched WMMA prefill and decodes the valid audio frames to 24 kHz
+mono PCM. With Catena's host readback primitive, one HEX invocation checks for
+end of speech between four-frame groups and decodes the result. Builds against
+earlier Catena revisions make the same checks from Rust between HEX calls.
+Use `--max-frames` to set the generation limit. The default is 512 frames, about
+41 seconds of audio. Use `--seed` to repeat a sample.
+
 ## MMS English TTS
 
 ```bash

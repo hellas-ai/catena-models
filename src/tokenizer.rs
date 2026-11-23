@@ -42,6 +42,55 @@ pub struct QwenTokenizer {
 }
 
 impl QwenTokenizer {
+    pub(crate) fn from_qwen2_files(directory: &Path) -> Result<Self> {
+        #[derive(serde::Deserialize)]
+        struct Added {
+            content: String,
+            single_word: bool,
+            lstrip: bool,
+            rstrip: bool,
+            normalized: bool,
+            special: bool,
+        }
+        #[derive(serde::Deserialize)]
+        struct Config {
+            added_tokens_decoder: std::collections::BTreeMap<u32, Added>,
+        }
+        let config: Config = crate::hfhub::read_json(directory.join("tokenizer_config.json"))?;
+        let vocab = directory.join("vocab.json");
+        let merges = directory.join("merges.txt");
+        let bpe = BPE::from_file(
+            vocab.to_str().context("non-UTF-8 vocabulary path")?,
+            merges.to_str().context("non-UTF-8 merges path")?,
+        )
+        .build()
+        .map_err(|err| anyhow::anyhow!("loading Qwen BPE: {err}"))?;
+        let mut inner = byte_level_tokenizer(bpe, QWEN2_SPLIT_PATTERN, true)?;
+        for (id, entry) in config.added_tokens_decoder {
+            let token = AddedToken::from(entry.content.clone(), entry.special)
+                .single_word(entry.single_word)
+                .lstrip(entry.lstrip)
+                .rstrip(entry.rstrip)
+                .normalized(entry.normalized);
+            if entry.special {
+                inner.add_special_tokens(&[token]);
+            } else {
+                inner.add_tokens(&[token]);
+            }
+            ensure!(
+                inner.token_to_id(&entry.content) == Some(id),
+                "unexpected Qwen token ID for {:?}",
+                entry.content
+            );
+        }
+        Ok(Self {
+            inner,
+            chat_template: None,
+            bos_token: None,
+            eos_token: None,
+        })
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let inner = Tokenizer::from_file(path)
@@ -118,22 +167,7 @@ impl QwenTokenizer {
             .context("failed to build GGUF BPE model")?;
 
         let byte_level = ByteLevel::new(false, false, false);
-        let split = Split::new(
-            SplitPattern::Regex(split_pattern.to_owned()),
-            SplitDelimiterBehavior::Isolated,
-            false,
-        )
-        .map_err(|error| anyhow::anyhow!(error.to_string()))
-        .context("failed to build GGUF pre-tokenizer regex")?;
-        let mut inner = Tokenizer::new(bpe);
-        if !is_lfm {
-            inner.with_normalizer(Some(NFC));
-        }
-        inner.with_pre_tokenizer(Some(PreSequence::new(vec![
-            PreTokenizerWrapper::from(split),
-            PreTokenizerWrapper::from(byte_level),
-        ])));
-        inner.with_decoder(Some(byte_level));
+        let mut inner = byte_level_tokenizer(bpe, split_pattern, !is_lfm)?;
 
         let template = special_token_template(&metadata)?;
         if let Some(template) = template {
@@ -352,4 +386,26 @@ mod tests {
         assert_eq!(split(QWEN35_SPLIT_PATTERN)?, ["a\u{035c}b"]);
         Ok(())
     }
+}
+
+fn byte_level_tokenizer(bpe: BPE, pattern: &str, nfc: bool) -> Result<Tokenizer> {
+    let byte_level = ByteLevel::new(false, false, false);
+    let split = Split::new(
+        SplitPattern::Regex(pattern.to_owned()),
+        SplitDelimiterBehavior::Isolated,
+        false,
+    )
+    .map_err(|error| anyhow::anyhow!(error.to_string()))
+    .context("building Qwen pre-tokenizer regex")?;
+    let mut inner = Tokenizer::new(bpe);
+    if nfc {
+        inner.with_normalizer(Some(NFC));
+    }
+    inner.with_pre_tokenizer(Some(PreSequence::new(vec![
+        PreTokenizerWrapper::from(split),
+        PreTokenizerWrapper::from(byte_level),
+    ])));
+    inner.with_decoder(Some(byte_level));
+    inner.with_post_processor(Some(byte_level));
+    Ok(inner)
 }

@@ -1,0 +1,103 @@
+# One workgroup computes the exact top-k threshold. The partial counts are
+# integers representable exactly in F32 through the shared-memory reduction.
+
+(def program stdlib.qwen-tts.rank-lane : {((cap.own mem) val) (u32 val) (u64 val) ({({master.index32 u32} :) ({(f32 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
+ ([scores pivot lane pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [count proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget stdlib.models.memory.u32.to-u64 [i.])
+  ({[.i] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.mul [base.])
+  ({[.base] [.lane]} stdlib.models.memory.u64.add [offset.])
+  ({[.offset] (const.u64.0x0000000000000801)} stdlib.models.memory.u64.less [valid.])
+  ({[.valid] [.offset] (const.u64.0x0000000000000800)} stdlib.models.memory.select-u64 [safe.])
+  ({[.scores] [.safe]} stdlib.models.memory.own-read-f32 stdlib.qwen-tts.score-key [key.])
+  ({[.pivot] [.key]} stdlib.models.memory.u32.less_equal [meets.])
+  ({[.valid] [.meets]} stdlib.boolean.and [kept.])
+  ({[.kept] (const.u32.0x3F800000 u32.bitcast-f32) (const.u32.0x00000000 u32.bitcast-f32)} stdlib.models.memory.select-f32 [inc.])
+  ({[.count] [.inc]} stdlib.models.memory.f32.add [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen-tts.rank-bit : {((cap.own mem) val) (f32 val) (u64 val) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons) perf.memory perf.block ({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.type.Shared) val) ({({master.index32 u32} :) ({(u32 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(u32 val) (prop.Truth |-)} *) =
+ ([scores top-k lane shared pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [prefix proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [i.])
+  ({(const.u32.0x80000000) [.i]} stdlib.math.shift_right [bit.])
+  ({[.prefix] [.bit]} stdlib.models.memory.u32.add [pivot.])
+  ({[.scores] [.pivot] [.lane]} partial.stdlib.qwen-tts.rank-lane.3 [scan.])
+  ({(const.u32.0x00000009) (unit.intro meta.master.end32)} smolcat.value.named_at [scan-end.])
+  ({[.scan-end] (const.u32.0x00000000 u32.bitcast-f32) [.scan] core.truth} core.fold.bounded [count scan-proof.])
+  ([.scan-proof] unsafe.discard unit.elim)
+  ({[.shared] [.lane] [.count]} stdlib.models.coop.write [written.])
+  ([.written] stdlib.models.coop.sync [synced.])
+  ({[.shared] [.synced]} meta.perf.after-shared [ready.])
+  ({[.ready] [.lane] (const.u64.0x0000000000000000) (const.u64.0x0000000000000100)} stdlib.models.coop.reduce-add [total.])
+  # All lanes must finish reading slot zero before the next bit reuses it.
+  ([.total] meta.perf.complete-f [rank phase.])
+  ([.phase] stdlib.models.coop.sync [done.])
+  ({[.rank] [.done]} meta.perf.after-f [rank-ready.])
+  ({[.top-k] [.rank-ready]} stdlib.models.memory.f32.less_equal [keep-bit.])
+  ({[.keep-bit] [.pivot] [.prefix]} stdlib.models.memory.select-u32 [next.])
+  ({[.next] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen-tts.rank-write : {(u64 val) ({({master.index32 u32} :) ({((cap.own mem) val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([threshold pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [out proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ({[.out] (const.u64.0x0000000000000000) [.threshold]} stdlib.models.memory.write-u64 unit.elim)
+  ({[.out] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen-tts.rank-kernel : {((cap.own mem) val) ((cap.own mem) val) (f32 val) ((cap.own mem) val) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({perf.block ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid} stdlib.gpu.geometry.type.Block)} :) (({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid perf.block} stdlib.gpu.geometry.type.Thread) val)} *)} -> 1 =
+ ([scores progress top-k out memory thread.]
+  ([.thread] stdlib.models.coop.indices *.elim [block lane.])
+  ({[.memory] (const.u64.0x0000000000000100) [.thread]} stdlib.models.coop.slot [shared.])
+  ({[.progress] (const.u64.0x0000000000000001)} stdlib.models.memory.own-read-u64 [stopped.])
+  ({[.stopped] (const.u64.0x0000000000000000)} stdlib.models.memory.u64.equal [active.])
+  ({[.active] (const.u32.0x00000020) (const.u32.0x00000000)} stdlib.models.memory.select-u32 [bits.])
+  ({[.scores] [.top-k] [.lane] [.shared]} partial.stdlib.qwen-tts.rank-bit.4 [refine.])
+  ({[.bits] (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] (const.u32.0x00000000) [.refine] core.truth} core.fold.bounded [key proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ({[.active] [.key] (const.u32.0xFFFFFFFF)} stdlib.models.memory.select-u32 stdlib.models.memory.u32.to-u64 [cutoff.])
+  ({[.lane] (const.u64.0x0000000000000000)} stdlib.models.memory.u64.equal [writer.])
+  ({[.writer] (const.u32.0x00000001) (const.u32.0x00000000)} stdlib.models.memory.select-u32 [writes.])
+  ({[.cutoff]} partial.stdlib.qwen-tts.rank-write.1 [write.])
+  ({[.writes] (unit.intro meta.master.end32)} smolcat.value.named_at [write-end.])
+  ({[.write-end] [.out] [.write] core.truth} core.fold.bounded [written write-proof.])
+  ([.write-proof] unsafe.discard unit.elim)
+  (unit.intro)
+ ))
+
+(def program stdlib.qwen-tts.rank-host : {((cap.own mem) val) ((cap.own mem) val) (f32 val) ({perf.grid ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2)} stdlib.gpu.geometry.type.Grid)} :) ({perf.memory ({({perf.blocks perf.one} stdlib.gpu.geometry.sort.D2) ({perf.threads perf.one} stdlib.gpu.geometry.sort.D2) perf.grid ({({({perf.float-slot} stdlib.gpu.memory.type.SlotName) perf.float-count f32} stdlib.gpu.memory.sort.Slot) ({({({perf.pair-slot} stdlib.gpu.memory.type.SlotName) perf.pair-count bf16x2} stdlib.gpu.memory.sort.Slot) list.Nil} list.Cons)} list.Cons)} stdlib.gpu.memory.type.SharedMemory)} :) ({({master.index32 u32} :) ({((cap.own mem) val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({((cap.own mem) val) (prop.Truth |-)} *) =
+ ([scores progress top-k grid memory pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [out proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ({[.scores] [.progress] [.top-k] [.out] [.memory]} partial.stdlib.qwen-tts.rank-kernel.5 [kernel.])
+  ({[.grid] ([.memory] :.forget) [.kernel]} unsafe.launch_shared unit.elim)
+  ({[.out] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen-tts.sample-threshold : {((cap.own mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
+ ([scores progress top-k.]
+  ([.top-k] stdlib.models.memory.fold-count-u32 stdlib.models.memory.u32.to-f32 [top-k-f.])
+  ({(const.u64.0x0000000000000001) (const.u64.0x0000000000000100)} stdlib.models.coop.grid [grid.])
+  ({(const.u64.0x0000000000000100) (const.u64.0x0000000000000001)} stdlib.models.coop.layout [layout.])
+  ({[.grid] [.layout]} stdlib.models.coop.reserve [memory.])
+  ({(const.u64.0x0000000000000001)} stdlib.models.memory.alloc-u64 [out.])
+  ({[.scores] [.progress] [.top-k-f] [.grid] [.memory]} partial.stdlib.qwen-tts.rank-host.5 [run.])
+  ({(const.u32.0x00000001) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] [.out] [.run] core.truth} core.fold.bounded [threshold proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.threshold]
+ ))
