@@ -16,6 +16,7 @@ use std::path::Path;
 use tokenizers::Tokenizer;
 
 pub const DEFAULT_MODEL: &str = "k2-fsa/OmniVoice";
+pub const DEFAULT_NUM_STEP: u32 = 32;
 const SAMPLE_RATE: u32 = 24_000;
 const FRAME_SAMPLES: usize = 960;
 const MAX_FRAMES: usize = 30 * SAMPLE_RATE as usize / FRAME_SAMPLES;
@@ -26,6 +27,22 @@ const FILES: &[&str] = &[
     "audio_tokenizer/config.json",
     "audio_tokenizer/model.safetensors",
 ];
+
+/// Conditioning and refinement settings for one utterance.
+pub struct SynthesisOptions<'a> {
+    pub instruct: Option<&'a str>,
+    /// Number of masked refinement steps. Must be positive.
+    pub num_step: u32,
+}
+
+impl Default for SynthesisOptions<'_> {
+    fn default() -> Self {
+        Self {
+            instruct: None,
+            num_step: DEFAULT_NUM_STEP,
+        }
+    }
+}
 
 pub struct OmniVoice {
     runtime: Runtime,
@@ -123,7 +140,25 @@ impl OmniVoice {
         seed: u64,
         instruct: Option<&str>,
     ) -> Result<Audio> {
-        let tokens = prompt::tokens(&self.tokenizer, text, instruct)?;
+        self.synthesize_with_options(
+            text,
+            seed,
+            SynthesisOptions {
+                instruct,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Generate an utterance using the requested refinement step count.
+    pub fn synthesize_with_options(
+        &self,
+        text: &str,
+        seed: u64,
+        options: SynthesisOptions<'_>,
+    ) -> Result<Audio> {
+        ensure!(options.num_step > 0, "OmniVoice num_step must be positive");
+        let tokens = prompt::tokens(&self.tokenizer, text, options.instruct)?;
         let frames = prompt::duration_frames(text);
         ensure!(
             frames <= MAX_FRAMES,
@@ -142,6 +177,7 @@ impl OmniVoice {
             (tokens.len() as u64).into(),
             (frames as u64).into(),
             seed.into(),
+            options.num_step.into(),
         ];
         for name in &self.model_names {
             args.push(self.model.gpu_ref(name)?.into());
@@ -373,6 +409,31 @@ mod tests {
     fn gpu_reference() -> Result<()> {
         let directory = hfhub::resolve_model_files(DEFAULT_MODEL, FILES)?;
         let model = OmniVoice::load_snapshot(&directory, true)?;
+        // Expected unmasking counts from the Python reference schedule.
+        for (slots, expected) in [
+            (536u64, &[536u64][..]),
+            (536, &[9, 12, 17, 26, 45, 94, 333]),
+            (6000, &[286, 715, 4999]),
+        ] {
+            let mut remaining = slots;
+            for (step, &expected_take) in expected.iter().enumerate() {
+                let [Value::U64(take)] = model.artifact.exec(
+                    "omnivoice.schedule",
+                    [
+                        (step as u64).into(),
+                        (expected.len() as u64).into(),
+                        slots.into(),
+                        remaining.into(),
+                    ],
+                )?
+                else {
+                    anyhow::bail!("invalid OmniVoice schedule output");
+                };
+                assert_eq!(take, expected_take);
+                remaining -= take;
+            }
+            assert_eq!(remaining, 0);
+        }
         let text = "This is a sentence without any voice prompt.";
         let ids = prompt::tokens(&model.tokenizer, text, None)?;
         assert_eq!(

@@ -279,6 +279,7 @@ Pass one text utterance of up to 30 seconds of estimated speech. HEX refines
 the masked audio codes and decodes them to mono 24 kHz audio in one invocation.
 Use `--timings` to report load and synthesis times.
 Set `CATENA_GPU_DIALECT=cuda` to run on NVIDIA GPUs with compute capability 8.0 or later.
+Use `--num-step 16` to trade refinement quality for speed. The default is 32 steps.
 
 Use `--instruct "whisper"` for a documented English voice attribute, or try
 `--instruct "excited and happy"` for experimental emotion prompting. The
