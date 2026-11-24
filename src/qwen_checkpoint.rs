@@ -3,13 +3,14 @@ use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result, ensure};
 use catena_lang::runtime::{MemRef, Runtime};
+use safetensors::Dtype;
 use serde::Deserialize;
 use serde_json::Value;
 
 use crate::{
     hfhub::read_json,
     spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype},
-    weights::{Weights, startup_timing},
+    weights::{Weights, f32_to_bf16, startup_timing},
 };
 
 #[derive(Deserialize)]
@@ -71,10 +72,7 @@ fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
     };
     let qwen35 = architecture == ModelArchitecture::Qwen35Dense;
     let tied = root["tie_word_embeddings"].as_bool();
-    ensure!(
-        root["quantization_config"].is_null(),
-        "quantized Qwen safetensors are unsupported"
-    );
+    fp8_block_size(&root["quantization_config"], architecture)?;
     let text = if qwen35 && !root["text_config"].is_null() {
         let text = root["text_config"].take();
         ensure!(
@@ -86,10 +84,9 @@ fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
         root
     };
     let hf: TextConfig = serde_json::from_value(text)?;
-    ensure!(
-        hf.quantization_config.is_none(),
-        "quantized Qwen safetensors are unsupported"
-    );
+    if qwen35 && let Some(quantization) = &hf.quantization_config {
+        fp8_block_size(quantization, architecture)?;
+    }
     ensure!(
         !hf.attention_bias && !hf.use_sliding_window,
         "Qwen safetensors require bias-free full attention"
@@ -210,6 +207,28 @@ fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
     Ok(config)
 }
 
+fn fp8_block_size(
+    quantization: &Value,
+    architecture: ModelArchitecture,
+) -> Result<Option<[usize; 2]>> {
+    if quantization.is_null() {
+        return Ok(None);
+    }
+    ensure!(
+        architecture == ModelArchitecture::Qwen3Dense
+            && quantization["quant_method"] == "fp8"
+            && quantization["activation_scheme"] == "dynamic",
+        "quantized Qwen safetensors require dense Qwen3 with dynamic FP8"
+    );
+    let block: [usize; 2] = Deserialize::deserialize(&quantization["weight_block_size"])
+        .context("FP8 weight_block_size must contain two positive integers")?;
+    ensure!(
+        block.iter().all(|&size| size > 0),
+        "FP8 weight_block_size must contain two positive integers"
+    );
+    Ok(Some(block))
+}
+
 pub(crate) struct QwenWeights {
     weights: Weights,
     bindings: Vec<Binding>,
@@ -219,6 +238,67 @@ struct Binding {
     name: String,
     dtype: WeightDtype,
     transform: Transform,
+    fp8: Option<Fp8Weight>,
+}
+
+struct Fp8Weight {
+    scale: String,
+    block: [usize; 2],
+}
+
+impl Fp8Weight {
+    fn new(weights: &Weights, name: &str, shape: &[usize], block: [usize; 2]) -> Result<Self> {
+        let [rows, cols] = *shape else {
+            anyhow::bail!("{name}: expected a matrix for FP8 weights, got {shape:?}");
+        };
+        let scale = format!("{name}_scale_inv");
+        weights
+            .validate(&scale, &[rows.div_ceil(block[0]), cols.div_ceil(block[1])])
+            .with_context(|| format!("{name}: invalid FP8 scales"))?;
+        Ok(Self { scale, block })
+    }
+
+    fn to_bf16(&self, weights: &Weights, name: &str) -> Result<Vec<u16>> {
+        let cols = weights.tensors[name].shape[1];
+        let bytes = weights.raw_bytes(name)?;
+        let scales = weights.host_f32(&self.scale)?;
+        ensure!(
+            scales
+                .iter()
+                .all(|&scale| scale.is_finite() && scale >= 0.0),
+            "{}: FP8 scales must be finite and nonnegative",
+            self.scale
+        );
+        let [block_rows, block_cols] = self.block;
+        let scale_cols = cols.div_ceil(block_cols);
+        let decoded: [f32; 256] = std::array::from_fn(|bits| e4m3fn_to_f32(bits as u8));
+        let mut bf16 = Vec::with_capacity(bytes.len());
+        for (row, values) in bytes.chunks_exact(cols).enumerate() {
+            let start = row / block_rows * scale_cols;
+            for (block, &scale) in values
+                .chunks(block_cols)
+                .zip(&scales[start..start + scale_cols])
+            {
+                bf16.extend(
+                    block
+                        .iter()
+                        .map(|&bits| f32_to_bf16(decoded[bits as usize] * scale)),
+                );
+            }
+        }
+        Ok(bf16)
+    }
+}
+
+fn e4m3fn_to_f32(bits: u8) -> f32 {
+    let exponent = u32::from((bits >> 3) & 0x0f);
+    let fraction = u32::from(bits & 0x07);
+    let value = match (exponent, fraction) {
+        (0, fraction) => fraction as f32 / 512.0,
+        (15, 7) => f32::NAN,
+        _ => f32::from_bits(((exponent + 120) << 23) | (fraction << 20)),
+    };
+    if bits & 0x80 == 0 { value } else { -value }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -307,6 +387,7 @@ impl QwenWeights {
                 .tensors
                 .contains_key("model.language_model.embed_tokens.weight");
         let mut bindings = Vec::with_capacity(specs.len());
+        let mut block_size = None;
         for spec in specs {
             let name = if spec.name == "lm_head.weight" && config.output_weight_tied {
                 "model.embed_tokens.weight"
@@ -326,11 +407,31 @@ impl QwenWeights {
             {
                 shape.insert(1, 1);
             }
-            weights.validate(&name, &shape)?;
+            let tensor = weights.validate_shape(&name, &shape)?;
+            let fp8 = if tensor.dtype == Dtype::F8_E4M3 {
+                ensure!(
+                    config.architecture == ModelArchitecture::Qwen3Dense
+                        && spec.dtype == WeightDtype::Bf16
+                        && name.ends_with(".weight"),
+                    "{name}: FP8 requires a BF16 matrix in dense Qwen3"
+                );
+                if block_size.is_none() {
+                    let directory = path.parent().context("missing checkpoint directory")?;
+                    let root: Value = read_json(directory.join("config.json"))?;
+                    block_size = fp8_block_size(&root["quantization_config"], config.architecture)?;
+                }
+                let block = block_size
+                    .with_context(|| format!("{name}: missing FP8 quantization_config"))?;
+                Some(Fp8Weight::new(&weights, &name, &shape, block)?)
+            } else {
+                weights.validate(&name, &shape)?;
+                None
+            };
             bindings.push(Binding {
                 name,
                 dtype: spec.dtype,
                 transform: Transform::for_tensor(config, &spec.name),
+                fp8,
             });
         }
         Ok(Self { weights, bindings })
@@ -372,6 +473,9 @@ impl QwenWeights {
 impl Binding {
     fn prepare(&self, runtime: &Runtime, weights: &mut Weights) -> Result<()> {
         let name = &self.name;
+        if let Some(fp8) = &self.fp8 {
+            return weights.insert_prepared(name, runtime.mem_u16(&fp8.to_bf16(weights, name)?)?);
+        }
         let transform = self.transform;
         let f32_storage = self.dtype == WeightDtype::F32;
         if transform.permutation.is_none() && !transform.add_one && !transform.negative_exp {
@@ -419,6 +523,193 @@ mod tests {
         tensor::{TensorView, serialize_to_file},
     };
     use std::fs;
+
+    #[test]
+    fn dynamic_fp8_uses_block_scales_across_shards() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("catena-qwen-fp8-{}", std::process::id()));
+        fs::create_dir_all(&directory)?;
+        let result = (|| {
+            let config = ModelConfig::qwen3_0_6b();
+            let weight = "model.layers.0.self_attn.q_proj.weight";
+            let scale = "model.layers.0.self_attn.q_proj.weight_scale_inv";
+            let embedding = "model.embed_tokens.weight";
+            let mut specs: Vec<_> = weight_specs(&config)?
+                .into_iter()
+                .filter(|spec| spec.name == embedding || spec.name == weight)
+                .collect();
+            specs[0].shape = vec![2, 2];
+            specs[1].shape = vec![3, 5];
+            let mut quantization = serde_json::json!({
+                "activation_scheme": "dynamic",
+                "modules_to_not_convert": null,
+                "quant_method": "fp8",
+                "weight_block_size": [2, 3],
+            });
+            assert_eq!(
+                fp8_block_size(&quantization, config.architecture)?,
+                Some([2, 3])
+            );
+            quantization["weight_block_size"] = serde_json::json!([0, 3]);
+            assert!(fp8_block_size(&quantization, config.architecture).is_err());
+            quantization["weight_block_size"] = serde_json::json!([2, 3]);
+            fs::write(
+                directory.join("config.json"),
+                serde_json::to_vec(&serde_json::json!({"quantization_config": quantization}))?,
+            )?;
+            serialize_to_file(
+                [
+                    (
+                        embedding,
+                        TensorView::new(Dtype::BF16, vec![2, 2], &[0; 8])?,
+                    ),
+                    (
+                        weight,
+                        TensorView::new(
+                            Dtype::F8_E4M3,
+                            vec![3, 5],
+                            &[
+                                0x80, 0x01, 0x15, 0x38, 0xfe, 0xb8, 0x7e, 0x00, 0x7a, 0x85, 0x0f,
+                                0x42, 0xc8, 0x01, 0x7f,
+                            ],
+                        )?,
+                    ),
+                ],
+                None,
+                &directory.join("weights.safetensors"),
+            )?;
+            let scale_shard = directory.join("scales.safetensors");
+            let index = directory.join("model.safetensors.index.json");
+            fs::write(
+                &index,
+                serde_json::to_vec(&serde_json::json!({
+                    "weight_map": {
+                        (embedding): "weights.safetensors",
+                        (weight): "weights.safetensors",
+                        (scale): "scales.safetensors",
+                    }
+                }))?,
+            )?;
+            let scale_bits = [0x3ec1_u16, 0x4000, 0x4048, 0x3e80];
+            let scale_bytes: Vec<_> = scale_bits.into_iter().flat_map(u16::to_le_bytes).collect();
+            for shape in [vec![1, 4], vec![2, 2]] {
+                serialize_to_file(
+                    [(
+                        scale,
+                        TensorView::new(Dtype::BF16, shape.clone(), &scale_bytes)?,
+                    )],
+                    None,
+                    &scale_shard,
+                )?;
+                let opened = QwenWeights::open(&index, &config, &specs);
+                if shape == [1, 4] {
+                    let error = opened.err().context("accepted malformed scale shape")?;
+                    assert!(format!("{error:#}").contains(scale));
+                    continue;
+                }
+                let weights = opened?;
+                assert!(weights.bindings[0].fp8.is_none());
+                let fp8 = weights.bindings[1]
+                    .fp8
+                    .as_ref()
+                    .context("missing FP8 binding")?;
+                let actual = fp8.to_bf16(&weights.weights, weight)?;
+                // PyTorch float8_e4m3fn -> float32, block multiplication, then bfloat16.
+                assert_eq!(
+                    actual[..14],
+                    [
+                        0x8000, 0x3a41, 0x3c9d, 0x4000, 0xc460, 0xbec1, 0x4329, 0x0000, 0x4420,
+                        0xbca0, 0x3dbc, 0x40fa, 0xc148, 0x3a00,
+                    ]
+                );
+                assert!(crate::weights::bf16_to_f32(actual[14]).is_nan());
+            }
+            let error = QwenWeights::open(&directory.join("weights.safetensors"), &config, &specs)
+                .err()
+                .context("accepted missing scales")?;
+            assert!(format!("{error:#}").contains(scale));
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
+
+    #[test]
+    #[ignore = "requires a GPU and the Unsloth Qwen3 FP8 checkpoint"]
+    fn qwen3_dynamic_fp8_runs_with_wmma() -> Result<()> {
+        use crate::{catena::InferenceOptions, model::Model};
+
+        let checkpoint = download_model("unsloth/Qwen3-0.6B-FP8")?;
+        let HubCheckpoint::Safetensors { path, config } = &checkpoint else {
+            anyhow::bail!("expected Unsloth safetensors");
+        };
+        let weights = QwenWeights::open(path, config, &weight_specs(config)?)?;
+        assert_eq!(
+            weights
+                .bindings
+                .iter()
+                .filter(|binding| binding.fp8.is_some())
+                .count(),
+            196
+        );
+        // PyTorch reference values sampled across several block rows and columns.
+        for (name, expected) in [
+            (
+                "model.layers.0.self_attn.q_proj.weight",
+                [0x3a2a, 0x3aa6, 0xbd33, 0xbc82, 0x3ca2, 0x3d60, 0xbd47],
+            ),
+            (
+                "model.layers.0.mlp.down_proj.weight",
+                [0xbc4e, 0x3c87, 0x3cad, 0x3c3c, 0xbc9e, 0xbcbc, 0xbb2f],
+            ),
+        ] {
+            let binding = weights
+                .bindings
+                .iter()
+                .find(|binding| binding.name == name)
+                .context("missing reference tensor")?;
+            let values = binding
+                .fp8
+                .as_ref()
+                .context("reference tensor is not FP8")?
+                .to_bf16(&weights.weights, name)?;
+            let columns = weights.weights.tensors[name].shape[1];
+            let indices = [
+                (1, 2),
+                (12, 251),
+                (129, 6),
+                (129, 251),
+                (513, 400),
+                (767, 687),
+                (1023, 1023),
+            ];
+            assert_eq!(
+                indices.map(|(row, col)| values[row * columns + col]),
+                expected,
+                "{name}"
+            );
+        }
+        drop(weights);
+        let prompt = checkpoint.tokenizer()?.encode("The capital of France is")?;
+        let options = InferenceOptions::default().with_wmma_prefill(true);
+        let model = Model::load_checkpoint_with_options(&checkpoint, options)?;
+        let mut session = model.session(prompt.len() + 1)?;
+        let logits = session.prefill_logits(&prompt)?;
+        assert!(logits.iter().all(|value| value.is_finite()));
+        let next = logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .context("missing prefill logits")?
+            .0;
+        assert!(
+            session
+                .decode_logits(next as u64)?
+                .iter()
+                .all(|value| value.is_finite())
+        );
+        Ok(())
+    }
 
     #[test]
     fn binds_wrapped_weights_across_shards_in_model_order() -> Result<()> {
@@ -522,6 +813,7 @@ mod tests {
             name: "A_log".into(),
             dtype: WeightDtype::F32,
             transform,
+            fp8: None,
         };
         let values = [0.0_f32, 1.0, 2.0, 3.0];
         assert_eq!(

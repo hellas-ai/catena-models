@@ -102,6 +102,15 @@ impl Weights {
         })
     }
     pub fn validate(&self, name: &str, shape: &[usize]) -> Result<()> {
+        let t = self.validate_shape(name, shape)?;
+        ensure!(
+            matches!(t.dtype, Dtype::BF16 | Dtype::F16 | Dtype::F32),
+            "{name}: unsupported dtype {:?}",
+            t.dtype
+        );
+        Ok(())
+    }
+    pub(crate) fn validate_shape(&self, name: &str, shape: &[usize]) -> Result<&TensorInfo> {
         let t = self
             .tensors
             .get(name)
@@ -111,12 +120,14 @@ impl Weights {
             "{name}: expected shape {shape:?}, got {:?}",
             t.shape
         );
-        ensure!(
-            matches!(t.dtype, Dtype::BF16 | Dtype::F16 | Dtype::F32),
-            "{name}: unsupported dtype {:?}",
-            t.dtype
-        );
-        Ok(())
+        Ok(t)
+    }
+    pub(crate) fn raw_bytes(&self, name: &str) -> Result<&[u8]> {
+        let t = self
+            .tensors
+            .get(name)
+            .with_context(|| format!("missing tensor {name}"))?;
+        Ok(&self.shards[t.file].bytes[t.offset..t.offset + t.len])
     }
     pub fn host_f32(&self, name: &str) -> Result<Vec<f32>> {
         let t = self

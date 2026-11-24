@@ -11,6 +11,7 @@ and Qwen3.5 safetensors when the repository has no model GGUF. Safetensors
 checkpoints can be a single file or an indexed set of shards. LLM image inputs
 require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
+Dense Qwen3 dynamic FP8 safetensors are dequantized to BF16 at load time.
 
 ## GPU selection
 
@@ -32,6 +33,7 @@ If `--model` is omitted, CLI and server modes use
 cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3-0.6B --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3-0.6B-FP8 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
