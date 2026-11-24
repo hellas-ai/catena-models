@@ -292,7 +292,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     Ok(s)
 }
 
-fn graph_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
     config.validate()?;
     validate(config, options)?;
     if matches!(
