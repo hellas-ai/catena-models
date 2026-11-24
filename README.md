@@ -6,8 +6,11 @@ All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
 shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
-their normal meanings. Text tokenizers and model dimensions come from GGUF.
-BF16/F32 checkpoint weights retain their native storage.
+their normal meanings. The text loader prefers GGUF and supports dense Qwen3
+and Qwen3.5 safetensors when the repository has no model GGUF. Safetensors
+checkpoints can be a single file or an indexed set of shards. LLM image inputs
+require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
+their native storage.
 
 ## GPU selection
 
@@ -27,6 +30,8 @@ If `--model` is omitted, CLI and server modes use
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3.5-0.8B --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3-0.6B --no-wmma-prefill --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
@@ -37,6 +42,7 @@ Responses APIs, including streaming, reasoning output, and client-executed tools
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000
+cargo run -r -- --model unsloth/Qwen3-0.6B --no-wmma-prefill --serve --ctx-size 4096
 ```
 
 See [serving and coding-client setup](SERVING.md) for remote binding,

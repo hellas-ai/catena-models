@@ -8,6 +8,7 @@ pub mod omnivoice;
 pub mod phonon;
 mod qwen;
 pub mod qwen3_tts;
+mod qwen_checkpoint;
 mod session_graph;
 pub mod spec;
 pub mod systemone;

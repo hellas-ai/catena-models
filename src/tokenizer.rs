@@ -104,6 +104,37 @@ impl QwenTokenizer {
         })
     }
 
+    pub(crate) fn from_hf_files(directory: &Path) -> Result<Self> {
+        let mut tokenizer = Self::open(directory.join("tokenizer.json"))?;
+        tokenizer.inner.with_padding(None);
+        tokenizer
+            .inner
+            .with_truncation(None)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let config_path = directory.join("tokenizer_config.json");
+        if config_path.is_file() {
+            let config: serde_json::Value = crate::hfhub::read_json(config_path)?;
+            let token = |name: &str| {
+                let value = &config[name];
+                value
+                    .as_str()
+                    .or_else(|| value["content"].as_str())
+                    .map(str::to_owned)
+            };
+            tokenizer.bos_token = token("bos_token");
+            tokenizer.eos_token = token("eos_token");
+            tokenizer.chat_template = config["chat_template"].as_str().map(str::to_owned);
+        }
+        let template = directory.join("chat_template.jinja");
+        if template.is_file() {
+            tokenizer.chat_template = Some(
+                std::fs::read_to_string(&template)
+                    .with_context(|| format!("reading {}", template.display()))?,
+            );
+        }
+        Ok(tokenizer)
+    }
+
     pub fn from_gguf(path: impl AsRef<Path>) -> Result<Option<Self>> {
         read_gguf_tokenizer_metadata(path)?
             .map(Self::from_gguf_metadata)
@@ -221,7 +252,7 @@ impl QwenTokenizer {
         })
     }
 
-    /// Model-provided Jinja template, when loaded from a GGUF checkpoint.
+    /// Model-provided Jinja template.
     pub fn chat_template(&self) -> Option<&str> {
         self.chat_template.as_deref()
     }

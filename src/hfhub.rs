@@ -3,6 +3,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use hf_hub::{HFClientSync, repository::RepoTreeEntry, split_id};
 
+use crate::{checkpoint::read_gguf_model_config, spec::ModelConfig, tokenizer::QwenTokenizer};
+
 /// Local GGUF files selected and cached for a Hub model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HubGguf {
@@ -12,9 +14,57 @@ pub struct HubGguf {
     pub files: Vec<PathBuf>,
 }
 
+/// A text checkpoint and its model-owned metadata in the Hub cache.
+#[derive(Debug, Clone)]
+pub enum HubCheckpoint {
+    Gguf(HubGguf),
+    Safetensors {
+        path: PathBuf,
+        config: Box<ModelConfig>,
+    },
+}
+
+impl HubCheckpoint {
+    pub fn gguf_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Gguf(gguf) => Some(&gguf.primary),
+            Self::Safetensors { .. } => None,
+        }
+    }
+
+    pub fn config(&self) -> Result<ModelConfig> {
+        match self {
+            Self::Gguf(gguf) => read_gguf_model_config(&gguf.primary),
+            Self::Safetensors { config, .. } => Ok(config.as_ref().clone()),
+        }
+    }
+
+    pub fn tokenizer(&self) -> Result<QwenTokenizer> {
+        match self {
+            Self::Gguf(gguf) => QwenTokenizer::from_gguf(&gguf.primary)?
+                .context("HF checkpoint has no embedded tokenizer"),
+            Self::Safetensors { path, .. } => {
+                QwenTokenizer::from_hf_files(path.parent().context("missing checkpoint directory")?)
+            }
+        }
+    }
+}
+
 /// Resolve `owner/model[:variant]`, list its GGUF files, select one checkpoint,
 /// and download every shard into the standard Hugging Face cache.
 pub fn download_gguf(model: &str) -> Result<HubGguf> {
+    match download_checkpoint(model, false)? {
+        HubCheckpoint::Gguf(gguf) => Ok(gguf),
+        HubCheckpoint::Safetensors { .. } => unreachable!(),
+    }
+}
+
+/// Prefer a model GGUF, otherwise resolve a dense Qwen safetensors checkpoint.
+pub fn download_model(model: &str) -> Result<HubCheckpoint> {
+    download_checkpoint(model, true)
+}
+
+fn download_checkpoint(model: &str, allow_safetensors: bool) -> Result<HubCheckpoint> {
     let (repo_id, variant) = parse_model_selector(model)?;
     let (owner, name) = split_id(repo_id);
     ensure!(
@@ -29,25 +79,83 @@ pub fn download_gguf(model: &str) -> Result<HubGguf> {
         .recursive(true)
         .send()
         .with_context(|| format!("listing files for Hugging Face model {repo_id}"))?;
-    let ggufs = entries
+    let paths = entries
         .into_iter()
         .filter_map(|entry| match entry {
-            RepoTreeEntry::File { path, .. } if is_model_gguf(&path) => Some(path),
+            RepoTreeEntry::File { path, .. } => Some(path),
             _ => None,
         })
         .collect::<Vec<_>>();
-    let selected = select_checkpoint(&ggufs, variant)
-        .with_context(|| format!("selecting GGUF checkpoint from {repo_id}"))?;
-
-    let mut files = Vec::with_capacity(selected.len());
-    for remote_path in selected {
-        let local_path = repo
-            .download_file()
-            .filename(remote_path.clone())
+    let fetch = |path: &str| {
+        repo.download_file()
+            .filename(path)
             .send()
-            .with_context(|| format!("downloading {repo_id}/{remote_path}"))?;
-        files.push(local_path);
+            .with_context(|| format!("downloading {repo_id}/{path}"))
+    };
+    match select_model_files(&paths, variant, allow_safetensors)
+        .with_context(|| format!("selecting checkpoint from {repo_id}"))?
+    {
+        ModelFiles::Gguf(selected) => {
+            download_gguf_files(&selected, fetch).map(HubCheckpoint::Gguf)
+        }
+        ModelFiles::Safetensors(checkpoint) => {
+            let config_path = fetch("config.json")?;
+            let config = crate::qwen_checkpoint::read_config(&config_path, repo_id)?;
+            let mut filenames = vec![checkpoint, "tokenizer.json", "config.json"];
+            for name in ["tokenizer_config.json", "chat_template.jinja"] {
+                if paths.iter().any(|path| path == name) {
+                    filenames.push(name);
+                }
+            }
+            let root = resolve_files(&filenames, |name| {
+                if name == "config.json" {
+                    Ok(config_path.clone())
+                } else {
+                    fetch(name)
+                }
+            })?;
+            Ok(HubCheckpoint::Safetensors {
+                path: root.join(checkpoint),
+                config: Box::new(config),
+            })
+        }
     }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModelFiles {
+    Gguf(Vec<String>),
+    Safetensors(&'static str),
+}
+
+fn select_model_files(
+    paths: &[String],
+    variant: Option<&str>,
+    allow_safetensors: bool,
+) -> Result<ModelFiles> {
+    let ggufs = paths
+        .iter()
+        .filter(|p| is_model_gguf(p))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !ggufs.is_empty() || !allow_safetensors || variant.is_some() {
+        return select_checkpoint(&ggufs, variant).map(ModelFiles::Gguf);
+    }
+    ["model.safetensors", "model.safetensors.index.json"]
+        .into_iter()
+        .find(|name| paths.iter().any(|p| p == name))
+        .map(ModelFiles::Safetensors)
+        .context("repository contains no model GGUF or safetensors checkpoint")
+}
+
+fn download_gguf_files(
+    selected: &[String],
+    fetch: impl Fn(&str) -> Result<PathBuf>,
+) -> Result<HubGguf> {
+    let mut files = selected
+        .iter()
+        .map(|path| fetch(path))
+        .collect::<Result<Vec<_>>>()?;
     files.sort();
     ensure!(
         !files.is_empty(),
@@ -466,6 +574,32 @@ mod model_files_tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn prefers_gguf_and_keeps_its_selection_errors() -> Result<()> {
+        let mut paths = vec![
+            "mmproj-BF16.gguf".into(),
+            "model.safetensors.index.json".into(),
+        ];
+        assert_eq!(
+            select_model_files(&paths, None, true)?,
+            ModelFiles::Safetensors("model.safetensors.index.json")
+        );
+        paths.push("model.safetensors".into());
+        assert_eq!(
+            select_model_files(&paths, None, true)?,
+            ModelFiles::Safetensors("model.safetensors")
+        );
+        assert!(select_model_files(&paths, Some("BF16"), true).is_err());
+        paths.push("model-BF16.gguf".into());
+        assert_eq!(
+            select_model_files(&paths, None, true)?,
+            ModelFiles::Gguf(vec!["model-BF16.gguf".into()])
+        );
+        paths.push("model-F32-00001-of-00002.gguf".into());
+        assert!(select_model_files(&paths, Some("F32"), true).is_err());
+        assert!(select_model_files(&paths, Some("missing"), true).is_err());
+        Ok(())
     }
     #[test]
     fn local_files_expand_indexes_and_report_missing_files() -> Result<()> {
