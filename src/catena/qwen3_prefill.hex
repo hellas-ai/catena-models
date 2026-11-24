@@ -1,0 +1,103 @@
+# Dense Qwen3 prompt ingestion. Keep the per-layer K/V planes and absolute
+# positions shared with single-token decode.
+
+(def program stdlib.qwen3.prefill.layer : {{{WEIGHTS}} (u64 val) (u64 val) (u64 val) ({({master.index32 u32} :) ({({((cap.own mem) val) ((cap.own mem) val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({((cap.own mem) val) ((cap.own mem) val)} *) (prop.Truth |-)} *) =
+ ([weights capacity start rows pair.]
+  ([.pair] *.elim [index rest.])
+  ([.rest] *.elim [state proofs.])
+  ([.proofs] *.elim [less truth.])
+  ([.less] unsafe.discard unit.elim)
+  ([.index] :.forget [layer32.])
+  ([.layer32] stdlib.models.memory.u32.to-u64 [layer.])
+  ([.state] *.elim [cache hidden.])
+  ({[.weights] [.layer32]} stdlib.qwen3.layer-weights [selected.])
+  ([.selected] *.elim [input-norm weights1.])
+  ([.weights1] *.elim [wq weights2.])
+  ([.weights2] *.elim [wk weights3.])
+  ([.weights3] *.elim [wv weights4.])
+  ([.weights4] *.elim [wo weights5.])
+  ([.weights5] *.elim [q-norm weights6.])
+  ([.weights6] *.elim [k-norm weights7.])
+  ([.weights7] *.elim [post-norm weights8.])
+  ([.weights8] *.elim [wg weights9.])
+  ([.weights9] *.elim [wu wd.])
+
+  ({[.hidden] [.input-norm] (const.u64.0x{{HIDDEN_SIZE}}) (const.u32.0x{{HIDDEN_F32}} u32.bitcast-f32) [.rows] (const.u64.0x{{HIDDEN_STAGES}}) (const.u64.0x{{PAD_HIDDEN_SIZE}})} qwen35.normalize [normalized.])
+  ({[.normalized] [.wq] (const.u64.0x{{HIDDEN_SIZE}}) (const.u64.0x{{QUERY_SIZE}})} stdlib.qwen35.dense.project [q-raw.])
+  ({[.normalized] [.wk] (const.u64.0x{{HIDDEN_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.qwen35.dense.project [k-raw.])
+  ({[.normalized] [.wv] (const.u64.0x{{HIDDEN_SIZE}}) (const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.qwen35.dense.project [v-raw.])
+
+  ({[.layer] [.capacity]} stdlib.models.memory.u64.mul [layer-capacity.])
+  ({[.layer-capacity] (const.u64.0x{{KV_LAYER_SIZE}})} stdlib.models.memory.u64.mul [key-base.])
+  ({[.capacity] (const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.models.memory.u64.mul [plane.])
+  ({[.key-base] [.plane]} stdlib.models.memory.u64.add [value-base.])
+  ({[.start] (const.u64.0x{{KEY_VALUE_SIZE}})} stdlib.models.memory.u64.mul [offset.])
+  ({[.key-base] [.offset]} stdlib.models.memory.u64.add [key-target.])
+  ({[.value-base] [.offset]} stdlib.models.memory.u64.add [value-target.])
+  ({[.q-raw] [.k-raw] [.v-raw] [.start] [.cache] [.q-norm] [.k-norm] [.key-target] [.value-target]} stdlib.qwen35.batch.full-prepare [query cache-ready.])
+  # The shared attention signature carries a gate operand. The ungated
+  # epilogue does not read it, so pass the query without allocating a gate.
+  ({[.query] [.cache-ready] [.query] [.start] [.key-base] [.value-base]} stdlib.qwen35.wmma.attention.run [attended.])
+  ({[.normalized] [.attended]} stdlib.models.resources.free-bf16-before [context-after-norm.])
+  ({[.q-raw] [.context-after-norm]} stdlib.models.resources.free-bf16-before [context-after-q.])
+  ({[.k-raw] [.context-after-q]} stdlib.models.resources.free-bf16-before [context-after-k.])
+  ({[.v-raw] [.context-after-k]} stdlib.models.resources.free-bf16-before [context-after-v.])
+  ({[.query] [.context-after-v]} stdlib.models.resources.free-bf16-before [context.])
+  ({[.context] [.wo] (const.u64.0x{{QUERY_SIZE}}) (const.u64.0x{{HIDDEN_SIZE}}) [.hidden]} stdlib.qwen35.dense.projection.residual [residual.])
+  ({[.context] [.residual]} stdlib.models.resources.free-bf16-before [residual-ready.])
+  ({[.hidden] [.residual-ready]} stdlib.models.resources.free-bf16-before [attention.])
+
+  ({[.attention] [.post-norm] (const.u64.0x{{HIDDEN_SIZE}}) (const.u32.0x{{HIDDEN_F32}} u32.bitcast-f32) [.rows] (const.u64.0x{{HIDDEN_STAGES}}) (const.u64.0x{{PAD_HIDDEN_SIZE}})} qwen35.normalize [ffn.])
+  ({[.ffn] [.wg] (const.u64.0x{{HIDDEN_SIZE}}) (const.u64.0x{{INTERMEDIATE_SIZE}}) [.wu]} stdlib.qwen35.dense.projection.gate [active.])
+  ({[.ffn] [.active]} stdlib.models.resources.free-bf16-before [active-ready.])
+  ({[.active-ready] [.wd] (const.u64.0x{{INTERMEDIATE_SIZE}}) (const.u64.0x{{HIDDEN_SIZE}}) [.attention]} stdlib.qwen35.dense.projection.residual [output.])
+  ({[.active-ready] [.output]} stdlib.models.resources.free-bf16-before [output-ready.])
+  ({[.attention] [.output-ready]} stdlib.models.resources.free-bf16-before [final-hidden.])
+  ([.final-hidden] meta.master.complete-own [complete phase.])
+  ({[.cache-ready] [.phase]} meta.master.after-own [final-cache.])
+  ({[.final-cache] [.complete]} *.intro [result.])
+  ({[.result] [.truth]} *.intro)
+ ))
+
+(def program stdlib.qwen3.prefill.scalar : {((cap.ref mem) val) ((cap.ref mem) val) {{WEIGHTS}} (u64 val) (u64 val) (u64 val) ({({((cap.own mem) val) ((cap.own mem) val)} *) ({((master.predicate prop.IsTrue) |-) 1} *)} *)} -> ({((cap.own mem) val) ((cap.own mem) val)} *) =
+ ([tokens embedding weights capacity start rows pair.]
+  ([.pair] *.elim [state proofs.])
+  ([.proofs] *.elim [condition-proof unit.])
+  ([.condition-proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ({[.tokens] [.embedding] [.weights] [.capacity] [.start]} partial.stdlib.qwen3.token-step.fold.5 [callback.])
+  ({([.rows] stdlib.models.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] [.state] [.callback] core.truth} core.fold.bounded [result proof.])
+  ([.proof] unsafe.discard unit.elim)
+  [.result]
+ ))
+
+(def program stdlib.qwen3.prefill.batch : {((cap.ref mem) val) ((cap.ref mem) val) {{WEIGHTS}} (u64 val) (u64 val) (u64 val) ({({((cap.own mem) val) ((cap.own mem) val)} *) ({(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-) 1} *)} *)} -> ({((cap.own mem) val) ((cap.own mem) val)} *) =
+ ([tokens embedding weights capacity start rows pair.]
+  ([.pair] *.elim [state proofs.])
+  ([.proofs] *.elim [condition-proof unit.])
+  ([.condition-proof] unsafe.discard unit.elim)
+  ([.unit] unit.elim)
+  ([.state] *.elim [cache previous.])
+  ({[.tokens] [.embedding] (const.u64.0x0000000000000000)} stdlib.qwen35.prefill.embed [embedded.])
+  ({[.previous] [.embedded]} stdlib.models.resources.free-bf16-before [batch.])
+  ({[.cache] [.batch]} *.intro [initial.])
+  ({[.weights] [.capacity] [.start] [.rows]} partial.stdlib.qwen3.prefill.layer.4 [callback.])
+  ({(const.u32.0x{{LAYERS}}) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])
+  ({[.end] [.initial] [.callback] core.truth} core.fold.bounded [decoded proof.])
+  ([.proof] unsafe.discard unit.elim)
+  ([.decoded] *.elim [final-cache final-batch.])
+  ({[.rows] (const.u64.0x0000000000000001)} stdlib.models.memory.u64.sub [last.])
+  ({[.final-batch] [.last]} stdlib.qwen35.prefill.row [row.])
+  ({[.final-batch] [.row]} stdlib.models.resources.free-bf16-before [final-hidden.])
+  ({[.final-cache] [.final-hidden]} *.intro)
+ ))
+
+(def program stdlib.qwen3.prefill.dispatch : {((cap.ref mem) val) ((cap.ref mem) val) {{WEIGHTS}} (u64 val) (u64 val) (u64 val) ({((cap.own mem) val) ((cap.own mem) val)} *)} -> ({((cap.own mem) val) ((cap.own mem) val)} *) =
+ ([tokens embedding weights capacity start rows state.]
+  ({[.rows] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.less [small.])
+  ({[.small] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])
+  ({[.tokens] [.embedding] [.weights] [.capacity] [.start] [.rows]} partial.stdlib.qwen3.prefill.scalar.6 [scalar.])
+  ({[.tokens] [.embedding] [.weights] [.capacity] [.start] [.rows]} partial.stdlib.qwen3.prefill.batch.6 [batch.])
+  ({[.condition] [.state] [.scalar] [.batch] (unit.intro)} core.if)
+ ))

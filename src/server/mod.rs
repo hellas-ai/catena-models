@@ -16,11 +16,10 @@ mod tests;
 mod tools;
 
 use anyhow::{Context, Result};
-use catena_models::catena::InferenceOptions;
+use catena_models::{catena::InferenceOptions, hfhub::HubCheckpoint};
 use clap::Args;
 use std::{
     net::IpAddr,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -62,7 +61,7 @@ impl ServeOptions {
 
 pub fn run(
     config: ServeOptions,
-    model: Option<(String, PathBuf)>,
+    model: Option<(String, HubCheckpoint)>,
     options: InferenceOptions,
 ) -> Result<()> {
     anyhow::ensure!(
@@ -73,15 +72,17 @@ pub fn run(
     let model_id = model.as_ref().map(|(model, _)| Arc::from(model.as_str()));
     let worker = engine::start(
         move || {
-            let Some((model, path)) = model else {
+            let Some((model, checkpoint)) = model else {
                 return Ok(engine::ModelBackend::Speech);
             };
             eprintln!("loading model for serving");
-            if catena_models::systemone::Metadata::read(&path)?.is_some() {
+            if let Some(path) = checkpoint.gguf_path()
+                && catena_models::systemone::Metadata::read(path)?.is_some()
+            {
                 let projector = catena_models::hfhub::download_mmproj(&model)?;
                 Ok(engine::ModelBackend::Decision(
                     catena_models::systemone::Runner::load(
-                        &path,
+                        path,
                         Some(&projector),
                         options,
                         config.ctx_size,
@@ -90,7 +91,7 @@ pub fn run(
                 ))
             } else {
                 Ok(engine::ModelBackend::Chat(engine::QwenBackend::load(
-                    path,
+                    &checkpoint,
                     options,
                     config.ctx_size,
                     !config.no_prefix_cache,

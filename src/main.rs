@@ -5,13 +5,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use catena_models::{
     catena::{InferenceOptions, KernelKind, generated_model_source_for_options},
-    checkpoint::read_gguf_model_config,
-    hfhub::{download_gguf, download_mmproj},
+    hfhub::{HubCheckpoint, download_mmproj, download_model},
     model::Model,
-    tokenizer::QwenTokenizer,
     vision::{PreparedMultimodalPrompt, VisionModel},
 };
 use clap::{CommandFactory, FromArgMatches, Parser};
@@ -35,7 +33,7 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
 
-    /// Use SIMT prefill instead of WMMA (also needed for Qwen3 models).
+    /// Use SIMT prefill instead of WMMA.
     #[arg(long, conflicts_with = "wmma_prefill")]
     no_wmma_prefill: bool,
 
@@ -126,16 +124,24 @@ fn main() -> Result<()> {
     if args.server.tts_only() {
         return server::run(args.server, None, options);
     }
-    let checkpoint = download_gguf(&args.model)?;
-    eprintln!(
-        "selected {} GGUF file(s) from the Hugging Face cache",
-        checkpoint.files.len()
-    );
-    let selected_gguf = checkpoint.primary;
+    let checkpoint = download_model(&args.model)?;
+    match &checkpoint {
+        HubCheckpoint::Gguf(gguf) => eprintln!(
+            "selected {} GGUF file(s) from the Hugging Face cache",
+            gguf.files.len()
+        ),
+        HubCheckpoint::Safetensors { path, .. } => eprintln!(
+            "selected {} from the Hugging Face cache",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ),
+    }
     if args.serve {
-        return server::run(args.server, Some((args.model, selected_gguf)), options);
+        return server::run(args.server, Some((args.model, checkpoint)), options);
     }
     if let Some(path) = &args.systemone {
+        let gguf = checkpoint
+            .gguf_path()
+            .context("System One requires a GGUF checkpoint")?;
         let bytes = if path == std::path::Path::new("-") {
             use std::io::Read;
             let mut bytes = Vec::new();
@@ -151,7 +157,7 @@ fn main() -> Result<()> {
             None
         };
         let runner = catena_models::systemone::Runner::load(
-            &selected_gguf,
+            gguf,
             projector.as_deref(),
             options,
             usize::MAX,
@@ -160,13 +166,14 @@ fn main() -> Result<()> {
         println!("{}", runner.run(&request)?);
         return Ok(());
     }
-    if catena_models::systemone::Metadata::read(&selected_gguf)?.is_some()
-        && !args.generate_entrypoint
+    if !args.generate_entrypoint
+        && let Some(gguf) = checkpoint.gguf_path()
+        && catena_models::systemone::Metadata::read(gguf)?.is_some()
     {
         anyhow::bail!("this is a decision model; use --systemone REQUEST.json or --serve");
     }
     if args.generate_entrypoint {
-        let config = read_gguf_model_config(&selected_gguf)?;
+        let config = checkpoint.config()?;
         let directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/catena");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("generated-qwen3.hex");
@@ -180,7 +187,7 @@ fn main() -> Result<()> {
             "at least one of --pp or --tg must be non-zero"
         );
         let load_started = Instant::now();
-        let model = Model::load_gguf_with_options(&selected_gguf, options)?;
+        let model = Model::load_checkpoint_with_options(&checkpoint, options)?;
         eprintln!(
             "loaded Catena runtime and weights in {:.2?}",
             load_started.elapsed()
@@ -189,9 +196,7 @@ fn main() -> Result<()> {
     }
 
     let prompt = args.prompt.as_deref().unwrap_or_default();
-    let gguf_path = selected_gguf;
-    let tokenizer = QwenTokenizer::from_gguf(&gguf_path)?
-        .ok_or_else(|| anyhow::anyhow!("HF checkpoint has no embedded tokenizer"))?;
+    let tokenizer = checkpoint.tokenizer()?;
     let mut tokens = tokenizer.encode(prompt)?;
     ensure!(
         !tokens.is_empty() || !args.image.is_empty(),
@@ -199,7 +204,10 @@ fn main() -> Result<()> {
     );
 
     let projector = if !args.image.is_empty() {
-        let config = read_gguf_model_config(&gguf_path)?;
+        let gguf_path = checkpoint
+            .gguf_path()
+            .context("image inputs require a GGUF checkpoint")?;
+        let config = checkpoint.config()?;
         ensure!(
             config.is_qwen35()
                 || config.architecture == catena_models::spec::ModelArchitecture::Lfm3,
@@ -216,22 +224,22 @@ fn main() -> Result<()> {
             vision_config.output_size == config.hidden_size,
             "projector output width does not match language model"
         );
-        Some(path)
+        Some((gguf_path, path))
     } else {
         None
     };
     let load_started = Instant::now();
-    let model = if projector.is_some() {
-        Model::load_gguf_with_multimodal_options(&gguf_path, options)?
+    let model = if let Some((gguf_path, _)) = &projector {
+        Model::load_gguf_with_multimodal_options(gguf_path, options)?
     } else {
-        Model::load_gguf_with_options(&gguf_path, options)?
+        Model::load_checkpoint_with_options(&checkpoint, options)?
     };
     let eos_token_id = model.config().eos_token_id;
     eprintln!(
         "loaded Catena runtime and weights in {:.2?}",
         load_started.elapsed()
     );
-    let multimodal = if let Some(path) = projector {
+    let multimodal = if let Some((_, path)) = projector {
         let vision = VisionModel::load_gguf(&path, model.gpu_dialect(), args.image_max_pixels)?;
         let images = args
             .image

@@ -8,12 +8,12 @@ use super::{
 };
 use catena_models::{
     catena::InferenceOptions,
+    hfhub::HubCheckpoint,
     model::{Model, Session, SessionCheckpoint},
     tokenizer::QwenTokenizer,
 };
 use serde_json::Value;
 use std::{
-    path::PathBuf,
     rc::Rc,
     sync::{
         Arc,
@@ -217,16 +217,15 @@ pub struct QwenBackend {
 }
 impl QwenBackend {
     pub fn load(
-        path: PathBuf,
+        checkpoint: &HubCheckpoint,
         options: InferenceOptions,
         ctx_size: usize,
         prefix_cache_enabled: bool,
     ) -> anyhow::Result<Self> {
-        let tokenizer = QwenTokenizer::from_gguf(&path)?
-            .ok_or_else(|| anyhow::anyhow!("checkpoint has no tokenizer"))?;
+        let tokenizer = checkpoint.tokenizer()?;
         let template = tokenizer
             .chat_template()
-            .ok_or_else(|| anyhow::anyhow!("checkpoint has no tokenizer.chat_template"))?;
+            .ok_or_else(|| anyhow::anyhow!("checkpoint has no chat template"))?;
         let prompt = Prompt::new(template.into())?
             .with_special_tokens(tokenizer.bos_token(), tokenizer.eos_token());
         // Exercise the template before expensive compilation and before listening.
@@ -237,7 +236,7 @@ impl QwenBackend {
                 false,
             )
             .map_err(anyhow::Error::msg)?;
-        let model = Model::load_gguf_with_options(path, options)?;
+        let model = Model::load_checkpoint_with_options(checkpoint, options)?;
         anyhow::ensure!(
             ctx_size > 0 && ctx_size <= model.config().max_position_embeddings,
             "--ctx-size must be between 1 and {}",

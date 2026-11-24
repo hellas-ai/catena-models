@@ -3,7 +3,7 @@ use std::{collections::HashSet, env, path::Path, sync::Arc};
 use anyhow::{Context, Result, ensure};
 use catena_lang::{
     codegen::GpuDialect,
-    runtime::{Artifact, MemOwn, Runtime, Value},
+    runtime::{Artifact, MemOwn, MemRef, Runtime, Value},
 };
 
 use crate::{
@@ -12,15 +12,16 @@ use crate::{
         runtime_sources,
     },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
-    spec::{ModelArchitecture, ModelConfig, weight_specs},
+    hfhub::HubCheckpoint,
+    qwen_checkpoint::QwenWeights,
+    spec::{ModelArchitecture, ModelConfig, TensorSpec, weight_specs},
 };
 
-/// Loaded text-model runtime and registered native-dtype GGUF mapping.
+/// Loaded text-model runtime and GPU-visible checkpoint weights.
 pub struct Model {
     runtime: Runtime,
     artifact: Artifact,
-    weights: Vec<TensorView>,
-    checkpoint: Checkpoint,
+    weights: ModelWeights,
     config: ModelConfig,
     parameter_count: usize,
     weight_byte_len: usize,
@@ -29,14 +30,99 @@ pub struct Model {
     identity: Arc<()>,
 }
 
+enum ModelWeights {
+    Gguf {
+        checkpoint: Checkpoint,
+        views: Vec<TensorView>,
+    },
+    Safetensors(QwenWeights),
+}
+
+impl ModelWeights {
+    fn len(&self) -> usize {
+        match self {
+            Self::Gguf { views, .. } => views.len(),
+            Self::Safetensors(weights) => weights.len(),
+        }
+    }
+
+    fn gpu_ref(&self, index: usize) -> Result<MemRef<'_>> {
+        match self {
+            Self::Gguf { checkpoint, views } => checkpoint.gpu_ref(&views[index]),
+            Self::Safetensors(weights) => weights.gpu_ref(index),
+        }
+    }
+
+    fn load_gguf(
+        path: &Path,
+        config: &ModelConfig,
+        specs: &[TensorSpec],
+        dialect: GpuDialect,
+    ) -> Result<(Self, usize)> {
+        let checkpoint = Checkpoint::open_with_dialect(path, config, dialect)?;
+        let mut views = Vec::with_capacity(specs.len());
+        let mut mapped_bf16_bytes = 0_usize;
+        let mut mapped_f32_bytes = 0_usize;
+        let mut counted_tensors = HashSet::new();
+        for spec in specs {
+            let view = checkpoint
+                .tensor_view(spec)
+                .with_context(|| format!("failed to locate {}", spec.name))?;
+            if counted_tensors.insert(&spec.gguf_name) {
+                match view.dtype {
+                    GgufDtype::F16 => anyhow::bail!("F16 language weights are unsupported"),
+                    GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
+                    GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
+                }
+            }
+            views.push(view);
+        }
+        let weight_location = match dialect {
+            GpuDialect::Hip => "mapped zero-copy",
+            GpuDialect::Cuda => "copied to device memory",
+        };
+        eprintln!(
+            "loaded {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 {weight_location} in native storage",
+            checkpoint.file_count(),
+            checkpoint.storage_byte_len() as f64 / (1_u64 << 30) as f64,
+            mapped_bf16_bytes as f64 / (1_u64 << 30) as f64,
+            mapped_f32_bytes as f64 / (1_u64 << 20) as f64,
+        );
+        Ok((
+            Self::Gguf { checkpoint, views },
+            mapped_bf16_bytes + mapped_f32_bytes,
+        ))
+    }
+}
+
 impl Model {
     pub fn load(model: &str) -> Result<Self> {
         Self::load_hf_with_options(model, InferenceOptions::default())
     }
 
-    /// Resolve an HF name through hf-hub, including every GGUF shard.
+    /// Resolve an HF name through hf-hub, including all checkpoint shards.
     pub fn load_hf_with_options(model: &str, options: InferenceOptions) -> Result<Self> {
-        Self::load_gguf_with_options(crate::hfhub::download_gguf(model)?.primary, options)
+        Self::load_checkpoint_with_options(&crate::hfhub::download_model(model)?, options)
+    }
+
+    pub fn load_checkpoint_with_options(
+        checkpoint: &HubCheckpoint,
+        options: InferenceOptions,
+    ) -> Result<Self> {
+        match checkpoint {
+            HubCheckpoint::Gguf(gguf) => Self::load_gguf_with_options(&gguf.primary, options),
+            HubCheckpoint::Safetensors { path, config } => Self::load_impl(
+                config.as_ref().clone(),
+                options,
+                configured_gpu_dialect()?,
+                false,
+                |runtime, config, specs| {
+                    let mut weights = QwenWeights::open(path, config, specs)?;
+                    let bytes = weights.prepare(runtime)?;
+                    Ok((ModelWeights::Safetensors(weights), bytes))
+                },
+            ),
+        }
     }
 
     pub fn load_gguf(gguf_path: impl AsRef<Path>) -> Result<Self> {
@@ -55,7 +141,7 @@ impl Model {
         options: InferenceOptions,
         dialect: GpuDialect,
     ) -> Result<Self> {
-        Self::load_impl(gguf_path, options, dialect, false)
+        Self::load_gguf_impl(gguf_path.as_ref(), options, dialect, false)
     }
 
     /// Compile the additional embedding-input entrypoint for image-conditioned sessions.
@@ -75,20 +161,37 @@ impl Model {
         options: InferenceOptions,
         dialect: GpuDialect,
     ) -> Result<Self> {
-        Self::load_impl(gguf_path, options, dialect, true)
+        Self::load_gguf_impl(gguf_path.as_ref(), options, dialect, true)
     }
 
-    fn load_impl(
-        gguf_path: impl AsRef<Path>,
+    fn load_gguf_impl(
+        path: &Path,
         options: InferenceOptions,
         dialect: GpuDialect,
         multimodal: bool,
     ) -> Result<Self> {
-        let gguf_path = gguf_path.as_ref();
-        let config = read_gguf_model_config(gguf_path)?;
+        Self::load_impl(
+            read_gguf_model_config(path)?,
+            options,
+            dialect,
+            multimodal,
+            |_, config, specs| ModelWeights::load_gguf(path, config, specs, dialect),
+        )
+    }
+
+    fn load_impl(
+        config: ModelConfig,
+        options: InferenceOptions,
+        dialect: GpuDialect,
+        multimodal: bool,
+        load_weights: impl FnOnce(
+            &Runtime,
+            &ModelConfig,
+            &[TensorSpec],
+        ) -> Result<(ModelWeights, usize)>,
+    ) -> Result<Self> {
         crate::qwen::validate(&config, options)?;
         let specs = weight_specs(&config)?;
-        let weight_count = specs.len();
         let mut physical_tensors = HashSet::new();
         let parameter_count = specs
             .iter()
@@ -105,47 +208,14 @@ impl Model {
         let (runtime, artifact) =
             crate::catena::load_runtime(runtime_sources(&model_source), dialect)
                 .context("failed to compile the text-model Catena GPU program")?;
-        let checkpoint = Checkpoint::open_with_dialect(gguf_path, &config, dialect)?;
-        let mut weights = Vec::with_capacity(specs.len());
-        let mut mapped_bf16_bytes = 0_usize;
-        let mut mapped_f32_bytes = 0_usize;
-        let mut counted_tensors = HashSet::new();
-        for spec in specs {
-            let view = checkpoint
-                .tensor_view(&spec)
-                .with_context(|| format!("failed to locate {}", spec.name))?;
-            if counted_tensors.insert(spec.gguf_name) {
-                match view.dtype {
-                    GgufDtype::F16 => anyhow::bail!("F16 language weights are unsupported"),
-                    GgufDtype::Bf16 => mapped_bf16_bytes += view.byte_len,
-                    GgufDtype::F32 => mapped_f32_bytes += view.byte_len,
-                }
-            }
-            weights.push(view);
-        }
-        ensure!(
-            weights.len() == weight_count,
-            "internal model weight ABI mismatch"
-        );
-        let weight_location = match dialect {
-            GpuDialect::Hip => "mapped zero-copy",
-            GpuDialect::Cuda => "copied to device memory",
-        };
-        eprintln!(
-            "loaded {} GGUF file(s), {:.2} GiB total; {:.2} GiB BF16 and {:.2} MiB F32 {weight_location} in native storage",
-            checkpoint.file_count(),
-            checkpoint.storage_byte_len() as f64 / (1_u64 << 30) as f64,
-            mapped_bf16_bytes as f64 / (1_u64 << 30) as f64,
-            mapped_f32_bytes as f64 / (1_u64 << 20) as f64,
-        );
+        let (weights, weight_byte_len) = load_weights(&runtime, &config, &specs)?;
         Ok(Self {
             runtime,
             artifact,
             weights,
-            checkpoint,
             config,
             parameter_count,
-            weight_byte_len: mapped_bf16_bytes + mapped_f32_bytes,
+            weight_byte_len,
             dialect,
             multimodal,
             identity: Arc::new(()),
@@ -285,8 +355,8 @@ impl Model {
         let mut inputs = vec![token_buffer.as_ref().into()];
         inputs.extend(state.into_iter().map(Value::MemOwn));
         inputs.extend([(capacity as u64).into(), (start as u64).into()]);
-        for weight in &self.weights {
-            inputs.push(self.checkpoint.gpu_ref(weight)?.into());
+        for index in 0..self.weights.len() {
+            inputs.push(self.weights.gpu_ref(index)?.into());
         }
         Self::cached_result(
             self.artifact.exec_values("qwen3", inputs)?,
@@ -335,10 +405,7 @@ impl Model {
         let tokens = self.runtime.mem_u64(&[token])?;
         let mut output = self.artifact.exec_values(
             "qwen3.embedding",
-            vec![
-                tokens.as_ref().into(),
-                self.checkpoint.gpu_ref(&self.weights[0])?.into(),
-            ],
+            vec![tokens.as_ref().into(), self.weights.gpu_ref(0)?.into()],
         )?;
         ensure!(output.len() == 1, "embedding ABI mismatch");
         match output.pop().unwrap() {
@@ -365,8 +432,8 @@ impl Model {
             (start as u64).into(),
             (sequence as u64).into(),
         ]);
-        for weight in &self.weights {
-            inputs.push(self.checkpoint.gpu_ref(weight)?.into());
+        for index in 0..self.weights.len() {
+            inputs.push(self.weights.gpu_ref(index)?.into());
         }
         Self::cached_result(
             self.artifact.exec_values("qwen3.multimodal", inputs)?,
@@ -580,10 +647,7 @@ impl Session<'_> {
                     "qwen3.embedding",
                     vec![
                         tokens.as_ref().into(),
-                        self.model
-                            .checkpoint
-                            .gpu_ref(&self.model.weights[0])?
-                            .into(),
+                        self.model.weights.gpu_ref(0)?.into(),
                     ],
                 )?
                 .pop()

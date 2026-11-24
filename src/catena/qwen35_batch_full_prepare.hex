@@ -15,7 +15,7 @@
   ({[.head] (const.u64.0x{{QUERY_HEADS}})} stdlib.models.memory.u64.sub [kv-head.])
   ({[.is-query] [.head] [.kv-head]} stdlib.models.memory.select-u64 [local-head.])
   ({[.local-head] (const.u64.0x{{HEAD_DIM}})} stdlib.models.memory.u64.mul [base.])
-  ({[.base] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.mul [query-base.])
+  ({[.base] (const.u64.0x{{QUERY_PACKING}})} stdlib.models.memory.u64.mul [query-base.])
   ({[.is-query] [.query-base] [.base]} stdlib.models.memory.select-u64 [source-base.])
   ({[.tid] (const.u64.0x{{HEAD_DIM}})} stdlib.models.memory.u64.less [valid.])
   ({[.valid] [.tid] (const.u64.0x0000000000000000)} stdlib.models.memory.select-u64 [channel.])
@@ -135,7 +135,7 @@
 (def program stdlib.qwen35.batch.full-prepare : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> {((cap.own mem) val) ((cap.own mem) val)} =
  ([qg key value start cache qw kw key-target value-target.]
   ([.qg] stdlib.models.memory.own-count-bf16 [input-size.])
-  ({[.input-size] (const.u64.0x0000000000000002)} stdlib.models.memory.u64.div [output-size.])
+  ({[.input-size] (const.u64.0x{{QUERY_PACKING}})} stdlib.models.memory.u64.div [output-size.])
   ({[.output-size]} stdlib.models.memory.alloc-bf16 [out.])
   ({[.qg] [.key] [.value] [.start] [.cache] [.qw] [.kw] [.key-target] [.value-target] [.out]} stdlib.qwen35.batch.full-prepare-launch [prepared.])
   ([.prepared] meta.master.complete-own [query-ready phase.])

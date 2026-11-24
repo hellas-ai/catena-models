@@ -11,6 +11,7 @@ pub(crate) mod fused;
 #[path = "qwen35.rs"]
 mod qwen35;
 mod simt;
+mod wmma_prefill;
 
 const SOURCES: &[&str] = &[
     include_str!("../catena/memory.hex"),
@@ -35,13 +36,6 @@ pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Resul
     }
     if options.wmma_prefill {
         ensure!(
-            matches!(
-                config.architecture,
-                ModelArchitecture::Qwen35Dense | ModelArchitecture::Qwen35Moe
-            ),
-            "WMMA prefill requires dense or MoE Qwen3.5"
-        );
-        ensure!(
             config.hidden_size.is_multiple_of(16),
             "WMMA prefill requires a hidden size divisible by 16"
         );
@@ -49,6 +43,12 @@ pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Resul
             config.intermediate_size.is_multiple_of(16),
             "WMMA projections require intermediate widths divisible by 16"
         );
+        if config.architecture == ModelArchitecture::Qwen3Dense {
+            ensure!(
+                config.head_dim.is_multiple_of(16) && config.head_dim <= 256,
+                "Qwen3 WMMA attention requires a head dimension divisible by 16 and at most 256"
+            );
+        }
         if config.architecture == ModelArchitecture::Qwen35Moe {
             ensure!(
                 config.num_experts <= 256,
@@ -287,6 +287,9 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     let mut s = graph_source(config, options)?;
     if config.architecture == ModelArchitecture::Qwen3Dense {
         s = simt::specialize(s, options.kernels);
+        if options.wmma_prefill {
+            wmma_prefill::append(&mut s, config, options.kernels);
+        }
     }
     crate::session_graph::append(&mut s, config, options);
     Ok(s)
@@ -510,13 +513,25 @@ pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> R
         "initial",
     );
     s.push_str("  ({[.cache] [.initial]} *.intro [state.])\n");
-    call(
-        &mut s,
-        &["tokens", "w0", "weights", "capacity", "start"],
-        "partial.stdlib.qwen3.token-step.fold.5",
-        "callback",
-    );
-    s.push_str("  ({([.sequence] stdlib.models.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])\n  ({[.end] [.state] [.callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.final-state] *.elim [cache-final hidden-final.])\n");
+    if options.wmma_prefill {
+        call(
+            &mut s,
+            &[
+                "tokens", "w0", "weights", "capacity", "start", "sequence", "state",
+            ],
+            "stdlib.qwen3.prefill.dispatch",
+            "final-state",
+        );
+    } else {
+        call(
+            &mut s,
+            &["tokens", "w0", "weights", "capacity", "start"],
+            "partial.stdlib.qwen3.token-step.fold.5",
+            "callback",
+        );
+        s.push_str("  ({([.sequence] stdlib.models.memory.fold-count-u32) (unit.intro meta.master.end32)} smolcat.value.named_at [end.])\n  ({[.end] [.state] [.callback] core.truth} core.fold.bounded [final-state proof.])\n  ([.proof] unsafe.discard unit.elim)\n");
+    }
+    s.push_str("  ([.final-state] *.elim [cache-final hidden-final.])\n");
     let norm = &names[names.len() - 2];
     let head = &names[names.len() - 1];
     let columns = c(config.hidden_size);
@@ -633,7 +648,6 @@ mod tests {
         assert!(!original.contains("stdlib.qwen35.batch.wmma-project"));
         assert!(!original.contains("bf16x2.dot-f32"));
         assert!(validate(&ModelConfig::qwen35_0_8b(), enabled).is_ok());
-        assert!(validate(&ModelConfig::qwen3_0_6b(), enabled).is_err());
         let mut too_many_experts = config.clone();
         too_many_experts.num_experts = 512;
         assert!(validate(&too_many_experts, enabled).is_err());

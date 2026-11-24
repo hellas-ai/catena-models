@@ -102,6 +102,15 @@ impl Weights {
         })
     }
     pub fn validate(&self, name: &str, shape: &[usize]) -> Result<()> {
+        let t = self.validate_shape(name, shape)?;
+        ensure!(
+            matches!(t.dtype, Dtype::BF16 | Dtype::F16 | Dtype::F32),
+            "{name}: unsupported dtype {:?}",
+            t.dtype
+        );
+        Ok(())
+    }
+    pub(crate) fn validate_shape(&self, name: &str, shape: &[usize]) -> Result<&TensorInfo> {
         let t = self
             .tensors
             .get(name)
@@ -111,12 +120,14 @@ impl Weights {
             "{name}: expected shape {shape:?}, got {:?}",
             t.shape
         );
-        ensure!(
-            matches!(t.dtype, Dtype::BF16 | Dtype::F32),
-            "{name}: unsupported dtype {:?}",
-            t.dtype
-        );
-        Ok(())
+        Ok(t)
+    }
+    pub(crate) fn raw_bytes(&self, name: &str) -> Result<&[u8]> {
+        let t = self
+            .tensors
+            .get(name)
+            .with_context(|| format!("missing tensor {name}"))?;
+        Ok(&self.shards[t.file].bytes[t.offset..t.offset + t.len])
     }
     pub fn host_f32(&self, name: &str) -> Result<Vec<f32>> {
         let t = self
@@ -129,12 +140,30 @@ impl Weights {
                 .chunks_exact(2)
                 .map(|b| f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16))
                 .collect()),
+            Dtype::F16 => Ok(bytes
+                .chunks_exact(2)
+                .map(|b| f16_to_f32(u16::from_le_bytes([b[0], b[1]])))
+                .collect()),
             Dtype::F32 => Ok(bytes
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
                 .collect()),
             d => bail!("cannot convert {name} from {d:?}"),
         }
+    }
+    pub(crate) fn host_bf16(&self, name: &str) -> Result<Vec<u16>> {
+        let t = self
+            .tensors
+            .get(name)
+            .with_context(|| format!("missing tensor {name}"))?;
+        if t.dtype != Dtype::BF16 {
+            return Ok(bf16(&self.host_f32(name)?));
+        }
+        let bytes = &self.shards[t.file].bytes[t.offset..t.offset + t.len];
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect())
     }
     pub fn prepare(
         &mut self,
@@ -144,37 +173,7 @@ impl Weights {
     ) -> Result<()> {
         let start = std::time::Instant::now();
         for name in names {
-            let t = self
-                .tensors
-                .get(name)
-                .with_context(|| format!("missing tensor {name}"))?;
-            if f32_storage {
-                self.converted
-                    .insert(name.clone(), runtime.mem_f32(&self.host_f32(name)?)?);
-            } else {
-                if t.dtype == Dtype::F32 {
-                    self.converted
-                        .insert(name.clone(), runtime.mem_u16(&bf16(&self.host_f32(name)?))?);
-                    continue;
-                }
-                ensure!(t.dtype == Dtype::BF16, "{name}: expected BF16 or F32");
-                // CUDA weights live in device memory. HIP can map aligned BF16
-                // tensors directly; unaligned tensors need an owned upload.
-                if runtime.dialect() == GpuDialect::Cuda || t.offset % 2 != 0 {
-                    let bytes = &self.shards[t.file].bytes[t.offset..t.offset + t.len];
-                    let values: Vec<_> = bytes
-                        .chunks_exact(2)
-                        .map(|b| u16::from_le_bytes([b[0], b[1]]))
-                        .collect();
-                    self.converted
-                        .insert(name.clone(), runtime.mem_u16(&values)?);
-                } else if self.shards[t.file].registration.is_none() {
-                    self.shards[t.file].registration = Some(GpuRegistration::new(
-                        &self.shards[t.file].bytes,
-                        runtime.dialect(),
-                    )?);
-                }
-            }
+            self.prepare_tensor(runtime, name, f32_storage)?;
         }
         startup_timing(
             if f32_storage {
@@ -184,6 +183,34 @@ impl Weights {
             },
             start,
         );
+        Ok(())
+    }
+    pub(crate) fn prepare_tensor(
+        &mut self,
+        runtime: &Runtime,
+        name: &str,
+        f32_storage: bool,
+    ) -> Result<()> {
+        let t = self
+            .tensors
+            .get(name)
+            .with_context(|| format!("missing tensor {name}"))?;
+        if f32_storage {
+            self.converted
+                .insert(name.to_owned(), runtime.mem_f32(&self.host_f32(name)?)?);
+        // CUDA weights live in device memory. HIP can map aligned BF16 tensors.
+        } else if t.dtype != Dtype::BF16
+            || runtime.dialect() == GpuDialect::Cuda
+            || t.offset % 2 != 0
+        {
+            self.converted
+                .insert(name.to_owned(), runtime.mem_u16(&self.host_bf16(name)?)?);
+        } else if self.shards[t.file].registration.is_none() {
+            self.shards[t.file].registration = Some(GpuRegistration::new(
+                &self.shards[t.file].bytes,
+                runtime.dialect(),
+            )?);
+        }
         Ok(())
     }
     pub(crate) fn insert_prepared(&mut self, name: &str, mem: MemOwn) -> Result<()> {

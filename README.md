@@ -6,8 +6,12 @@ All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
 shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
-their normal meanings. Text tokenizers and model dimensions come from GGUF.
-BF16/F32 checkpoint weights retain their native storage.
+their normal meanings. The text loader prefers GGUF and supports dense Qwen3
+and Qwen3.5 safetensors when the repository has no model GGUF. Safetensors
+checkpoints can be a single file or an indexed set of shards. LLM image inputs
+require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
+their native storage.
+Dense Qwen3 dynamic FP8 safetensors are dequantized to BF16 at load time.
 
 ## GPU selection
 
@@ -27,6 +31,9 @@ If `--model` is omitted, CLI and server modes use
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3.5-0.8B --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3-0.6B --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3-0.6B-FP8 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
@@ -37,16 +44,17 @@ Responses APIs, including streaming, reasoning output, and client-executed tools
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000
+cargo run -r -- --model unsloth/Qwen3-0.6B --serve --ctx-size 4096
 ```
 
 See [serving and coding-client setup](SERVING.md) for remote binding,
 authentication, request limits, tool calls, protocol logging with
 `RUST_LOG=catena_models::server::protocol=debug`, and the supported API subset.
 
-WMMA prefill is enabled by default in both the Qwen CLI and server for the
-Qwen3.5/3.6 path. `--wmma-prefill` remains accepted; use `--no-wmma-prefill` to
-select SIMT explicitly. Qwen3 models require `--no-wmma-prefill` because their
-prefill implementation does not support this WMMA path.
+The Qwen CLI and server enable matrix-core prefill by default for Qwen3 dense
+and Qwen3.5/3.6. Use `--no-wmma-prefill` to select SIMT explicitly. Qwen3 uses
+matrix cores for batched projections and causal attention, and retains its
+single-token decode kernels.
 
 On RDNA3 HIP and NVIDIA sm_80+ CUDA GPUs, prefill uses tiled attention and BF16
 matrix-core projections. CUDA uses native `mma.sync` instructions; HIP uses WMMA.
