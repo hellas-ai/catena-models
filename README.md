@@ -31,7 +31,7 @@ If `--model` is omitted, CLI and server modes use
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-2B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B --prompt 'Gravity is'
-cargo run -r -- --model unsloth/Qwen3-0.6B --no-wmma-prefill --prompt 'Gravity is'
+cargo run -r -- --model unsloth/Qwen3-0.6B --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
@@ -42,17 +42,17 @@ Responses APIs, including streaming, reasoning output, and client-executed tools
 
 ```bash
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 --serve --port 8000
-cargo run -r -- --model unsloth/Qwen3-0.6B --no-wmma-prefill --serve --ctx-size 4096
+cargo run -r -- --model unsloth/Qwen3-0.6B --serve --ctx-size 4096
 ```
 
 See [serving and coding-client setup](SERVING.md) for remote binding,
 authentication, request limits, tool calls, protocol logging with
 `RUST_LOG=catena_models::server::protocol=debug`, and the supported API subset.
 
-WMMA prefill is enabled by default in both the Qwen CLI and server for the
-Qwen3.5/3.6 path. `--wmma-prefill` remains accepted; use `--no-wmma-prefill` to
-select SIMT explicitly. Qwen3 models require `--no-wmma-prefill` because their
-prefill implementation does not support this WMMA path.
+The Qwen CLI and server enable matrix-core prefill by default for Qwen3 dense
+and Qwen3.5/3.6. Use `--no-wmma-prefill` to select SIMT explicitly. Qwen3 uses
+matrix cores for batched projections and causal attention, and retains its
+single-token decode kernels.
 
 On RDNA3 HIP and NVIDIA sm_80+ CUDA GPUs, prefill uses tiled attention and BF16
 matrix-core projections. CUDA uses native `mma.sync` instructions; HIP uses WMMA.

@@ -665,6 +665,7 @@ fn source_with_scope(
         ("CONV_HEADS", qkv_size.div_ceil(key_dim)),
         ("QUERY_SIZE", config.query_size()),
         ("DOUBLE_QUERY_SIZE", config.query_size() * 2),
+        ("QUERY_PACKING", 2),
         ("HIDDEN_PAIRS", config.hidden_size / 2),
         ("KEY_VALUE_SIZE", config.key_value_size()),
         ("QUERY_HEADS", config.num_attention_heads),

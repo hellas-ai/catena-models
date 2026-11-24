@@ -33,7 +33,7 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
 
-    /// Use SIMT prefill instead of WMMA (also needed for Qwen3 models).
+    /// Use SIMT prefill instead of WMMA.
     #[arg(long, conflicts_with = "wmma_prefill")]
     no_wmma_prefill: bool,
 
