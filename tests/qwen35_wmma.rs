@@ -11,14 +11,11 @@ fn compile_projection() -> anyhow::Result<RuntimeModule> {
 }
 fn compile_projection_for(dialect: GpuDialect) -> anyhow::Result<RuntimeModule> {
     let entry = r#"(def program wmma-project : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
-      ([input weight features outputs.] {[.input] [.weight] [.features] [.outputs]} stdlib.qwen35.batch.wmma-project))
-(def program wmma-gate : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ((cap.ref mem) val)} -> ((cap.own mem) val) =
- ([input gate features outputs up.] {[.input] [.gate] [.features] [.outputs] [.up]} stdlib.qwen35.wmma.projection.gate))"#;
+      ([input weight features outputs.] {[.input] [.weight] [.features] [.outputs]} stdlib.qwen35.batch.wmma-project))"#;
     let sources = core_sources().chain([
         include_str!("../src/catena/memory.hex"),
         include_str!("../src/catena/numeric.hex"),
         include_str!("../src/catena/resources.hex"),
-        include_str!("../src/catena/qwen35_wmma_epilogues.hex"),
         include_str!("../src/catena/cooperative.hex"),
         include_str!("../src/catena/qwen35_batch_projection.hex"),
         include_str!("../src/catena/qwen35_batch_wmma.hex"),
@@ -167,59 +164,6 @@ fn deltanet_input_projections_match_emulation_bits() -> anyhow::Result<()> {
                     results[1],
                     "{} {name}: rows={rows} inner={inner} cols={cols}",
                     config.model_name.as_deref().unwrap()
-                );
-            }
-        }
-    }
-    Ok(())
-}
-
-#[test]
-#[ignore = "requires a supported HIP or CUDA GPU"]
-fn dense_gate_matches_bf16_boundaries() -> anyhow::Result<()> {
-    let mut runtime = Runtime::new(tiles::dialect())?;
-    let artifact = runtime.load(compile_projection()?)?;
-    for (rows, inner, cols) in [(1, 16, 1), (17, 48, 19), (65, 64, 67)] {
-        let make = |n: usize, salt: usize| -> Vec<u16> {
-            (0..n)
-                .map(|i| f32_to_bf16(((i * 7 + salt) % 31) as f32 / 31. - 0.5))
-                .collect()
-        };
-        let x = make(rows * inner, 0);
-        let gate = make(cols * inner, 3);
-        let up = make(cols * inner, 11);
-        let a = runtime.mem_u16(&x)?;
-        let g = runtime.mem_u16(&gate)?;
-        let u = runtime.mem_u16(&up)?;
-        let [Value::MemOwn(result)] = artifact.exec(
-            "wmma-gate",
-            [
-                a.into(),
-                g.as_ref().into(),
-                (inner as u64).into(),
-                (cols as u64).into(),
-                u.as_ref().into(),
-            ],
-        )?
-        else {
-            anyhow::bail!("expected gate output")
-        };
-        let result = result.try_to_u16_vec()?;
-        for row in 0..rows {
-            for col in 0..cols {
-                let dot = |w: &[u16]| {
-                    let sum = (0..inner)
-                        .map(|k| bf16_to_f32(x[row * inner + k]) * bf16_to_f32(w[col * inner + k]))
-                        .sum::<f32>();
-                    bf16_to_f32(f32_to_bf16(sum))
-                };
-                let g = dot(&gate);
-                let active = bf16_to_f32(f32_to_bf16(g / (1. + (-g).exp())));
-                let want = bf16_to_f32(f32_to_bf16(active * dot(&up)));
-                let got = bf16_to_f32(result[row * cols + col]);
-                assert!(
-                    (got - want).abs() <= 0.01 * want.abs().max(0.1),
-                    "gate [{row},{col}]: {got} vs {want}"
                 );
             }
         }

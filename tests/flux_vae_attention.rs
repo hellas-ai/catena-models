@@ -8,7 +8,6 @@ use catena_models::{
     catena::{compile_sources, core_sources},
     weights::{bf16_to_f32, f32_to_bf16},
 };
-use std::time::Instant;
 fn source() -> String {
     catena_models::flux::graph::bundle(&[
         include_str!("../src/catena/flux_vae_wmma_linear.hex"),
@@ -16,8 +15,6 @@ fn source() -> String {
         r#"
 (def program test-attention : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
  ([q k v rows keys.] {[.q] [.k] [.v] [.rows] [.keys] (const.u64.0x0000000000000001) (const.u64.0x0000000000000001) (const.u64.0x0000000000000200) (const.u32.0x3D3504F3 u32.bitcast-f32) (const.u64.0x0000000000000000) [.keys]} flux.vae-attention-f32-ooo))
-(def program old-attention : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
- ([q k v rows keys.] {[.q] [.k] [.v] [.rows] [.keys] (const.u64.0x0000000000000001) (const.u64.0x0000000000000001) (const.u64.0x0000000000000200) (const.u32.0x3D3504F3 u32.bitcast-f32) (const.u64.0x0000000000000000) [.keys]} flux.attention-f32-ooo))
 (def program test-linear : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val)} -> ((cap.own mem) val) =
  ([x w b rows.] {[.x] [.w] [.b] [.rows] (const.u64.0x0000000000000200) (const.u64.0x0000000000000200)} flux.vae-linear-f32-orr))
 "#,
@@ -37,7 +34,7 @@ fn vae_attention_compiles() -> Result<()> {
     Ok(())
 }
 #[test]
-#[ignore = "requires a supported HIP/CUDA GPU; optional isolated larger-shape timings"]
+#[ignore = "requires a supported HIP/CUDA GPU"]
 fn attention_and_projection() -> Result<()> {
     let s = source();
     let mut rt = Runtime::new(tiles::dialect())?;
@@ -121,33 +118,6 @@ fn attention_and_projection() -> Result<()> {
                 "projection [{r},{c}]: {} vs {want}",
                 out[r * d + c]
             );
-        }
-    }
-    if std::env::var_os("FLUX_VAE_BENCH").is_some() {
-        for rows in [1024, 4096, 16384] {
-            let q = make(rows * d, 3);
-            let k = make(rows * d, 7);
-            let v = make(rows * d, 11);
-            for name in ["old-attention", "test-attention"] {
-                let a = rt.mem_f32(&q)?;
-                let b = rt.mem_f32(&k)?;
-                let c = rt.mem_f32(&v)?;
-                let start = Instant::now();
-                let _: [Value; 1] = m.exec(
-                    name,
-                    [
-                        a.into(),
-                        b.into(),
-                        c.into(),
-                        (rows as u64).into(),
-                        (rows as u64).into(),
-                    ],
-                )?;
-                eprintln!(
-                    "VAE {name} tokens={rows}: {:.6}s",
-                    start.elapsed().as_secs_f64()
-                );
-            }
         }
     }
     Ok(())

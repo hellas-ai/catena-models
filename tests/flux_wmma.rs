@@ -83,9 +83,9 @@ fn linear_matches_cpu() -> anyhow::Result<()> {
 }
 
 fn attention_source() -> String {
-    let entry = r#"(def program test-attention : {((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
+    let entry = r#"(def program test-attention : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
       ([q k v rows keys heads kvheads causal valid.]
-       {[.q] [.k] [.v] [.rows] [.keys] [.heads] [.kvheads] (const.u64.0x0000000000000080) (const.u32.0x3DB504F3 u32.bitcast-f32) [.causal] [.valid]} flux.wmma-fused-attention-bf16))"#;
+       {[.q] [.k] [.v] [.rows] [.keys] [.heads] [.kvheads] (const.u64.0x0000000000000080) (const.u32.0x3DB504F3 u32.bitcast-f32) [.causal] [.valid]} flux.wmma-fused-attention-bf16-ooo))"#;
     catena_models::flux::graph::bundle(
         &[include_str!("../src/catena/flux_wmma_attention.hex"), entry].join("\n"),
     )
@@ -147,9 +147,9 @@ fn attention_matches_cpu() -> anyhow::Result<()> {
         let [Value::MemOwn(out)] = module.exec(
             "test-attention",
             [
-                a.as_ref().into(),
-                b.as_ref().into(),
-                c.as_ref().into(),
+                a.into(),
+                b.into(),
+                c.into(),
                 (rows as u64).into(),
                 (keys as u64).into(),
                 (heads as u64).into(),

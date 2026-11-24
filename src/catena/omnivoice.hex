@@ -58,18 +58,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.fill-codes.into : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.out] [.work] [.grid]} partial.stdlib.omnivoice.fill-codes.host.3 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program stdlib.omnivoice.identity-gate.element : {((cap.own mem) val) (u64 val)} -> 1 =
  ([out element.]
   ({(const.u32.0x42A00000 u32.bitcast-f32)} f32.to-bf16 [v0.])
@@ -129,17 +117,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.identity-gate.into : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.out] [.work] [.grid]} partial.stdlib.omnivoice.identity-gate.host.3 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 (def program stdlib.omnivoice.embedding-sum : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ({({master.index32 u32} :) ({(f32 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
  ([codes audio-embedding frame channel pair.]
   ([.pair] *.elim [index rest.])
@@ -235,18 +212,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.embed.into : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([codes text text-embedding audio-embedding prefix out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.codes] [.text] [.text-embedding] [.audio-embedding] [.prefix] [.out] [.work] [.grid]} partial.stdlib.omnivoice.embed.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program stdlib.omnivoice.rope-table.element : {((cap.own mem) val) (u64 val)} -> 1 =
  ([out element.]
   ({[.element] (const.u64.0x0000000000000040)} stdlib.models.memory.u64.rem [v0.])
@@ -305,18 +270,6 @@
 (def program stdlib.omnivoice.rope-table.run : {(u64 val) (u64 val)} -> ((cap.own mem) val) =
  ([work elements.]
  ([.elements] stdlib.models.memory.alloc-f32 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.out] [.work] [.grid]} partial.stdlib.omnivoice.rope-table.host.3 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program stdlib.omnivoice.rope-table.into : {((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([out work.]
  ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
  ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
  ({[.blocks]} stdlib.models.memory.grid [grid.])
@@ -407,17 +360,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.rotate.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input rope width out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input] [.rope] [.width] [.out] [.work] [.grid]} partial.stdlib.omnivoice.rotate.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 (def program stdlib.omnivoice.best-class : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ({({master.index32 u32} :) ({({(f32 val) (u64 val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({({(f32 val) (u64 val)} *) (prop.Truth |-)} *) =
  ([conditional unconditional base pair.]
   ([.pair] *.elim [index rest.])
@@ -590,17 +532,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.predict.into : {((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([conditional unconditional codes seed iteration out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.conditional] [.unconditional] [.codes] [.seed] [.iteration] [.out] [.work] [.grid]} partial.stdlib.omnivoice.predict.host.8 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 (def program stdlib.omnivoice.rank : {((cap.own mem) val) (f32 val) (u64 val) ({({master.index32 u32} :) ({(u64 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(u64 val) (prop.Truth |-)} *) =
  ([predictions score slot pair.]
   ([.pair] *.elim [index rest.])
@@ -694,17 +625,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.select-codes.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([codes predictions slots count out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.codes] [.predictions] [.slots] [.count] [.out] [.work] [.grid]} partial.stdlib.omnivoice.select-codes.host.7 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 (def program stdlib.omnivoice.quantizer-dot : {((cap.ref mem) val) ((cap.ref mem) val) (u64 val) (u64 val) ({({master.index32 u32} :) ({(f32 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
  ([embeddings weights embed-base weight-base pair.]
   ([.pair] *.elim [index rest.])
@@ -810,18 +730,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.quantizer.into : {((cap.own mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.ref mem) val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([codes embeddings weights biases out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.codes] [.embeddings] [.weights] [.biases] [.out] [.work] [.grid]} partial.stdlib.omnivoice.quantizer.host.7 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
 (def program stdlib.omnivoice.snake.element : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> 1 =
  ([input alpha channels out element.]
   ({[.input] [.element]} stdlib.models.memory.own-read-bf16 [v0.])
@@ -894,17 +802,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.snake.into : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input alpha channels out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input] [.alpha] [.channels] [.out] [.work] [.grid]} partial.stdlib.omnivoice.snake.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 (def program stdlib.omnivoice.peak-fold : {((cap.own mem) val) ({({master.index32 u32} :) ({(f32 val) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)} -> ({(f32 val) (prop.Truth |-)} *) =
  ([input pair.]
   ([.pair] *.elim [index rest.])
@@ -974,18 +871,6 @@
 (def program stdlib.omnivoice.peak.run : {((cap.own mem) val) (u64 val) (u64 val) (u64 val)} -> ((cap.own mem) val) =
  ([input samples work elements.]
  ([.elements] stdlib.models.memory.alloc-f32 [out.])
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input] [.samples] [.out] [.work] [.grid]} partial.stdlib.omnivoice.peak.host.5 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
-
-(def program stdlib.omnivoice.peak.into : {((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input samples out work.]
  ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
  ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
  ({[.blocks]} stdlib.models.memory.grid [grid.])
@@ -1082,17 +967,6 @@
  [.result]
  ))
 
-(def program stdlib.omnivoice.waveform.into : {((cap.own mem) val) ((cap.own mem) val) (u64 val) ((cap.own mem) val) (u64 val)} -> ((cap.own mem) val) =
- ([input peak samples out work.]
- ({[.work] (const.u64.0x00000000000000FF)} stdlib.models.memory.u64.add [padded.])
- ({[.padded] (const.u64.0x0000000000000100)} stdlib.models.memory.u64.div [blocks.])
- ({[.blocks]} stdlib.models.memory.grid [grid.])
- ({[.input] [.peak] [.samples] [.out] [.work] [.grid]} partial.stdlib.omnivoice.waveform.host.6 [host.])
- ({(const.u64.0x0000000000000001) (unit.intro meta.master.end)} smolcat.value.named_at [end.])
- ({[.end] [.out] [.host] core.truth} core.fold.bounded_u64 [result proof.])
- ([.proof] unsafe.discard unit.elim)
- [.result]
- ))
 # Build the F32 linspace from both endpoints, then apply the 0.1 time shift.
 # Q32 preserves the shifted grid used for the integer unmasking counts.
 (def program stdlib.omnivoice.timestep : {(u64 val) (u64 val)} -> (u64 val) =
