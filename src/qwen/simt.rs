@@ -24,8 +24,7 @@ pub(super) fn specialize(mut source: String, kernels: KernelKind) -> String {
         super::fused::append_hex(&mut source, include_str!("../catena/cooperative.hex"));
     }
     source.push_str(include_str!("../catena/bf16_simt.hex"));
-    let old = definition(&source, "qwen3.project").to_owned();
-    source = source.replace(&old, "(def program qwen3.project : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =\n ([input weight features outputs.]\n ({[.input] [.weight] (const.u64.0x0000000000000001) [.features] [.outputs]} stdlib.models.simt.or)\n ))");
+    source.push_str("\n(def program qwen3.project : {((cap.own mem) val) ((cap.ref mem) val) (u64 val) (u64 val)} -> ((cap.own mem) val) =\n ([input weight features outputs.]\n ({[.input] [.weight] (const.u64.0x0000000000000001) [.features] [.outputs]} stdlib.models.simt.or)\n ))\n");
     // Cache addressing and BF16 score rounding stay in the existing graph.
     // Split the sequential pair accumulator into independent low/high sums.
     let pair_type = "({(f32 val) (f32 val)} *)";

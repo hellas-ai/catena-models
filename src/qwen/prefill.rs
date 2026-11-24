@@ -221,8 +221,6 @@ pub(super) fn emit(
             ],
             if dense_blocks {
                 "stdlib.qwen35.dense.projection.gate"
-            } else if wmma.projections {
-                "stdlib.qwen35.wmma.projection.gate"
             } else {
                 "stdlib.qwen35.batch.gate"
             },
@@ -393,8 +391,6 @@ pub(super) fn emit(
             ],
             if dense_blocks {
                 "stdlib.qwen35.dense.projection.gate"
-            } else if wmma.projections {
-                "stdlib.qwen35.wmma.projection.gate"
             } else {
                 "stdlib.qwen35.batch.gate"
             },

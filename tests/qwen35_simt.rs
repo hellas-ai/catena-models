@@ -231,12 +231,15 @@ fn grouped_router_and_expert_kernels_match_reference() -> anyhow::Result<()> {
         .map(|w| rt.mem_u16(w))
         .collect::<Result<Vec<_>, _>>()?;
     let result = module.exec_values(
-        "qwen35.full-projections",
+        "qwen35.full-projections-reuse",
         vec![
             rt.mem_u16(&x[..256])?.into(),
             buffers[0].as_ref().into(),
             buffers[1].as_ref().into(),
             buffers[2].as_ref().into(),
+            rt.mem_u16(&[0; 126])?.into(),
+            rt.mem_u16(&[0; 66])?.into(),
+            rt.mem_u16(&[0; 66])?.into(),
         ],
     )?;
     for (bank, value) in result.into_iter().enumerate() {

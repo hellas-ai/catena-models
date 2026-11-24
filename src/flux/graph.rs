@@ -1,11 +1,7 @@
 //! Complete FLUX programs. Rust here emits Hex before compilation; it never executes layers.
 use super::config::{TransformerConfig, VaeConfig};
 use anyhow::{Result, ensure};
-use std::{
-    cell::RefCell,
-    collections::{BTreeMap, BTreeSet},
-    path::Path,
-};
+use std::{cell::RefCell, collections::BTreeMap, path::Path};
 macro_rules! discard_log {
     ($($a:tt)*) => {};
 }
@@ -768,69 +764,6 @@ pub struct Program {
     pub weights: Vec<String>,
     pub captures: Vec<(String, Vec<usize>, bool)>,
 }
-fn owned_network(source: &str, activation_inputs: usize) -> String {
-    let mut owned = BTreeSet::new();
-    let mut lines = source.lines();
-    let comment = lines.next().unwrap();
-    let header = lines.next().unwrap();
-    let mut header = header.replacen(" :", "-owned :", 1);
-    for _ in 0..activation_inputs {
-        header = header.replacen("((cap.ref mem) val)", "((cap.own mem) val)", 1);
-    }
-    let params = lines.next().unwrap();
-    let names = params
-        .trim()
-        .strip_prefix("= ([")
-        .unwrap()
-        .trim_end_matches("]")
-        .trim_end_matches('.')
-        .split_whitespace()
-        .collect::<Vec<_>>();
-    owned.extend(names.iter().take(activation_inputs).map(|n| n.to_string()));
-    let mut result = format!("{comment}\n{header}\n{params}\n");
-    for line in lines {
-        let mut line = line.to_string();
-        if let Some(at) = line.find("} flux.") {
-            let start = at + 2;
-            let end = start + line[start..].find(' ').unwrap();
-            let original = &line[start + 5..end];
-            let base = original
-                .rsplit_once('-')
-                .filter(|(_, mode)| mode.chars().all(|c| c == 'o' || c == 'r'))
-                .map_or(original, |(base, _)| base);
-            let count = buffers(base);
-            if count > 0 {
-                let mut rest = &line[..at];
-                let mut modes = String::new();
-                for _ in 0..count {
-                    let p = rest.find("[.").unwrap() + 2;
-                    rest = &rest[p..];
-                    let e = rest.find(']').unwrap();
-                    modes.push(if owned.contains(&rest[..e]) { 'o' } else { 'r' });
-                    rest = &rest[e + 1..];
-                }
-                let op = if modes.contains('o') {
-                    format!("flux.{base}-{modes}")
-                } else {
-                    format!("flux.{base}")
-                };
-                line.replace_range(start..end, &op);
-            }
-        }
-        // Every memory-producing call in these network blocks has one owned output.
-        if line.contains("} flux.") || line.contains("} stdlib.models.resources.free-") {
-            if let Some(start) = line.rfind(" [") {
-                let name = &line[start + 2..];
-                if let Some(end) = name.find('.') {
-                    owned.insert(name[..end].into());
-                }
-            }
-        }
-        result += &line;
-        result.push('\n');
-    }
-    result
-}
 fn finish(
     builder: Builder,
     name: &str,
@@ -1110,13 +1043,12 @@ pub fn transformer(
         include_str!("../catena/flux_transformer_single.hex"),
         config,
     );
-    let mut extra = format!("{dual}\n{single}");
+    let mut extra = String::new();
     if let Some(program) = velocity_program {
         extra += &program.source;
     }
-    for (src, n) in [(dual.as_str(), 5), (single.as_str(), 3)] {
-        extra += &owned_network(src, n);
-    }
+    extra += &dual;
+    extra += &single;
     let mut program = finish(
         b.into_inner(),
         "denoise",
@@ -1160,21 +1092,17 @@ pub fn vae(config: &VaeConfig, height: usize, width: usize, debug: bool) -> Resu
         ],
     )?;
     drop(model);
-    let mut extra = String::new();
-    for src in [
+    let extra = concat!(
         include_str!("../catena/flux_vae_resblock.hex"),
         include_str!("../catena/flux_vae_resblock_shortcut.hex"),
         include_str!("../catena/flux_vae_attention.hex"),
-    ] {
-        extra += src;
-        extra += &owned_network(src, 1);
-    }
+    );
     let mut program = finish(
         b.into_inner(),
         "decode-image",
         &[("latents".into(), "((cap.ref mem) val)")],
         image,
-        &extra,
+        extra,
     );
     program.source = program
         .source
