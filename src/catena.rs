@@ -9,12 +9,24 @@ pub enum KernelKind {
     #[default]
     Fused,
 }
+/// Arithmetic for Qwen3's per-layer prefill projections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
+pub enum PrefillDtype {
+    #[default]
+    Bf16,
+    Fp8,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InferenceOptions {
     pub kernels: KernelKind,
     pub wmma_prefill: bool,
+    pub prefill_dtype: PrefillDtype,
 }
 impl InferenceOptions {
+    pub const fn with_prefill_dtype(mut self, dtype: PrefillDtype) -> Self {
+        self.prefill_dtype = dtype;
+        self
+    }
     pub const fn with_kernels(mut self, kernels: KernelKind) -> Self {
         self.kernels = kernels;
         self
@@ -111,6 +123,10 @@ pub fn generated_model_source_for_options(
     options: InferenceOptions,
 ) -> Result<String> {
     if config.architecture == crate::spec::ModelArchitecture::Lfm3 {
+        anyhow::ensure!(
+            options.prefill_dtype == PrefillDtype::Bf16,
+            "FP8 prefill requires dense Qwen3"
+        );
         crate::lfm3::source(config, options)
     } else {
         crate::qwen::source(config, options)

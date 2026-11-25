@@ -2,12 +2,12 @@
 use super::*;
 use crate::catena::definitions;
 
-pub(super) fn append(source: &mut String, config: &ModelConfig, kind: KernelKind) {
+pub(super) fn append(source: &mut String, config: &ModelConfig, options: InferenceOptions) {
     let mut kernels = definitions(
         include_str!("../catena/qwen35.hex"),
         &["stdlib.qwen35.norm.", "qwen35.normalize:"],
     );
-    if kind == KernelKind::Reference {
+    if options.kernels == KernelKind::Reference {
         kernels.push_str(&definitions(
             include_str!("../catena/fused_normalization.hex"),
             &["stdlib.qwen3.fused.norm.write"],
@@ -44,7 +44,13 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, kind: KernelKind
     kernels.push_str(include_str!("../catena/qwen35_batch_full_prepare.hex"));
     kernels.push_str(include_str!("../catena/qwen35_prefill.hex"));
     kernels.push_str(&ungated_attention());
-    kernels.push_str(include_str!("../catena/qwen3_prefill.hex"));
+    let fp8 = options.prefill_dtype == crate::catena::PrefillDtype::Fp8;
+    let prefill = if fp8 {
+        super::fp8_prefill::graph()
+    } else {
+        include_str!("../catena/qwen3_prefill.hex").to_owned()
+    };
+    kernels.push_str(&prefill);
 
     let width = config.hidden_size;
     let head = config.head_dim;
@@ -92,7 +98,7 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, kind: KernelKind
             &format!("{:08X}", value.to_bits()),
         );
     }
-    let layer = nested_product(&vec![REF.to_owned(); 11]);
+    let layer = nested_product(&vec![REF.to_owned(); if fp8 { 25 } else { 11 }]);
     let weights = nested_product(&vec![layer; config.num_layers]);
     for (key, value) in [
         ("WEIGHTS", weights),
@@ -101,6 +107,9 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, kind: KernelKind
         kernels = kernels.replace(&format!("{{{{{key}}}}}"), &value);
     }
     source.push_str(&kernels);
+    if fp8 {
+        super::fp8_prefill::append(source);
+    }
 }
 
 fn ungated_attention() -> String {

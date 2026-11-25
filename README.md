@@ -12,8 +12,10 @@ when the repository has no model GGUF. Safetensors
 checkpoints can be a single file or an indexed set of shards. LLM image inputs
 require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
-Dynamic FP8 safetensors for dense Qwen3 and Qwen3.5 MoE are dequantized to
-BF16 at load time.
+Dense Qwen3 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
+`--prefill-dtype fp8` additionally retains native E4M3 weights and block scales
+for prefill projections. Decode keeps its BF16 weights.
+Dynamic FP8 Qwen3.5 MoE weights are dequantized to BF16 at load time.
 
 ## GPU selection
 
@@ -54,6 +56,25 @@ cargo run -r -- --model unsloth/Qwen3-0.6B --serve --ctx-size 4096
 See [serving and coding-client setup](SERVING.md) for remote binding,
 authentication, request limits, tool calls, protocol logging with
 `RUST_LOG=catena_models::server::protocol=debug`, and the supported API subset.
+
+Select FP8 prefill explicitly on supported NVIDIA hardware:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model unsloth/Qwen3-0.6B-FP8 --prefill-dtype fp8 --prompt 'Gravity is'
+```
+
+`--prefill-dtype bf16` selects the existing kernels and is the default. FP8
+supports dense Qwen3 safetensors with dynamic activation quantization, E4M3
+weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
+`quant_type: "float"` is accepted. Projection widths must be divisible by 128.
+The option assumes a suitable CUDA toolkit and SM89+ hardware; it does not query
+hardware capabilities. FP8 modules compile for SM89 with forward-compatible PTX.
+Attention, KV storage, normalization, the vocabulary projection, and single-token
+calls retain their existing arithmetic. Mixed checkpoints retain BF16 execution
+for unquantized projection matrices. FP8 cannot be combined with
+`--no-wmma-prefill`, GGUF, HIP, or Qwen3.5/MoE. The extra native weights increase
+GPU memory usage; this first version retains both formats.
 
 The Qwen CLI and server enable matrix-core prefill by default for Qwen3 dense
 and Qwen3.5/3.6. Use `--no-wmma-prefill` to select SIMT explicitly. Qwen3 uses

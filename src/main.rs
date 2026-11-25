@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use catena_models::{
-    catena::{InferenceOptions, KernelKind, generated_model_source_for_options},
+    catena::{InferenceOptions, KernelKind, PrefillDtype, generated_model_source_for_options},
     hfhub::{HubCheckpoint, download_mmproj, download_model},
     model::Model,
     vision::{PreparedMultimodalPrompt, VisionModel},
@@ -32,6 +32,10 @@ struct Args {
     /// Use native matrix-core prefill on HIP or CUDA (enabled by default).
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
+
+    /// Qwen3 prefill projection arithmetic; FP8 assumes CUDA SM89+ and an FP8 checkpoint.
+    #[arg(long, value_enum, default_value_t = PrefillDtype::Bf16)]
+    prefill_dtype: PrefillDtype,
 
     /// Use SIMT prefill instead of WMMA.
     #[arg(long, conflicts_with = "wmma_prefill")]
@@ -105,9 +109,14 @@ impl Args {
 }
 
 fn inference_options(args: &Args) -> Result<InferenceOptions> {
+    ensure!(
+        args.prefill_dtype != PrefillDtype::Fp8 || args.wmma_prefill_enabled(),
+        "FP8 prefill requires matrix-core prefill; remove --no-wmma-prefill"
+    );
     Ok(InferenceOptions::default()
         .with_kernels(args.kernels)
-        .with_wmma_prefill(args.wmma_prefill_enabled()))
+        .with_wmma_prefill(args.wmma_prefill_enabled())
+        .with_prefill_dtype(args.prefill_dtype))
 }
 
 fn main() -> Result<()> {
@@ -545,6 +554,33 @@ mod cli_tests {
             "custom"
         );
     }
+    #[test]
+    fn prefill_dtype_is_explicit_and_defaults_to_bf16() {
+        let default = Args::try_parse_from(["app", "--prompt", "hi"]).unwrap();
+        assert_eq!(
+            inference_options(&default).unwrap().prefill_dtype,
+            PrefillDtype::Bf16
+        );
+        for (name, dtype) in [("bf16", PrefillDtype::Bf16), ("fp8", PrefillDtype::Fp8)] {
+            let args =
+                Args::try_parse_from(["app", "--prompt", "hi", "--prefill-dtype", name]).unwrap();
+            assert_eq!(inference_options(&args).unwrap().prefill_dtype, dtype);
+        }
+        assert!(
+            Args::try_parse_from(["app", "--prompt", "hi", "--prefill-dtype", "fp16"]).is_err()
+        );
+        let incompatible = Args::try_parse_from([
+            "app",
+            "--prompt",
+            "hi",
+            "--prefill-dtype",
+            "fp8",
+            "--no-wmma-prefill",
+        ])
+        .unwrap();
+        assert!(inference_options(&incompatible).is_err());
+    }
+
     #[test]
     fn wmma_prefill_can_be_explicitly_enabled_or_disabled() {
         for mode in [vec!["--prompt", "hi"], vec!["--serve"]] {

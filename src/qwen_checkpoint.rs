@@ -251,6 +251,10 @@ fn fp8_block_size(
             && quantization["activation_scheme"] == "dynamic",
         "quantized Qwen safetensors require dynamic FP8 in Qwen3 dense or Qwen3.5 MoE"
     );
+    ensure!(
+        quantization["quant_type"].is_null() || quantization["quant_type"] == "float",
+        "FP8 quant_type must be float"
+    );
     let block: [usize; 2] = Deserialize::deserialize(&quantization["weight_block_size"])
         .context("FP8 weight_block_size must contain two positive integers")?;
     ensure!(
@@ -264,6 +268,8 @@ pub(crate) struct QwenWeights {
     weights: Weights,
     bindings: Vec<Binding>,
     moe: bool,
+    prefill: Vec<String>,
+    prefill_buffers: Vec<MemOwn>,
 }
 
 struct Binding {
@@ -546,7 +552,44 @@ impl QwenWeights {
             weights,
             bindings,
             moe: config.architecture == ModelArchitecture::Qwen35Moe,
+            prefill: Vec::new(),
+            prefill_buffers: Vec::new(),
         })
+    }
+
+    pub(crate) fn enable_fp8_prefill(&mut self, config: &ModelConfig) -> Result<()> {
+        let mut native_count = 0;
+        for layer in 0..config.num_layers {
+            for suffix in [
+                "self_attn.q_proj",
+                "self_attn.k_proj",
+                "self_attn.v_proj",
+                "self_attn.o_proj",
+                "mlp.gate_proj",
+                "mlp.up_proj",
+                "mlp.down_proj",
+            ] {
+                let name = format!("model.layers.{layer}.{suffix}.weight");
+                let binding = self
+                    .bindings
+                    .iter()
+                    .find(|b| b.name == name)
+                    .context("missing Qwen3 projection")?;
+                if let Some(fp8) = &binding.fp8 {
+                    ensure!(
+                        fp8.block == [128, 128],
+                        "FP8 prefill requires 128x128 weight blocks: {name}"
+                    );
+                    native_count += 1;
+                }
+                self.prefill.push(name);
+            }
+        }
+        ensure!(
+            native_count > 0,
+            "FP8 prefill requires an FP8 Qwen3 safetensors checkpoint"
+        );
+        Ok(())
     }
 
     pub(crate) fn prepare(&mut self, runtime: &Runtime) -> Result<usize> {
@@ -564,6 +607,26 @@ impl QwenWeights {
                 .prepare(runtime, &mut self.weights, map_tensors)
                 .with_context(|| format!("preparing {}", binding.name))?;
         }
+        for name in &self.prefill {
+            let binding = self.bindings.iter().find(|b| b.name == *name).unwrap();
+            if let Some(fp8) = &binding.fp8 {
+                let raw = self.weights.raw_bytes(name)?;
+                bytes += raw.len();
+                let mem = runtime.mem_u8(raw)?;
+                let scales = self.weights.host_f32(&fp8.scale)?;
+                ensure!(
+                    scales.iter().all(|s| s.is_finite() && *s >= 0.0),
+                    "invalid scales for {name}"
+                );
+                bytes += scales.len() * 4;
+                self.prefill_buffers.push(mem);
+                self.prefill_buffers.push(runtime.mem_f32(&scales)?);
+            } else {
+                // Empty scales select the existing BF16 operand in mixed checkpoints.
+                self.prefill_buffers.push(runtime.mem_u8(&[])?);
+                self.prefill_buffers.push(runtime.mem_f32(&[])?);
+            }
+        }
         startup_timing("Qwen safetensors preparation", start);
         eprintln!(
             "loaded safetensors, {:.2} GiB on disk; {:.2} GiB in the text weight ABI",
@@ -574,6 +637,9 @@ impl QwenWeights {
     }
 
     pub(crate) fn gpu_ref(&self, index: usize) -> Result<MemRef<'_>> {
+        if index >= self.bindings.len() {
+            return Ok(self.prefill_buffers[index - self.bindings.len()].as_ref());
+        }
         let binding = &self.bindings[index];
         if binding.experts.is_some() {
             return match binding
@@ -589,7 +655,7 @@ impl QwenWeights {
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.bindings.len()
+        self.bindings.len() + self.prefill.len() * 2
     }
 }
 
@@ -782,6 +848,11 @@ mod tests {
                 fp8_block_size(&quantization, config.architecture)?,
                 Some([2, 3])
             );
+            quantization["quant_type"] = serde_json::json!("float");
+            assert!(fp8_block_size(&quantization, config.architecture)?.is_some());
+            quantization["quant_type"] = serde_json::json!("int");
+            assert!(fp8_block_size(&quantization, config.architecture).is_err());
+            quantization["quant_type"] = serde_json::json!("float");
             quantization["weight_block_size"] = serde_json::json!([0, 3]);
             assert!(fp8_block_size(&quantization, config.architecture).is_err());
             quantization["weight_block_size"] = serde_json::json!([2, 3]);

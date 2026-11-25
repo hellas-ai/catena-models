@@ -282,3 +282,113 @@ establish parity for other prompts or dense model sizes. WMMA remains opt-in.
 All library tests passed (30 passed, one ignored), as did all-target compilation,
 source-generation checks, focused GPU projection/FFN checks, and the compiler's
 native/emulated HIP stress check. No model inference was moved into Rust.
+
+## Qwen3 FP8 prefill on NVIDIA CUDA
+
+`--prefill-dtype fp8` selects native E4M3 projections for dense Qwen3 FP8
+safetensors. `--prefill-dtype bf16` remains the default. The initial FP8 path
+covers Q/K/V, attention output, and gate/up/down projections. It fuses residual
+addition and gate/up SiLU multiplication while retaining the existing BF16
+rounding boundaries. Attention, KV storage, normalization, vocabulary output,
+and single-token execution use their existing kernels.
+
+The checkpoint used here is `unsloth/Qwen3-0.6B-FP8`, revision
+`877ed919128bc5b13ab7f30878c6cf1ae78f4531`. Its 196 projection matrices are E4M3
+with 128×128 weight blocks and BF16 `weight_scale_inv` tensors. The loader also
+accepts F32 scales and explicit `quant_type: "float"`; this revision omits that
+field. Despite the scale tensor's name, reconstruction multiplies by it:
+`W[n,k] = decode_e4m3(bits[n,k]) * weight_scale_inv[n/128,k/128]`.
+
+Activations are dynamically quantized per token and 128-element K group using
+`amax / 448`, with scale 1 for an all-zero group. Packed conversion uses CUDA's
+round-to-nearest and finite saturation. GEMM accumulates each K group in FP32
+with `mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32`, then applies that
+group's activation and weight scales before adding to the final sum. Applying
+one scale after the entire K reduction would be incorrect.
+
+Kernels use four warps and 16×64×128 or 64×64×128 tiles, with shared-memory rows
+padded to avoid bank conflicts. Row tails are masked. Projection widths must be
+multiples of 128. Unquantized matrices in mixed checkpoints use BF16 kernels.
+Both BF16 decode weights and native FP8 prefill weights are retained: measured
+weight storage is 1,192,230,912 bytes for BF16 and 1,632,740,352 bytes for FP8 mode.
+
+FP8 opt-in assumes a suitable CUDA toolkit and SM89+ hardware. FP8 modules
+compile for SM89 with forward-compatible PTX. There is no hardware capability
+probe and no hardware version in compiler cache keys. The existing development
+cache policy applies; clear caches manually when changing hardware or toolkit.
+
+Reproduce generation or compare the CLI benchmark modes:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run --release -- \
+  --model unsloth/Qwen3-0.6B-FP8 --prefill-dtype fp8 \
+  --prompt 'The capital of France is' -n 8
+CATENA_GPU_DIALECT=cuda cargo run --release -- \
+  --model unsloth/Qwen3-0.6B-FP8 --prefill-dtype bf16 \
+  --bench --pp 512 --tg 0 --bench-runs 9
+CATENA_GPU_DIALECT=cuda cargo run --release -- \
+  --model unsloth/Qwen3-0.6B-FP8 --prefill-dtype fp8 \
+  --bench --pp 512 --tg 0 --bench-runs 9
+```
+
+The dedicated measurements warm each shape twice and report the median of nine
+runs. Model loading, compilation, and session allocation are outside timing.
+Projection measurements include activation quantization and scratch allocation;
+input/weight uploads are outside timing. Run performance tests without competing
+GPU workloads:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8 \
+  fp8_prefill_benchmark -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8 \
+  fp8_projection_benchmark -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8 \
+  fp8_kernels_match_independent_blockwise_reference -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8 \
+  unsloth_fp8_prefill_matches_bf16_and_continues_decode -- --ignored --nocapture
+```
+
+Regenerate the Hex kernels with `python3 tools/generate-qwen3-fp8.py`.
+The compiler primitives and CUDA target selection are implemented in the sibling
+`catena-lang` checkout selected by `.cargo/config.toml`.
+
+### Measurements, 2026-11-25
+
+Hardware: NVIDIA GeForce RTX 5050 Laptop GPU (SM120, 8 GiB), CUDA toolkit 13.2,
+driver 595.71.05. Release builds, isolated GPU execution, two warmups and nine
+measured runs per shape. End-to-end timings use the real checkpoint weights and
+deterministic synthetic tokens. The final fused implementation measured:
+
+| Prompt tokens | BF16 median | FP8 median | BF16 tokens/s | FP8 tokens/s | Speedup |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 17 | 25.025 ms | 9.071 ms | 679.31 | 1,874.17 | 2.76× |
+| 128 | 91.508 ms | 24.860 ms | 1,398.78 | 5,148.81 | 3.68× |
+| 512 | 378.096 ms | 103.384 ms | 1,354.15 | 4,952.41 | 3.66× |
+| 1024 | 759.008 ms | 241.799 ms | 1,349.13 | 4,234.92 | 3.14× |
+
+Projection microbenchmarks use representable unit weights and constant BF16
+inputs. Timings include a separate activation quantization for each FP8 GEMM;
+the model shares quantized inputs across Q/K/V and computes gate/up together.
+Selected projection medians:
+
+| M | N | K | BF16 | FP8 including quantization |
+| ---: | ---: | ---: | ---: | ---: |
+| 512 | 2048 | 1024 | 1.529 ms | 0.254 ms |
+| 512 | 3072 | 1024 | 2.143 ms | 0.314 ms |
+| 512 | 1024 | 3072 | 2.273 ms | 0.399 ms |
+| 1024 | 2048 | 1024 | 2.868 ms | 0.439 ms |
+| 1024 | 3072 | 1024 | 4.121 ms | 0.553 ms |
+| 1024 | 1024 | 3072 | 4.186 ms | 0.579 ms |
+
+Independent CPU comparisons passed for both tile sizes, fused residual and
+SiLU/gate/up epilogues, multiple nonuniform scale blocks, zero activation groups,
+row tails, FP8 subnormals, and maximum finite E4M3 values. Full-model BF16/FP8
+logit cosine similarity was 0.994013–0.999288 across multi-token synthetic inputs
+of lengths 2, 17, 128, 512, 1024 and four text prompts. All logits were finite.
+One-token prefill and three subsequent teacher-forced decode steps matched BF16
+exactly. A 17+111-token chunked prefill passed the final-logit comparison against
+an uninterrupted 128-token prefill, and decode continued successfully from FP8
+prefilled caches.
+
+First graph compilation can take several minutes; subsequent runs use the
+existing compiler and native caches. Performance comparisons exclude that cost.

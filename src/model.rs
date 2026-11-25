@@ -8,8 +8,8 @@ use catena_lang::{
 
 use crate::{
     catena::{
-        InferenceOptions, generated_model_source_for_options, generated_multimodal_source,
-        runtime_sources,
+        InferenceOptions, PrefillDtype, generated_model_source_for_options,
+        generated_multimodal_source, runtime_sources,
     },
     checkpoint::{Checkpoint, GgufDtype, TensorView, read_gguf_model_config},
     hfhub::HubCheckpoint,
@@ -111,17 +111,23 @@ impl Model {
     ) -> Result<Self> {
         match checkpoint {
             HubCheckpoint::Gguf(gguf) => Self::load_gguf_with_options(&gguf.primary, options),
-            HubCheckpoint::Safetensors { path, config } => Self::load_impl(
-                config.as_ref().clone(),
-                options,
-                configured_gpu_dialect()?,
-                false,
-                |runtime, config, specs| {
-                    let mut weights = QwenWeights::open(path, config, specs)?;
-                    let bytes = weights.prepare(runtime)?;
-                    Ok((ModelWeights::Safetensors(weights), bytes))
-                },
-            ),
+            HubCheckpoint::Safetensors { path, config } => {
+                crate::qwen::validate(config, options)?;
+                let mut weights = QwenWeights::open(path, config, &weight_specs(config)?)?;
+                if options.prefill_dtype == PrefillDtype::Fp8 {
+                    weights.enable_fp8_prefill(config)?;
+                }
+                Self::load_impl(
+                    config.as_ref().clone(),
+                    options,
+                    configured_gpu_dialect()?,
+                    false,
+                    move |runtime, _, _| {
+                        let bytes = weights.prepare(runtime)?;
+                        Ok((ModelWeights::Safetensors(weights), bytes))
+                    },
+                )
+            }
         }
     }
 
@@ -170,6 +176,10 @@ impl Model {
         dialect: GpuDialect,
         multimodal: bool,
     ) -> Result<Self> {
+        ensure!(
+            options.prefill_dtype != PrefillDtype::Fp8,
+            "FP8 prefill requires a Qwen3 FP8 safetensors checkpoint"
+        );
         Self::load_impl(
             read_gguf_model_config(path)?,
             options,
@@ -190,6 +200,10 @@ impl Model {
             &[TensorSpec],
         ) -> Result<(ModelWeights, usize)>,
     ) -> Result<Self> {
+        ensure!(
+            options.prefill_dtype != PrefillDtype::Fp8 || dialect == GpuDialect::Cuda,
+            "FP8 prefill requires CUDA"
+        );
         crate::qwen::validate(&config, options)?;
         let specs = weight_specs(&config)?;
         let mut physical_tensors = HashSet::new();

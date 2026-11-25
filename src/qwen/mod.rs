@@ -6,6 +6,7 @@ use crate::{
 use anyhow::{Result, ensure};
 use std::fmt::Write;
 
+mod fp8_prefill;
 #[path = "fused.rs"]
 pub(crate) mod fused;
 #[path = "qwen35.rs"]
@@ -31,6 +32,23 @@ const U64: &str = "(u64 val)";
 const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 
 pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
+    if options.prefill_dtype == crate::catena::PrefillDtype::Fp8 {
+        ensure!(
+            config.architecture == ModelArchitecture::Qwen3Dense && options.wmma_prefill,
+            "FP8 prefill requires dense Qwen3 and matrix-core prefill; remove --no-wmma-prefill"
+        );
+        ensure!(
+            [
+                config.hidden_size,
+                config.intermediate_size,
+                config.query_size(),
+                config.key_value_size()
+            ]
+            .iter()
+            .all(|n| n.is_multiple_of(128)),
+            "FP8 prefill requires projection widths divisible by 128"
+        );
+    }
     if config.architecture == ModelArchitecture::Lfm3 {
         return crate::lfm3::validate(config, options);
     }
@@ -288,7 +306,7 @@ pub(crate) fn source(config: &ModelConfig, options: InferenceOptions) -> Result<
     if config.architecture == ModelArchitecture::Qwen3Dense {
         s = simt::specialize(s, options.kernels);
         if options.wmma_prefill {
-            wmma_prefill::append(&mut s, config, options.kernels);
+            wmma_prefill::append(&mut s, config, options);
         }
     }
     crate::session_graph::append(&mut s, config, options);
@@ -374,7 +392,9 @@ pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> R
     let names = (0..specs.len())
         .map(|i| format!("w{i}"))
         .collect::<Vec<_>>();
-    let group_type = nested_product(&vec![REF.to_owned(); 11]);
+    let fp8 = options.prefill_dtype == crate::catena::PrefillDtype::Fp8;
+    let layer_width = if fp8 { 25 } else { 11 };
+    let group_type = nested_product(&vec![REF.to_owned(); layer_width]);
     let weights_type = nested_product(&vec![group_type.clone(); config.num_layers]);
     emit_layer_selector(&mut s, config.num_layers, &group_type, &weights_type);
     let folded_state = "({({master.index32 u32} :) ({({((cap.own mem) val) ((cap.own mem) val)} *) ({(({master.index32 master.end32} prop.Less) |-) (prop.Truth |-)} *)} *)} *)";
@@ -397,10 +417,12 @@ pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> R
         "stdlib.qwen3.layer-weights",
         "selected",
     );
-    let layer_names = (0..11).map(|i| format!("layer-w{i}")).collect::<Vec<_>>();
+    let layer_names = (0..layer_width)
+        .map(|i| format!("layer-w{i}"))
+        .collect::<Vec<_>>();
     unpack(&mut s, "selected", &layer_names);
     let mut args = vec!["hidden", "cache", "rope", "capacity", "position", "layer"];
-    args.extend(layer_names.iter().map(String::as_str));
+    args.extend(layer_names[..11].iter().map(String::as_str));
     call(&mut s, &args, "qwen3.decoder-layer", "decoded");
     s.push_str("  ({[.decoded] [.truth]} *.intro)\n ))\n");
 
@@ -488,6 +510,10 @@ pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> R
         ("start", U64),
     ];
     inputs.extend(names.iter().map(|n| (n.as_str(), REF)));
+    let fp8_names = (0..if fp8 { config.num_layers * 14 } else { 0 })
+        .map(|i| format!("fp8-w{i}"))
+        .collect::<Vec<_>>();
+    inputs.extend(fp8_names.iter().map(|n| (n.as_str(), REF)));
     header(
         &mut s,
         "qwen3",
@@ -495,11 +521,11 @@ pub(crate) fn graph_source(config: &ModelConfig, options: InferenceOptions) -> R
         "{((cap.own mem) val) ((cap.own mem) val) ((cap.own mem) val)}",
     );
     for layer in 0..config.num_layers {
-        pack(
-            &mut s,
-            &names[1 + layer * 11..1 + (layer + 1) * 11],
-            &format!("group{layer}"),
-        );
+        let mut layer_weights = names[1 + layer * 11..1 + (layer + 1) * 11].to_vec();
+        if fp8 {
+            layer_weights.extend_from_slice(&fp8_names[layer * 14..(layer + 1) * 14]);
+        }
+        pack(&mut s, &layer_weights, &format!("group{layer}"));
     }
     let groups = (0..config.num_layers)
         .map(|i| format!("group{i}"))
