@@ -246,10 +246,12 @@ fn fp8_block_size(
     ensure!(
         matches!(
             architecture,
-            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Moe
+            ModelArchitecture::Qwen3Dense
+                | ModelArchitecture::Qwen35Dense
+                | ModelArchitecture::Qwen35Moe
         ) && quantization["quant_method"] == "fp8"
             && quantization["activation_scheme"] == "dynamic",
-        "quantized Qwen safetensors require dynamic FP8 in Qwen3 dense or Qwen3.5 MoE"
+        "quantized Qwen safetensors require dynamic FP8 in Qwen3 dense or Qwen3.5 dense/MoE"
     );
     ensure!(
         quantization["quant_type"].is_null() || quantization["quant_type"] == "float",
@@ -321,6 +323,39 @@ impl Fp8Weight {
             .validate(&scale, &[rows.div_ceil(block[0]), cols.div_ceil(block[1])])
             .with_context(|| format!("{name}: invalid FP8 scales"))?;
         Ok(Self { scale, block })
+    }
+
+    /// Permute bytes and block scales together without requantizing checkpoint weights.
+    fn native_operands(
+        &self,
+        weights: &Weights,
+        name: &str,
+        order: Option<Permutation>,
+    ) -> Result<(Vec<u8>, Vec<f32>)> {
+        let raw = weights.raw_bytes(name)?;
+        let scales = weights.host_f32(&self.scale)?;
+        let Some(order) = order else {
+            return Ok((raw.to_vec(), scales));
+        };
+        let columns = weights.tensors[name].shape[1];
+        let [br, bc] = self.block;
+        // Whole-head permutations preserve 128x128 quantization blocks.
+        ensure!(
+            order.prefix.is_multiple_of(br)
+                && order
+                    .head_width
+                    .is_multiple_of(if order.columns { bc } else { br }),
+            "{name}: FP8 head permutation must preserve weight blocks"
+        );
+        let scale_order = Permutation {
+            head_width: order.head_width / if order.columns { bc } else { br },
+            prefix: order.prefix / br,
+            ..order
+        };
+        Ok((
+            order.reorder(raw, columns),
+            scale_order.reorder(&scales, columns.div_ceil(bc)),
+        ))
     }
 
     fn to_bf16(&self, weights: &Weights, name: &str) -> Result<Vec<u16>> {
@@ -560,21 +595,41 @@ impl QwenWeights {
     pub(crate) fn enable_fp8_prefill(&mut self, config: &ModelConfig) -> Result<()> {
         let mut native_count = 0;
         for layer in 0..config.num_layers {
-            for suffix in [
-                "self_attn.q_proj",
-                "self_attn.k_proj",
-                "self_attn.v_proj",
-                "self_attn.o_proj",
-                "mlp.gate_proj",
-                "mlp.up_proj",
-                "mlp.down_proj",
-            ] {
-                let name = format!("model.layers.{layer}.{suffix}.weight");
+            let suffixes: &[&str] = if config.is_qwen35()
+                && config.layer_type(layer) == crate::spec::LayerType::LinearAttention
+            {
+                &[
+                    "linear_attn.in_proj_qkv",
+                    "linear_attn.in_proj_z",
+                    "linear_attn.out_proj",
+                    "mlp.gate_proj",
+                    "mlp.up_proj",
+                    "mlp.down_proj",
+                ]
+            } else {
+                &[
+                    "self_attn.q_proj",
+                    "self_attn.k_proj",
+                    "self_attn.v_proj",
+                    "self_attn.o_proj",
+                    "mlp.gate_proj",
+                    "mlp.up_proj",
+                    "mlp.down_proj",
+                ]
+            };
+            for suffix in suffixes {
+                let plain = format!("model.layers.{layer}.{suffix}.weight");
+                let wrapped = format!("model.language_model.layers.{layer}.{suffix}.weight");
+                let name = if self.bindings.iter().any(|b| b.name == plain) {
+                    plain
+                } else {
+                    wrapped
+                };
                 let binding = self
                     .bindings
                     .iter()
                     .find(|b| b.name == name)
-                    .context("missing Qwen3 projection")?;
+                    .context("missing dense Qwen projection")?;
                 if let Some(fp8) = &binding.fp8 {
                     ensure!(
                         fp8.block == [128, 128],
@@ -587,7 +642,7 @@ impl QwenWeights {
         }
         ensure!(
             native_count > 0,
-            "FP8 prefill requires an FP8 Qwen3 safetensors checkpoint"
+            "FP8 prefill requires an FP8 dense Qwen safetensors checkpoint"
         );
         Ok(())
     }
@@ -610,10 +665,10 @@ impl QwenWeights {
         for name in &self.prefill {
             let binding = self.bindings.iter().find(|b| b.name == *name).unwrap();
             if let Some(fp8) = &binding.fp8 {
-                let raw = self.weights.raw_bytes(name)?;
+                let (raw, scales) =
+                    fp8.native_operands(&self.weights, name, binding.transform.permutation)?;
                 bytes += raw.len();
-                let mem = runtime.mem_u8(raw)?;
-                let scales = self.weights.host_f32(&fp8.scale)?;
+                let mem = runtime.mem_u8(&raw)?;
                 ensure!(
                     scales.iter().all(|s| s.is_finite() && *s >= 0.0),
                     "invalid scales for {name}"
@@ -821,6 +876,101 @@ mod tests {
         tensor::{TensorView, serialize_to_file},
     };
     use std::fs;
+
+    #[test]
+    fn dynamic_fp8_metadata_accepts_dense_and_moe_checkpoints() -> Result<()> {
+        let mut quantization = serde_json::json!({
+            "quant_method": "fp8",
+            "activation_scheme": "dynamic",
+            "quant_type": "float",
+            "weight_block_size": [128, 128],
+        });
+        for architecture in [
+            ModelArchitecture::Qwen3Dense,
+            ModelArchitecture::Qwen35Dense,
+            ModelArchitecture::Qwen35Moe,
+        ] {
+            assert_eq!(
+                fp8_block_size(&quantization, architecture)?,
+                Some([128, 128])
+            );
+            quantization["quant_type"] = serde_json::json!("int");
+            assert!(fp8_block_size(&quantization, architecture).is_err());
+            quantization["quant_type"] = serde_json::json!("float");
+        }
+        assert!(fp8_block_size(&quantization, ModelArchitecture::Lfm3).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn fp8_head_permutations_preserve_bytes_scales_and_decoded_values() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("catena-qwen35-fp8-permute-{}", std::process::id()));
+        fs::create_dir_all(&directory)?;
+        let result = (|| {
+            for columns_order in [false, true] {
+                let (rows, cols, prefix) = if columns_order {
+                    (256, 512, 0)
+                } else {
+                    (768, 256, 256)
+                };
+                let raw: Vec<u8> = (0..rows * cols).map(|i| (i % 120) as u8).collect();
+                let scales: Vec<f32> = (0..rows / 128 * (cols / 128))
+                    .map(|i| (i + 1) as f32 * 0.125)
+                    .collect();
+                let scale_bytes: Vec<u8> = scales.iter().flat_map(|s| s.to_le_bytes()).collect();
+                let path = directory.join("weights.safetensors");
+                serialize_to_file(
+                    [
+                        (
+                            "w",
+                            TensorView::new(Dtype::F8_E4M3, vec![rows, cols], &raw)?,
+                        ),
+                        (
+                            "w_scale_inv",
+                            TensorView::new(
+                                Dtype::F32,
+                                vec![rows / 128, cols / 128],
+                                &scale_bytes,
+                            )?,
+                        ),
+                    ],
+                    None,
+                    &path,
+                )?;
+                let weights = Weights::open(&path)?;
+                let fp8 = Fp8Weight::new(&weights, "w", &[rows, cols], [128, 128])?;
+                let order = Permutation {
+                    keys: 2,
+                    replicas: 2,
+                    head_width: 128,
+                    prefix,
+                    columns: columns_order,
+                };
+                let (bytes, native_scales) = fp8.native_operands(&weights, "w", Some(order))?;
+                assert_eq!(bytes, order.reorder(&raw, cols));
+                let expected = order.reorder(&fp8.to_bf16(&weights, "w")?, cols);
+                let actual: Vec<u16> = bytes
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &b)| {
+                        let scale =
+                            native_scales[(i / cols) / 128 * (cols / 128) + (i % cols) / 128];
+                        f32_to_bf16(e4m3fn_to_f32(b) * scale)
+                    })
+                    .collect();
+                assert_eq!(actual, expected);
+                let invalid = Permutation {
+                    head_width: 64,
+                    ..order
+                };
+                assert!(fp8.native_operands(&weights, "w", Some(invalid)).is_err());
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
 
     #[test]
     fn dynamic_fp8_uses_block_scales_across_shards() -> Result<()> {

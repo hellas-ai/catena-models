@@ -40,6 +40,7 @@ pub(super) fn emit(
     linear_tree: &str,
     wmma: WmmaStages,
 ) {
+    let source_start = s.len();
     let moe = cfg.architecture == ModelArchitecture::Qwen35Moe;
     let dense_blocks = !moe && wmma.projections;
     let dense_scan = dense_blocks && cfg.linear_inner_size.unwrap().is_multiple_of(16);
@@ -68,8 +69,20 @@ pub(super) fn emit(
     } else {
         "stdlib.qwen35.batch.staged"
     };
-    let fcount = if moe { 16 } else { 11 };
-    let lcount = if moe { 19 } else { 14 };
+    let fcount = if moe {
+        16
+    } else if wmma.fp8 {
+        25
+    } else {
+        11
+    };
+    let lcount = if moe {
+        19
+    } else if wmma.fp8 {
+        26
+    } else {
+        14
+    };
     let fg = nested_product(&vec![REF.to_owned(); fcount]);
     let lg = nested_product(&vec![REF.to_owned(); lcount]);
     s.push_str(
@@ -646,4 +659,135 @@ pub(super) fn emit(
     );
     s.push_str("  [.result]");
     finish(s);
+    if wmma.fp8 {
+        let graph = s.split_off(source_start);
+        s.push_str(&fp8_graph(&graph));
+    }
+}
+
+/// Replace only batched projection calls; decode keeps the original operands.
+fn fp8_graph(graph: &str) -> String {
+    let mut out = String::new();
+    let mut linear = false;
+    for line in graph.lines() {
+        if line.starts_with("(def program stdlib.qwen35.batch.full :") {
+            linear = false;
+        }
+        if line.starts_with("(def program stdlib.qwen35.batch.linear :") {
+            linear = true;
+        }
+        let projection = line.contains("} stdlib.qwen35.dense.project [")
+            || line.contains("} stdlib.qwen35.dense.projection.residual [")
+            || line.contains("} stdlib.qwen35.dense.projection.gate [");
+        if !projection {
+            out.push_str(&line.replace(
+                "stdlib.qwen35.wmma.attention.run [context.]",
+                "stdlib.qwen3.fp8.attention.run [context.]",
+            ));
+            out.push('\n');
+            continue;
+        }
+        let (args, result) = line.trim().split_once("} ").unwrap();
+        let args = args.strip_prefix("({").unwrap();
+        let args: Vec<_> = args.split_whitespace().collect();
+        let weight: usize = args[1]
+            .strip_prefix("[.w")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap()
+            .parse()
+            .unwrap();
+        let indices: &[usize] = if linear {
+            &[1, 2, 8, 11, 12, 13]
+        } else {
+            &[1, 2, 3, 4, 8, 9, 10]
+        };
+        let Some(index) = indices.iter().position(|&w| w == weight) else {
+            // The small alpha/beta projections stay in checkpoint precision.
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let base = if linear { 14 } else { 11 };
+        let native = format!("w{}", base + index * 2);
+        let scale = format!("w{}", base + index * 2 + 1);
+        let input = args[0]
+            .strip_prefix("[.")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap();
+        let bf16 = format!("w{weight}");
+        let output = result
+            .split_once(" [")
+            .unwrap()
+            .1
+            .strip_suffix(".])")
+            .unwrap();
+        let shared_input = input == "normalized";
+        let quant_name = if shared_input {
+            "projection-input"
+        } else {
+            output
+        };
+        let quant = format!("quant-{quant_name}");
+        let bytes = format!("bytes-{quant_name}");
+        let scales = format!("scales-{quant_name}");
+        if !shared_input || index == 0 {
+            call(&mut out, &[input], "stdlib.qwen3.fp8.quantize", &quant);
+            unpack(&mut out, &quant, &names(&[&bytes, &scales]));
+        }
+        let mut operands = vec![
+            input, &bytes, &scales, &bf16, &native, &scale, args[2], args[3],
+        ];
+        let up = format!("w{}", weight + 1);
+        let up_native = format!("w{}", base + (index + 1) * 2);
+        let up_scale = format!("w{}", base + (index + 1) * 2 + 1);
+        let operation = if result.starts_with("stdlib.qwen35.dense.projection.residual") {
+            operands.push(
+                args[4]
+                    .strip_prefix("[.")
+                    .unwrap()
+                    .strip_suffix(']')
+                    .unwrap(),
+            );
+            "project-residual"
+        } else if result.starts_with("stdlib.qwen35.dense.projection.gate") {
+            operands.extend([up.as_str(), up_native.as_str(), up_scale.as_str()]);
+            call(
+                &mut out,
+                &operands,
+                "stdlib.qwen3.fp8.project-gate",
+                &format!("raw-{output}"),
+            );
+            operands.truncate(8);
+            ""
+        } else {
+            "project"
+        };
+        if !operation.is_empty() {
+            call(
+                &mut out,
+                &operands,
+                &format!("stdlib.qwen3.fp8.{operation}"),
+                &format!("raw-{output}"),
+            );
+        }
+        if shared_input && weight != if linear { 2 } else { 3 } {
+            writeln!(out, "  ([.raw-{output}] [{output}.])").unwrap();
+        } else {
+            call(
+                &mut out,
+                &[&bytes, &format!("raw-{output}")],
+                "stdlib.models.resources.free-f32-before",
+                &format!("freed-{output}"),
+            );
+            call(
+                &mut out,
+                &[&scales, &format!("freed-{output}")],
+                "stdlib.models.resources.free-f32-before",
+                output,
+            );
+        }
+    }
+    out
 }

@@ -1,9 +1,9 @@
 //! FP8 prefill uses a separate native-weight tail in each layer's weight tree.
 use super::*;
 
-pub(super) fn append(source: &mut String, config: &ModelConfig, options: InferenceOptions) {
+pub(super) fn append(source: &mut String, config: &ModelConfig, _options: InferenceOptions) {
     fused::append_hex(source, include_str!("../catena/qwen3_fp8.hex"));
-    if options.fp8_attention && supported_attention(config) {
+    if supported_attention(config) {
         let template = match config.head_dim {
             32 => include_str!("../catena/qwen3_fp8_attention_d32.hex"),
             64 => include_str!("../catena/qwen3_fp8_attention_d64.hex"),
@@ -11,32 +11,80 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, options: Inferen
             256 => include_str!("../catena/qwen3_fp8_attention_d256.hex"),
             _ => unreachable!(),
         };
-        let mut native = template.to_owned();
-        for (key, value) in [
-            ("QUERY_HEADS", config.num_attention_heads),
-            ("KV_HEADS", config.num_key_value_heads),
-            ("QUERY_SIZE", config.query_size()),
-            ("KEY_VALUE_SIZE", config.key_value_size()),
-            (
-                "QUERY_HEADS_PER_KV_HEAD",
-                config.num_attention_heads / config.num_key_value_heads,
-            ),
-        ] {
-            native = native.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+        let precise = match config.head_dim {
+            32 => include_str!("../catena/qwen3_fp8_precise_attention_d32.hex"),
+            64 => include_str!("../catena/qwen3_fp8_precise_attention_d64.hex"),
+            128 => include_str!("../catena/qwen3_fp8_precise_attention_d128.hex"),
+            256 => include_str!("../catena/qwen3_fp8_precise_attention_d256.hex"),
+            _ => unreachable!(),
+        };
+        let templates = if config.is_qwen35() {
+            vec![template]
+        } else {
+            vec![template, precise]
+        };
+        for template in templates {
+            let mut native = String::new();
+            let mut gate = false;
+            let mut aliases = Vec::new();
+            for line in template.lines() {
+                if line == "# FP8_GATE_START" {
+                    gate = true;
+                    continue;
+                }
+                if line == "# FP8_GATE_END" {
+                    gate = false;
+                    continue;
+                }
+                if let Some(result) = line.strip_prefix("# FP8_GATE_RESULT ") {
+                    let names: Vec<_> = result.split_whitespace().collect();
+                    aliases.push((names[0].to_owned(), names[1].to_owned()));
+                    continue;
+                }
+                if !gate || config.is_qwen35() {
+                    let mut line = line.to_owned();
+                    if config.is_qwen35() && line.contains("partial.stdlib.qwen3.fp8.write-bf16") {
+                        for (old, new) in &aliases {
+                            line = line.replace(&format!("[.{old}]"), &format!("[.{new}]"));
+                        }
+                    }
+                    native.push_str(&line);
+                    native.push('\n');
+                }
+            }
+            for (key, value) in [
+                ("QUERY_HEADS", config.num_attention_heads),
+                ("KV_HEADS", config.num_key_value_heads),
+                ("QUERY_SIZE", config.query_size()),
+                ("KEY_VALUE_SIZE", config.key_value_size()),
+                (
+                    "QUERY_HEADS_PER_KV_HEAD",
+                    config.num_attention_heads / config.num_key_value_heads,
+                ),
+            ] {
+                native = native.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+            }
+            native = native.replace(
+                "{{RMS_EPSILON_BITS}}",
+                &format!("{:08X}", config.rms_norm_eps.to_bits()),
+            );
+            if !config.is_qwen35()
+                && !template.contains("(def program stdlib.qwen3.fp8.precise-attention.native :")
+            {
+                let adapter =
+                    crate::catena::definitions(&native, &["stdlib.qwen3.fp8.attention.run:"]);
+                native = native.replace(adapter.trim(), "");
+            }
+            fused::append_hex(source, &native);
         }
-        native = native.replace(
-            "{{RMS_EPSILON_BITS}}",
-            &format!("{:08X}", config.rms_norm_eps.to_bits()),
-        );
-        fused::append_hex(source, &native);
     }
 }
 
-fn supported_attention(config: &ModelConfig) -> bool {
+pub(super) fn supported_attention(config: &ModelConfig) -> bool {
     matches!(config.head_dim, 32 | 64 | 128 | 256)
 }
 
-pub(super) fn graph(config: &ModelConfig, options: InferenceOptions) -> String {
+pub(super) fn graph(config: &ModelConfig, _options: InferenceOptions) -> String {
     let mut graph = include_str!("../catena/qwen3_prefill.hex").to_owned();
     graph = graph.replace(
         "  ([.weights9] *.elim [wu wd.])",
@@ -156,7 +204,7 @@ pub(super) fn graph(config: &ModelConfig, options: InferenceOptions) -> String {
         "output",
     );
     graph.replace_range(start..end, &down);
-    if options.fp8_attention && supported_attention(config) {
+    if supported_attention(config) {
         if config.rope_dimension_count == config.head_dim {
             graph = graph.replace(
                 "stdlib.qwen35.batch.full-prepare [query cache-ready.]",
@@ -172,7 +220,7 @@ pub(super) fn graph(config: &ModelConfig, options: InferenceOptions) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn project(
+pub(super) fn project(
     s: &mut String,
     input: &str,
     bytes: &str,
@@ -203,7 +251,7 @@ fn project(
     call(s, &args, &format!("stdlib.qwen3.fp8.{operation}"), out);
 }
 #[allow(clippy::too_many_arguments)]
-fn quantized_project(
+pub(super) fn quantized_project(
     s: &mut String,
     input: &str,
     bf16: &str,

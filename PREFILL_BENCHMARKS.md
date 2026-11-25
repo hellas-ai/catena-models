@@ -395,8 +395,12 @@ existing compiler and native caches. Performance comparisons exclude that cost.
 
 ## Fused FP8 attention and warp preparation
 
-FP8 mode now uses fused causal attention for batches of at least 64 tokens and
-head dimensions 32, 64, 128, or 256. `--no-fp8-attention` retains the previous
+These Qwen3 measurements predate mandatory FP8 attention. The current FP8 option
+also supports dense Qwen3.5 and uses FP8 attention for every batched prefill; the
+old attention toggle and short-batch BF16 fallback have been removed.
+
+The measured version used fused causal attention for batches of at least 64 tokens and
+head dimensions 32, 64, 128, or 256. The historical comparison mode retained the previous
 BF16 attention and preparation path while keeping FP8 projections, allowing an
 isolated comparison against the initial implementation above.
 
@@ -445,7 +449,7 @@ support lives in the sibling `catena-lang` compiler.
 Same RTX 5050 Laptop GPU and checkpoint revision as above. Each path is loaded
 once, warmed twice per shape, and measured nine times; medians exclude loading,
 compilation, and session allocation. `FP8 projections` uses
-`--prefill-dtype fp8 --no-fp8-attention`; `Full FP8` uses `--prefill-dtype fp8`.
+the former projection-only comparison mode; `Full FP8` uses `--prefill-dtype fp8`.
 
 | Tokens | BF16 median | FP8 projections | Full FP8 | Gain over FP8 projections | Gain over BF16 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -490,3 +494,112 @@ Attention kernel launches per layer fell from 48 to 4 at 1024 tokens. The final
 CLI generation check completed successfully; a warm runtime/weight load took
 about 0.8 seconds in that run. Profile artifacts were captured under
 `/tmp/qwen-fp8-before.nsys-rep` and `/tmp/qwen-fp8-after.nsys-rep`.
+
+## Dense Qwen3.5 FP8 prefill
+
+`--prefill-dtype fp8` supports dynamic blockwise FP8 dense Qwen3.5 text
+checkpoints. Validation uses `surogate/Qwen3.5-0.8B-FP8` at revision
+`1423a80c469215a6045bd4cdb9f342fcc293d0ea`, whose text matrices
+use E4M3 bytes and F32 `weight_scale_inv` tensors for 128×128 blocks. The loader
+accepts quantization metadata at the model root or inside `text_config`, and
+handles both plain and `model.language_model` tensor names.
+
+Full-attention layers use native FP8 Q/G, K, V, output, and MLP projections.
+Fused FP8 attention applies the per-head sigmoid output gate after the same
+BF16 context rounding as the existing attention kernel. Partial RoPE and the
+canonical BF16 KV layout are preserved. Linear-attention layers use FP8 QKV,
+Z, output, and MLP projections, sharing one activation quantization across
+QKV/Z. Alpha/beta projections, convolution, recurrent updates, and gated
+normalization retain their existing arithmetic. Native value-head permutations
+reorder the FP8 bytes and their scale blocks together without requantization;
+the BF16 decode copies use the corresponding element permutation.
+
+Selecting FP8 also selects FP8 full attention for every batched prefill, including
+short batches. The separate attention option and the former 64-token cutoff
+have been removed for both Qwen3 and Qwen3.5. Single-token execution continues
+to use the existing decode path. Unsupported attention head sizes are rejected.
+The supported sizes are 32, 64, 128, and 256, and Qwen3.5 currently requires
+128-wide linear key heads. There are no hardware probes or changes to compiler
+cache key policy.
+
+Independent attention references cover 24 ungated and 24 gated cases: all four
+head sizes, GQA, cached prefixes, causal masks, partial tiles, zero Q/K, sharper
+scores, and NaN poison beyond valid cache positions. Gated cosine similarity
+is at least 0.999679; ungated similarity is at least 0.999681. Native head
+permutation tests verify identical bytes and dequantized BF16 values, including
+nonuniform scale blocks, a QKV prefix, and column permutations.
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run --release -- \
+  --model surogate/Qwen3.5-0.8B-FP8 --prefill-dtype fp8 \
+  --prompt 'The capital of France is' -n 16
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen35_fp8 \
+  dense_fp8_prefill_matches_bf16_and_continues_decode -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen35_fp8 \
+  dense_fp8_prefill_benchmark -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8_attention \
+  fp8_gated_attention_matches_independent_causal_reference -- --ignored --nocapture
+```
+
+The end-to-end benchmark uses two warmups and seven measurements per shape,
+reports medians, and excludes checkpoint loading, compilation, and session
+allocation. `QWEN35_FP8_MODEL` selects another compatible checkpoint for these
+tests. `QWEN35_FP8_LAYERS=4` runs the parity check on a truncated model for faster
+debugging; final full-model validation leaves this unset.
+
+Full 24-layer checkpoint parity passes at 1, 2, 17, 65, 128, and 512 tokens,
+plus a natural-language prompt. Logit cosine similarities against the BF16
+path are respectively 1.00000000, 0.99730419, 0.99937044, 0.99931703,
+0.99926902, and 0.99886207; the five-token prompt gives 0.99951654. A 17+111
+chunked prefill versus a single 128-token prefill gives 0.99839956. All cases
+continue through three forced decode tokens with finite logits; single-token
+prefill and its forced decode continuation match BF16 exactly.
+
+The cold full-model FP8 Hex compile took 598.8 seconds on this development
+machine. Subsequent runs use the existing module and native caches. Compilation
+and loading are excluded from the performance measurements below.
+
+RTX 5050 Laptop GPU, release build, two warmups and seven measurements per
+shape, with medians excluding loading, compilation, and session allocation:
+
+| Tokens | BF16 median | FP8 median | FP8 throughput | Speedup |
+| ---: | ---: | ---: | ---: | ---: |
+| 17 | 29.627 ms | 12.427 ms | 1,367.95 tok/s | 2.38× |
+| 128 | 110.747 ms | 29.234 ms | 4,378.39 tok/s | 3.79× |
+| 512 | 397.101 ms | 95.666 ms | 5,351.96 tok/s | 4.15× |
+| 1024 | 769.944 ms | 183.717 ms | 5,573.80 tok/s | 4.19× |
+
+Text weight storage is 1,505,783,040 bytes in BF16 mode and 2,002,929,408 bytes
+in FP8 mode, including both BF16 decode operands and native FP8 prefill operands.
+
+### Preserving Qwen3 short-batch accuracy with mandatory FP8 attention
+
+Removing the old BF16 fallback exposed a Qwen3 accuracy regression at short
+sequence lengths: single-pass FP8 attention gave logit cosine 0.98360806 at
+17 tokens. Qwen3 batches below 64 tokens therefore use residual E4M3 operands
+for Q, K, V, and probabilities. Power-of-two Q/K/V scales avoid introducing
+extra rounding before splitting the BF16 operands. For each normalized operand,
+the second packet stores sixteen times the residual after the first E4M3
+rounding. QK and PV use four FP8 MMA products, rescaling the primary/residual
+cross products by 1/16 and the residual/residual product by 1/256.
+
+The short-batch path preserves the existing BF16 score boundary. For a single
+64-key tile it also preserves the BF16 normalized-probability boundary, using
+power-of-two probability scaling and already-normalized probabilities in PV.
+All matrix products remain FP8; this introduces no BF16 attention path or
+independent attention option. Longer Qwen3 batches and all Qwen3.5 batches keep
+the single-pass FP8 attention kernel measured above.
+
+Temporary Q/K/V packets and the shared probability tile have a second packet
+plane; persistent KV storage is unchanged.
+
+The residual kernel passes 24 independent reference cases across head sizes
+32, 64, 128, and 256, including the baseline score/probability boundaries.
+Maximum normalized RMS error is 0.001714; minimum reported cosine is
+0.999999.
+
+The final Qwen3 checkpoint regression passes with mandatory FP8 attention.
+At 2 and 17 tokens, logit cosine versus BF16 is 0.99401264 and 0.99851949.
+At 128, 512, and 1024 tokens it remains 0.99642262, 0.99509936, and 0.99821934.
+Natural-language prompts, chunked prefill, and decode continuation also pass;
+single-token prefill and forced decode remain identical to BF16.

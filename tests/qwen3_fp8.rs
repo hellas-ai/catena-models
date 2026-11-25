@@ -221,7 +221,7 @@ fn fp8_option_rejects_incompatible_graphs() {
     let mut config = ModelConfig::qwen3_0_6b();
     let options = InferenceOptions::default().with_prefill_dtype(PrefillDtype::Fp8);
     assert!(generated_model_source_for_options(&config, options).is_err());
-    config.architecture = ModelArchitecture::Qwen35Dense;
+    config.architecture = ModelArchitecture::Qwen35Moe;
     assert!(generated_model_source_for_options(&config, options.with_wmma_prefill(true)).is_err());
 }
 
@@ -306,12 +306,6 @@ fn fp8_prefill_benchmark() -> Result<()> {
     let checkpoint = download_model("unsloth/Qwen3-0.6B-FP8")?;
     let options = InferenceOptions::default().with_wmma_prefill(true);
     let bf16 = Model::load_checkpoint_with_options(&checkpoint, options)?;
-    let projection_only = Model::load_checkpoint_with_options(
-        &checkpoint,
-        options
-            .with_prefill_dtype(PrefillDtype::Fp8)
-            .with_fp8_attention(false),
-    )?;
     let fp8 = Model::load_checkpoint_with_options(
         &checkpoint,
         options.with_prefill_dtype(PrefillDtype::Fp8),
@@ -324,11 +318,7 @@ fn fp8_prefill_benchmark() -> Result<()> {
     for len in [17, 128, 512, 1024] {
         let tokens: Vec<_> = (0..len).map(|i| 100 + (i as u64 * 17) % 5000).collect();
         let mut medians = Vec::new();
-        for (name, model) in [
-            ("bf16", &bf16),
-            ("fp8-projections", &projection_only),
-            ("fp8-attention", &fp8),
-        ] {
+        for (name, model) in [("bf16", &bf16), ("fp8-attention", &fp8)] {
             for _ in 0..2 {
                 model.logits(&tokens)?;
             }
@@ -348,11 +338,7 @@ fn fp8_prefill_benchmark() -> Result<()> {
             );
             medians.push(seconds);
         }
-        eprintln!("pp{len} speedup: {:.3}x", medians[0] / medians[2]);
-        eprintln!(
-            "pp{len} attention/preparation speedup over FP8 projections: {:.3}x",
-            medians[1] / medians[2]
-        );
+        eprintln!("pp{len} speedup: {:.3}x", medians[0] / medians[1]);
     }
     Ok(())
 }

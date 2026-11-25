@@ -178,7 +178,7 @@ impl Model {
     ) -> Result<Self> {
         ensure!(
             options.prefill_dtype != PrefillDtype::Fp8,
-            "FP8 prefill requires a Qwen3 FP8 safetensors checkpoint"
+            "FP8 prefill requires a dense Qwen3/3.5 FP8 safetensors checkpoint"
         );
         Self::load_impl(
             read_gguf_model_config(path)?,

@@ -34,8 +34,23 @@ const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
     if options.prefill_dtype == crate::catena::PrefillDtype::Fp8 {
         ensure!(
-            config.architecture == ModelArchitecture::Qwen3Dense && options.wmma_prefill,
-            "FP8 prefill requires dense Qwen3 and matrix-core prefill; remove --no-wmma-prefill"
+            matches!(
+                config.architecture,
+                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+            ) && options.wmma_prefill,
+            "FP8 prefill requires dense Qwen3/3.5 and matrix-core prefill; remove --no-wmma-prefill"
+        );
+        if config.is_qwen35() {
+            ensure!(
+                config.linear_state_size == Some(128)
+                    && config.linear_inner_size.unwrap().is_multiple_of(128)
+                    && config.linear_qkv_size().unwrap().is_multiple_of(128),
+                "FP8 Qwen3.5 prefill requires 128-wide linear key heads and projection widths divisible by 128"
+            );
+        }
+        ensure!(
+            fp8_prefill::supported_attention(config),
+            "FP8 attention requires head dimensions 32, 64, 128, or 256"
         );
         ensure!(
             [

@@ -19,6 +19,7 @@ pub(super) struct WmmaStages {
     pub exact_context: bool,
     pub safe_experts: bool,
     pub safe_scores: bool,
+    pub fp8: bool,
 }
 
 fn finish(s: &mut String) {
@@ -486,6 +487,7 @@ pub(super) fn wmma_stages(config: &ModelConfig, scope: &str) -> Result<WmmaStage
         "expert-only WMMA components require a Qwen3.5 MoE model"
     );
     Ok(WmmaStages {
+        fp8: false,
         projections: scope == "all",
         experts: matches!(
             scope,
@@ -517,7 +519,14 @@ fn source_with_scope(
     options: InferenceOptions,
     scope: &str,
 ) -> Result<String> {
-    let wmma = wmma_stages(config, scope)?;
+    let mut wmma = wmma_stages(config, scope)?;
+    wmma.fp8 = options.prefill_dtype == crate::catena::PrefillDtype::Fp8;
+    if wmma.fp8 {
+        wmma.projections = true;
+        wmma.attention = true;
+        wmma.safe_scores = false;
+        wmma.exact_context = false;
+    }
     let full = (0..config.num_layers)
         .filter(|&l| config.layer_type(l) == LayerType::FullAttention)
         .collect::<Vec<_>>();
@@ -537,7 +546,12 @@ fn source_with_scope(
     base.num_experts = 0;
     base.experts_per_token = 0;
     base.shared_expert_intermediate_size = None;
-    let mut s = super::fused::source(&base, options.with_wmma_prefill(false))?;
+    let mut s = super::fused::source(
+        &base,
+        options
+            .with_wmma_prefill(false)
+            .with_prefill_dtype(crate::catena::PrefillDtype::Bf16),
+    )?;
     let cut = s
         .find("(def program stdlib.qwen3.select-layer.yes")
         .unwrap();
@@ -822,8 +836,20 @@ fn source_with_scope(
     if !moe && key_dim == 128 {
         s = s.replace("} qwen35.delta [", "} qwen35.fused-delta [");
     }
-    let full_count = if moe { 16 } else { 11 };
-    let linear_count = if moe { 19 } else { 14 };
+    let full_count = if moe {
+        16
+    } else if wmma.fp8 {
+        25
+    } else {
+        11
+    };
+    let linear_count = if moe {
+        19
+    } else if wmma.fp8 {
+        26
+    } else {
+        14
+    };
     let full_group = nested_product(&vec![REF.to_owned(); full_count]);
     let linear_group = nested_product(&vec![REF.to_owned(); linear_count]);
     let full_tree = nested_product(&vec![full_group.clone(); full.len()]);
@@ -881,7 +907,17 @@ fn source_with_scope(
             args.push("sequence");
             args.extend(SCRATCH);
         }
-        args.extend(ws.iter().map(String::as_str));
+        args.extend(
+            ws[..if kind == "full" {
+                if moe { 16 } else { 11 }
+            } else if moe {
+                19
+            } else {
+                14
+            }]
+                .iter()
+                .map(String::as_str),
+        );
         call(
             &mut s,
             &args,
@@ -1005,6 +1041,7 @@ fn source_with_scope(
         &full_tree,
         &linear_tree,
         recurrent,
+        wmma.fp8,
     )?;
     // Normalization's column count is the hidden or full-attention head width.
     for (width, float, rows) in [
@@ -1077,6 +1114,9 @@ fn source_with_scope(
         prefill::emit(&mut batch, config, &full_tree, &linear_tree, wmma);
         let entry = s.rfind("(def program qwen3 :").unwrap();
         s.insert_str(entry, &batch);
+    }
+    if wmma.fp8 {
+        super::fp8_prefill::append(&mut s, config, options);
     }
     crate::session_graph::append_layout(&mut s, config, options);
     // Cover inherited decode/head helpers, SIMT prefill, and exact/safe experts.
@@ -1380,6 +1420,7 @@ fn emit_entry(
     full_tree: &str,
     linear_tree: &str,
     _recurrent: usize,
+    fp8: bool,
 ) -> Result<()> {
     let moe = config.architecture == ModelArchitecture::Qwen35Moe;
     let mut captures = vec![
@@ -1465,7 +1506,14 @@ fn emit_entry(
     s.push_str("  ({[.result] [.truth]} *.intro)");
     finish(s);
     let specs = weight_specs(config)?;
-    let ws = (0..specs.len())
+    let native_count = if fp8 {
+        (0..config.num_layers)
+            .map(|l| if full.contains(&l) { 14 } else { 12 })
+            .sum()
+    } else {
+        0
+    };
+    let ws = (0..specs.len() + native_count)
         .map(|i| format!("w{i}"))
         .collect::<Vec<_>>();
     let mut inputs = vec![
@@ -1486,6 +1534,7 @@ fn emit_entry(
         &format!("{{{}}}", vec![OWN; if moe { 11 } else { 4 }].join(" ")),
     );
     let mut cursor = 1;
+    let mut native_cursor = specs.len();
     for layer in 0..config.num_layers {
         let count = match (
             config.architecture == ModelArchitecture::Qwen35Moe,
@@ -1496,7 +1545,13 @@ fn emit_entry(
             (false, true) => 11,
             (false, false) => 14,
         };
-        pack(s, &ws[cursor..cursor + count], &format!("group{layer}"));
+        let mut group = ws[cursor..cursor + count].to_vec();
+        if fp8 {
+            let native = if full.contains(&layer) { 14 } else { 12 };
+            group.extend_from_slice(&ws[native_cursor..native_cursor + native]);
+            native_cursor += native;
+        }
+        pack(s, &group, &format!("group{layer}"));
         cursor += count;
     }
     for (kind, layers) in [("full", full), ("linear", linear)] {
@@ -1609,7 +1664,7 @@ fn emit_entry(
         s,
         &[
             "hidden-final",
-            &ws[ws.len() - 2],
+            &ws[specs.len() - 2],
             &c(config.hidden_size),
             &floats(config.hidden_size),
             &c(1),
@@ -1622,7 +1677,7 @@ fn emit_entry(
         s,
         &[
             "normalized-final",
-            &ws[ws.len() - 1],
+            &ws[specs.len() - 1],
             &c(config.hidden_size),
             &c(config.vocabulary_size),
         ],
@@ -1652,6 +1707,10 @@ fn emit_entry(
 
 /// Reuse the hybrid layer fold with supplied embeddings and independent MRoPE.
 pub(crate) fn multimodal_source(config: &ModelConfig, options: InferenceOptions) -> Result<String> {
+    ensure!(
+        options.prefill_dtype == crate::catena::PrefillDtype::Bf16,
+        "FP8 Qwen3.5 currently supports text prefill only"
+    );
     let half = config.rope_dimension_count / 2;
     let sections = config.mrope_sections;
     ensure!(

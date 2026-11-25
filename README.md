@@ -12,7 +12,7 @@ when the repository has no model GGUF. Safetensors
 checkpoints can be a single file or an indexed set of shards. LLM image inputs
 require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
-Dense Qwen3 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
+Dense Qwen3/3.5 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
 `--prefill-dtype fp8` additionally retains native E4M3 weights and block scales
 for prefill projections and attention. Decode keeps its BF16 weights.
 Dynamic FP8 Qwen3.5 MoE weights are dequantized to BF16 at load time.
@@ -65,22 +65,34 @@ CATENA_GPU_DIALECT=cuda cargo run -r -- \
 ```
 
 `--prefill-dtype bf16` selects the existing kernels and is the default. FP8
-supports dense Qwen3 safetensors with dynamic activation quantization, E4M3
-weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
+supports dense Qwen3 and Qwen3.5 safetensors with dynamic activation quantization,
+E4M3 weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
 `quant_type: "float"` is accepted. Projection widths must be divisible by 128.
 The option assumes a suitable CUDA toolkit and SM89+ hardware; it does not query
 hardware capabilities. FP8 modules compile for SM89 with forward-compatible PTX.
-Batches of at least 64 tokens use fused FP8 QK and probability–value attention
-with FP32 online softmax. Supported attention head sizes are 32, 64, 128, and
-256; other sizes and shorter batches retain BF16 attention. Q/K normalization
-and full-head RoPE use a faster warp preparation kernel. KV storage and decode
-remain BF16, and normalization and softmax reductions remain FP32. The vocabulary
-projection and single-token calls retain their existing arithmetic.
-`--no-fp8-attention` selects the previous BF16 attention/preparation path for
-comparisons while retaining FP8 projections. Mixed checkpoints retain BF16 execution
-for unquantized projection matrices. FP8 cannot be combined with
-`--no-wmma-prefill`, GGUF, HIP, or Qwen3.5/MoE. The extra native weights increase
-GPU memory usage; this first version retains both formats.
+All batched prefill uses fused FP8 QK and probability–value attention with FP32
+online softmax. Supported attention head sizes are 32, 64, 128, and 256; unsupported
+sizes fail when FP8 is selected. Attention follows the prefill dtype directly.
+Qwen3 Q/K normalization and full-head RoPE use a warp preparation kernel.
+Qwen3 batches below 64 tokens use primary and residual E4M3 operands to preserve
+attention precision, with all products still computed by FP8 MMA.
+Qwen3.5 preserves partial RoPE and its sigmoid attention output gate. Its linear
+attention uses FP8 QKV, Z, output, and MLP projections; recurrent state updates,
+small alpha/beta projections, convolution, and gated normalization retain their
+existing arithmetic. Qwen3.5 currently requires 128-wide linear key heads.
+KV storage and decode remain BF16, and normalization and softmax reductions
+remain FP32. The vocabulary projection and single-token calls retain their
+existing arithmetic. Mixed checkpoints retain BF16 execution for unquantized
+projection matrices. FP8 cannot be combined with `--no-wmma-prefill`, GGUF, HIP,
+MoE, or image inputs. The extra native weights increase GPU memory usage because
+both formats are retained.
+
+For a Qwen3.5 checkpoint with dynamic blockwise FP8 weights:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model surogate/Qwen3.5-0.8B-FP8 --prefill-dtype fp8 --prompt 'Gravity is'
+```
 
 The Qwen CLI and server enable matrix-core prefill by default for Qwen3 dense
 and Qwen3.5/3.6. Use `--no-wmma-prefill` to select SIMT explicitly. Qwen3 uses
