@@ -16,13 +16,29 @@ pub enum PrefillDtype {
     Bf16,
     Fp8,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InferenceOptions {
     pub kernels: KernelKind,
     pub wmma_prefill: bool,
     pub prefill_dtype: PrefillDtype,
+    pub fp8_attention: bool,
+}
+impl Default for InferenceOptions {
+    fn default() -> Self {
+        Self {
+            kernels: KernelKind::default(),
+            wmma_prefill: false,
+            prefill_dtype: PrefillDtype::default(),
+            fp8_attention: true,
+        }
+    }
 }
 impl InferenceOptions {
+    pub const fn with_fp8_attention(mut self, enabled: bool) -> Self {
+        self.fp8_attention = enabled;
+        self
+    }
+
     pub const fn with_prefill_dtype(mut self, dtype: PrefillDtype) -> Self {
         self.prefill_dtype = dtype;
         self

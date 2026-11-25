@@ -14,7 +14,7 @@ require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
 Dense Qwen3 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
 `--prefill-dtype fp8` additionally retains native E4M3 weights and block scales
-for prefill projections. Decode keeps its BF16 weights.
+for prefill projections and attention. Decode keeps its BF16 weights.
 Dynamic FP8 Qwen3.5 MoE weights are dequantized to BF16 at load time.
 
 ## GPU selection
@@ -70,8 +70,14 @@ weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
 `quant_type: "float"` is accepted. Projection widths must be divisible by 128.
 The option assumes a suitable CUDA toolkit and SM89+ hardware; it does not query
 hardware capabilities. FP8 modules compile for SM89 with forward-compatible PTX.
-Attention, KV storage, normalization, the vocabulary projection, and single-token
-calls retain their existing arithmetic. Mixed checkpoints retain BF16 execution
+Batches of at least 64 tokens use fused FP8 QK and probability–value attention
+with FP32 online softmax. Supported attention head sizes are 32, 64, 128, and
+256; other sizes and shorter batches retain BF16 attention. Q/K normalization
+and full-head RoPE use a faster warp preparation kernel. KV storage and decode
+remain BF16, and normalization and softmax reductions remain FP32. The vocabulary
+projection and single-token calls retain their existing arithmetic.
+`--no-fp8-attention` selects the previous BF16 attention/preparation path for
+comparisons while retaining FP8 projections. Mixed checkpoints retain BF16 execution
 for unquantized projection matrices. FP8 cannot be combined with
 `--no-wmma-prefill`, GGUF, HIP, or Qwen3.5/MoE. The extra native weights increase
 GPU memory usage; this first version retains both formats.
@@ -98,8 +104,10 @@ component ablations. The model graph and reduction loops share Hex code; small
 CUDA/HIP Hex helpers select native fragment loads, MMA operations, and output coordinates.
 `CATENA_WMMA_EMULATE=1` remains a HIP arithmetic diagnostic.
 
-All GPU model exponentials use the shared `stdlib.models.math.exp` Hex implementation,
-including DeltaNet decay and online attention. It uses fixed F32 arithmetic,
+GPU model exponentials outside fused FP8 attention use the shared
+`stdlib.models.math.exp` Hex implementation,
+including DeltaNet decay and BF16 online attention. FP8 attention uses CUDA’s
+fast FP32 exponential for softmax. The shared implementation uses fixed F32 arithmetic,
 nearest-even subnormal rounding, and canonical F32 NaNs; its accuracy target is
 at most 1 ULP with round-to-nearest arithmetic and FMA contraction disabled.
 This changes results previously produced by native `expf` or the older Hex

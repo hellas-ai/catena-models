@@ -33,9 +33,13 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
 
-    /// Qwen3 prefill projection arithmetic; FP8 assumes CUDA SM89+ and an FP8 checkpoint.
+    /// Qwen3 prefill arithmetic; FP8 assumes CUDA SM89+ and an FP8 checkpoint.
     #[arg(long, value_enum, default_value_t = PrefillDtype::Bf16)]
     prefill_dtype: PrefillDtype,
+
+    /// Keep BF16 attention when using FP8 projections (comparison mode).
+    #[arg(long)]
+    no_fp8_attention: bool,
 
     /// Use SIMT prefill instead of WMMA.
     #[arg(long, conflicts_with = "wmma_prefill")]
@@ -116,7 +120,8 @@ fn inference_options(args: &Args) -> Result<InferenceOptions> {
     Ok(InferenceOptions::default()
         .with_kernels(args.kernels)
         .with_wmma_prefill(args.wmma_prefill_enabled())
-        .with_prefill_dtype(args.prefill_dtype))
+        .with_prefill_dtype(args.prefill_dtype)
+        .with_fp8_attention(!args.no_fp8_attention))
 }
 
 fn main() -> Result<()> {
@@ -569,6 +574,17 @@ mod cli_tests {
         assert!(
             Args::try_parse_from(["app", "--prompt", "hi", "--prefill-dtype", "fp16"]).is_err()
         );
+        assert!(inference_options(&default).unwrap().fp8_attention);
+        let comparison = Args::try_parse_from([
+            "app",
+            "--prompt",
+            "hi",
+            "--prefill-dtype",
+            "fp8",
+            "--no-fp8-attention",
+        ])
+        .unwrap();
+        assert!(!inference_options(&comparison).unwrap().fp8_attention);
         let incompatible = Args::try_parse_from([
             "app",
             "--prompt",

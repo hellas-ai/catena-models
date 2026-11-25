@@ -352,12 +352,12 @@ Regenerate the Hex kernels with `python3 tools/generate-qwen3-fp8.py`.
 The compiler primitives and CUDA target selection are implemented in the sibling
 `catena-lang` checkout selected by `.cargo/config.toml`.
 
-### Measurements, 2026-11-25
+### Initial projection-only measurements, 2026-11-25
 
 Hardware: NVIDIA GeForce RTX 5050 Laptop GPU (SM120, 8 GiB), CUDA toolkit 13.2,
 driver 595.71.05. Release builds, isolated GPU execution, two warmups and nine
 measured runs per shape. End-to-end timings use the real checkpoint weights and
-deterministic synthetic tokens. The final fused implementation measured:
+deterministic synthetic tokens. The initial implementation with fused projection epilogues and BF16 attention measured:
 
 | Prompt tokens | BF16 median | FP8 median | BF16 tokens/s | FP8 tokens/s | Speedup |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -392,3 +392,101 @@ prefilled caches.
 
 First graph compilation can take several minutes; subsequent runs use the
 existing compiler and native caches. Performance comparisons exclude that cost.
+
+## Fused FP8 attention and warp preparation
+
+FP8 mode now uses fused causal attention for batches of at least 64 tokens and
+head dimensions 32, 64, 128, or 256. `--no-fp8-attention` retains the previous
+BF16 attention and preparation path while keeping FP8 projections, allowing an
+isolated comparison against the initial implementation above.
+
+Both QK and probability–value products use native E4M3 MMA with FP32
+accumulation. Online maximum, denominator, exponential, and context rescaling
+stay FP32. Softmax uses CUDA’s fast FP32 exponential; normalization and RoPE
+retain their existing math. The kernel processes 64 queries and 64 keys per tile without writing
+a score matrix or probability matrix to global memory. Query and key snapshots
+use one dynamic scale per head vector; value snapshots use one scale per KV head
+and 64-key tile. Unnormalized probabilities lie in [0,1] and use FP8 scale 1/448.
+Transient snapshots are released after attention. The persistent KV cache stays
+BF16, including cached prefixes and values consumed by subsequent decode.
+
+A warp preparation kernel handles full-head Q/K RMSNorm, RoPE, and BF16 KV append.
+Warp reductions replace shared-memory reduction stages, and RoPE partners stay
+in registers. Partial rotary heads retain the existing preparation kernel.
+Single-token execution and decode are unchanged. No GPU capability probing or
+hardware-specific cache keys were introduced.
+
+Before this change, a CUDA trace at 1024 tokens attributed approximately 53% of
+GPU kernel time to the separate QK/softmax/PV attention passes and 16% to Q/K
+normalization/RoPE preparation. After implementation, independent FP32 causal
+attention comparisons passed for head sizes 32/64/128/256, grouped query heads,
+nonzero prefix positions, row/key tails, and sharper scores. Relative RMS errors
+were below 2.6% and cosine similarity exceeded 0.9996 across 24 cases including zero Q/K heads.
+Preparation checks cover absolute RoPE, unchanged cache prefixes, and exact V
+copies; neither transformation changes persistent KV storage format.
+
+Additional component checks and timing:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8_attention \
+  fp8_attention_matches_independent_causal_reference -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8_attention \
+  warp_prepare_preserves_bf16_kv_and_absolute_rope -- --ignored --nocapture
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen3_fp8_attention \
+  fp8_attention_benchmark -- --ignored --nocapture
+```
+
+Regenerate these kernels with `python3 tools/generate-qwen3-fp8-attention.py`.
+The generator also regenerates its shared dense FP8 helpers. CUDA warp shuffle
+support lives in the sibling `catena-lang` compiler.
+
+### Final attention/preparation measurements, 2026-11-25
+
+Same RTX 5050 Laptop GPU and checkpoint revision as above. Each path is loaded
+once, warmed twice per shape, and measured nine times; medians exclude loading,
+compilation, and session allocation. `FP8 projections` uses
+`--prefill-dtype fp8 --no-fp8-attention`; `Full FP8` uses `--prefill-dtype fp8`.
+
+| Tokens | BF16 median | FP8 projections | Full FP8 | Gain over FP8 projections | Gain over BF16 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 17 | 25.080 ms | 9.014 ms | 8.535 ms | 1.06× | 2.94× |
+| 128 | 92.232 ms | 26.354 ms | 20.040 ms | 1.32× | 4.60× |
+| 512 | 379.470 ms | 102.733 ms | 57.007 ms | 1.80× | 6.66× |
+| 1024 | 760.396 ms | 244.734 ms | 119.711 ms | 2.04× | 6.35× |
+
+Full FP8 throughput was 8,981 tokens/s at 512 tokens and 8,554 tokens/s at 1024.
+Weight storage remains 1,632,740,352 bytes; attention snapshots are transient.
+The 17-token gain comes from warp preparation, since attention below 64 tokens
+retains the BF16 kernels.
+
+An isolated attention comparison uses the real model's head geometry (16 query
+heads, 8 KV heads, head dimension 128), including FP8 snapshot preparation,
+allocation, and cleanup:
+
+| Query tokens | BF16 attention | Fused FP8 attention |
+| ---: | ---: | ---: |
+| 64 | 0.091 ms | 0.062 ms |
+| 128 | 0.238 ms | 0.150 ms |
+| 512 | 1.596 ms | 0.547 ms |
+| 1024 | 4.430 ms | 1.075 ms |
+
+The final fast-exponential variant passed all 24 independent attention cases
+with the same reported error bounds. Full-model logit cosine similarity against
+BF16 was 0.994013–0.999288 across the synthetic lengths and four text prompts.
+The 128/512/1024-token cosines were 0.996423, 0.995099, and 0.998219. All logits
+were finite. Chunked 17+111-token prefill and subsequent decode passed; a
+single-token prefill and three subsequent decode steps still matched BF16 exactly.
+
+A follow-up CUDA trace confirms the targeted kernel changes. These are GPU
+kernel-only averages across 84 layer calls (28 layers × 3 PP1024 runs), excluding
+host allocation and API overhead:
+
+| Component | Previous FP8-projection path | New path | Kernel speedup |
+| --- | ---: | ---: | ---: |
+| Attention, including new Q/K/V quantization kernels | 3.757 ms | 0.705 ms | 5.33× |
+| Q/K normalization, RoPE, and KV append | 1.117 ms | 0.082 ms | 13.68× |
+
+Attention kernel launches per layer fell from 48 to 4 at 1024 tokens. The final
+CLI generation check completed successfully; a warm runtime/weight load took
+about 0.8 seconds in that run. Profile artifacts were captured under
+`/tmp/qwen-fp8-before.nsys-rep` and `/tmp/qwen-fp8-after.nsys-rep`.

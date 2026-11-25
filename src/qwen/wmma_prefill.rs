@@ -46,7 +46,7 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, options: Inferen
     kernels.push_str(&ungated_attention());
     let fp8 = options.prefill_dtype == crate::catena::PrefillDtype::Fp8;
     let prefill = if fp8 {
-        super::fp8_prefill::graph()
+        super::fp8_prefill::graph(config, options)
     } else {
         include_str!("../catena/qwen3_prefill.hex").to_owned()
     };
@@ -108,7 +108,7 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, options: Inferen
     }
     source.push_str(&kernels);
     if fp8 {
-        super::fp8_prefill::append(source);
+        super::fp8_prefill::append(source, config, options);
     }
 }
 

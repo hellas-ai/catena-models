@@ -1,11 +1,42 @@
 //! FP8 prefill uses a separate native-weight tail in each layer's weight tree.
 use super::*;
 
-pub(super) fn append(source: &mut String) {
+pub(super) fn append(source: &mut String, config: &ModelConfig, options: InferenceOptions) {
     fused::append_hex(source, include_str!("../catena/qwen3_fp8.hex"));
+    if options.fp8_attention && supported_attention(config) {
+        let template = match config.head_dim {
+            32 => include_str!("../catena/qwen3_fp8_attention_d32.hex"),
+            64 => include_str!("../catena/qwen3_fp8_attention_d64.hex"),
+            128 => include_str!("../catena/qwen3_fp8_attention_d128.hex"),
+            256 => include_str!("../catena/qwen3_fp8_attention_d256.hex"),
+            _ => unreachable!(),
+        };
+        let mut native = template.to_owned();
+        for (key, value) in [
+            ("QUERY_HEADS", config.num_attention_heads),
+            ("KV_HEADS", config.num_key_value_heads),
+            ("QUERY_SIZE", config.query_size()),
+            ("KEY_VALUE_SIZE", config.key_value_size()),
+            (
+                "QUERY_HEADS_PER_KV_HEAD",
+                config.num_attention_heads / config.num_key_value_heads,
+            ),
+        ] {
+            native = native.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+        }
+        native = native.replace(
+            "{{RMS_EPSILON_BITS}}",
+            &format!("{:08X}", config.rms_norm_eps.to_bits()),
+        );
+        fused::append_hex(source, &native);
+    }
 }
 
-pub(super) fn graph() -> String {
+fn supported_attention(config: &ModelConfig) -> bool {
+    matches!(config.head_dim, 32 | 64 | 128 | 256)
+}
+
+pub(super) fn graph(config: &ModelConfig, options: InferenceOptions) -> String {
     let mut graph = include_str!("../catena/qwen3_prefill.hex").to_owned();
     graph = graph.replace(
         "  ([.weights9] *.elim [wu wd.])",
@@ -125,6 +156,18 @@ pub(super) fn graph() -> String {
         "output",
     );
     graph.replace_range(start..end, &down);
+    if options.fp8_attention && supported_attention(config) {
+        if config.rope_dimension_count == config.head_dim {
+            graph = graph.replace(
+                "stdlib.qwen35.batch.full-prepare [query cache-ready.]",
+                "stdlib.qwen3.fp8.attention.prepare [query cache-ready.]",
+            );
+        }
+        graph = graph.replace(
+            "stdlib.qwen35.wmma.attention.run [attended.]",
+            "stdlib.qwen3.fp8.attention.run [attended.]",
+        );
+    }
     graph
 }
 
