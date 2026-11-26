@@ -667,3 +667,48 @@ CATENA_GPU_DIALECT=cuda cargo test --release --lib \
 The cold tiny-model Hex compiles took 180.9 s for SIMT BF16 and 425.7 s for FP8;
 subsequent CLI execution uses the existing compiler caches. The 35B configuration
 passes source generation, but the full checkpoint was not loaded or benchmarked.
+
+### Qwen3.5 dense layer-prefix testing
+
+`--num-layers N` keeps transformer blocks `0..N` and the original embedding,
+final norm, and vocabulary head. The same effective configuration drives the
+weight ABI, generated Hex, and session state. The first one to three layers of
+Qwen3.5-0.8B are linear attention only; these prefixes use direct linear dispatch
+and unit-valued empty full-attention weight groups. Mixed prefixes keep the
+existing generated program and compiler cache entries.
+
+The initial CLI/API support is Qwen3.5 dense text safetensors only. Counts must
+be between one and the original depth (24 for Qwen/Qwen3.5-0.8B). Indexed files
+resolve only shards containing selected tensors and FP8 scale sidecars. Unused
+layers are excluded from the loader's tensor metadata and never converted,
+quantized, pinned, or uploaded. Shared shard files still download in full and
+metadata/page reads are unavoidable. HIP registers selected tensor ranges
+rather than the full shared shard. Cached configs and indices are not rewritten.
+The original embedding/head are a substantial fixed memory cost.
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model Qwen/Qwen3.5-0.8B --num-layers 4 \
+  --bench --pp 128 --tg 8 --bench-runs 3
+CATENA_GPU_DIALECT=cuda cargo test -r --test qwen35_layer_limit \
+  -- --ignored --nocapture --test-threads=1
+```
+
+On the RTX 5050 development GPU, BF16 matrix-core smoke measurements were:
+
+| Retained layers | Prepared text weights | Parameters | pp128 tokens/s | tg8/ctx1 tokens/s |
+| --- | --- | --- | --- | --- |
+| 1 / 24 | 526.17 MiB | 275.84 M | 18,379.79 ± 339.63 | 331.61 ± 39.10 |
+| 4 / 24 | 643.51 MiB | 337.30 M | 6,740.80 ± 87.11 | 258.12 ± 9.98 |
+
+The parity fixtures physically crop the checkpoint files independently of the
+loader and require identical logits for matching execution modes, with prefill
+lengths 1, 2, 17, and 65, three forced decode steps, and chunked prefill. CPU
+fixtures cover invalid limits, source generation at 1/3/4/5/24 layers, wrapped
+names, native FP8 scales, shared shards, and omitted-only shards that do not
+exist. Truncation changes model behavior and is intended for correctness and
+relative kernel benchmarking; generated text quality is not meaningful.
+
+CUDA parity passed at both one and four layers for BF16 SIMT, BF16 matrix-core,
+and native FP8 execution. The final cached GPU regression pass completed all
+three cases successfully; the 51 library and 41 CLI/server tests also passed.

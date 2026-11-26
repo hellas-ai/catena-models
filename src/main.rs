@@ -8,7 +8,7 @@ use std::{
 use anyhow::{Context, Result, ensure};
 use catena_models::{
     catena::{InferenceOptions, KernelKind, PrefillDtype, generated_model_source_for_options},
-    hfhub::{HubCheckpoint, download_mmproj, download_model},
+    hfhub::{HubCheckpoint, download_mmproj, download_model_with_layer_limit},
     model::Model,
     vision::{PreparedMultimodalPrompt, VisionModel},
 };
@@ -36,6 +36,10 @@ struct Args {
     /// Qwen3 dense and Qwen3.5 dense/MoE prefill arithmetic; FP8 assumes CUDA SM89+.
     #[arg(long, value_enum, default_value_t = PrefillDtype::Bf16)]
     prefill_dtype: PrefillDtype,
+
+    /// Load only the first N transformer layers (Qwen3.5 dense or MoE safetensors).
+    #[arg(long, value_parser = parse_positive_usize, conflicts_with_all = ["image", "systemone"])]
+    num_layers: Option<usize>,
 
     /// Use SIMT prefill instead of WMMA.
     #[arg(long, conflicts_with = "wmma_prefill")]
@@ -130,10 +134,14 @@ fn main() -> Result<()> {
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches)?;
     let options = inference_options(&args)?;
+    ensure!(
+        args.num_layers.is_none() || !args.server.tts_only(),
+        "--num-layers requires an LLM"
+    );
     if args.server.tts_only() {
         return server::run(args.server, None, options);
     }
-    let checkpoint = download_model(&args.model)?;
+    let checkpoint = download_model_with_layer_limit(&args.model, args.num_layers)?;
     match &checkpoint {
         HubCheckpoint::Gguf(gguf) => eprintln!(
             "selected {} GGUF file(s) from the Hugging Face cache",
@@ -488,7 +496,12 @@ fn tokens_per_second_stats(samples: &[(usize, Duration)]) -> (f64, Option<f64>) 
 }
 
 fn print_benchmark_table(model: &Model, rows: &[BenchRow]) {
-    let model_width = 40_usize.max(model.display_name().chars().count());
+    let name = format!(
+        "{} (layers: {})",
+        model.display_name(),
+        model.config().num_layers
+    );
+    let model_width = 40_usize.max(name.chars().count());
     println!(
         "| {:model_width$} | {:10} | {:10} | {:>15} | {:>20} |",
         "model", "size", "params", "test", "t/s"
@@ -510,11 +523,7 @@ fn print_benchmark_table(model: &Model, rows: &[BenchRow]) {
         );
         println!(
             "| {:model_width$} | {:>10} | {:>10} | {:>15} | {:>20} |",
-            model.display_name(),
-            size,
-            params,
-            row.test,
-            rate
+            name, size, params, row.test, rate
         );
     }
 }
@@ -540,6 +549,43 @@ fn format_parameter_count(parameters: usize) -> String {
 #[cfg(test)]
 mod cli_tests {
     use super::*;
+    #[test]
+    fn layer_count_cli_is_optional_positive_and_text_only() {
+        assert!(
+            Args::try_parse_from(["app", "--prompt", "hi"])
+                .unwrap()
+                .num_layers
+                .is_none()
+        );
+        assert_eq!(
+            Args::try_parse_from(["app", "--prompt", "hi", "--num-layers", "4"])
+                .unwrap()
+                .num_layers,
+            Some(4)
+        );
+        for n in ["0", "-1", "abc"] {
+            assert!(Args::try_parse_from(["app", "--prompt", "hi", "--num-layers", n]).is_err());
+        }
+        assert!(
+            Args::try_parse_from([
+                "app",
+                "--prompt",
+                "hi",
+                "--num-layers",
+                "4",
+                "--image",
+                "a.png"
+            ])
+            .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["app", "--systemone", "a.json", "--num-layers", "4"]).is_err()
+        );
+        for mode in ["--bench", "--generate-entrypoint", "--serve"] {
+            assert!(Args::try_parse_from(["app", mode, "--num-layers", "4"]).is_ok());
+        }
+    }
+
     #[test]
     fn default_model_in_cli_and_server() {
         for args in [vec!["app", "--prompt", "hi"], vec!["app", "--serve"]] {

@@ -53,7 +53,7 @@ impl HubCheckpoint {
 /// Resolve `owner/model[:variant]`, list its GGUF files, select one checkpoint,
 /// and download every shard into the standard Hugging Face cache.
 pub fn download_gguf(model: &str) -> Result<HubGguf> {
-    match download_checkpoint(model, false)? {
+    match download_checkpoint(model, false, None)? {
         HubCheckpoint::Gguf(gguf) => Ok(gguf),
         HubCheckpoint::Safetensors { .. } => unreachable!(),
     }
@@ -61,10 +61,22 @@ pub fn download_gguf(model: &str) -> Result<HubGguf> {
 
 /// Prefer a model GGUF, otherwise resolve a Qwen safetensors checkpoint.
 pub fn download_model(model: &str) -> Result<HubCheckpoint> {
-    download_checkpoint(model, true)
+    download_model_with_layer_limit(model, None)
 }
 
-fn download_checkpoint(model: &str, allow_safetensors: bool) -> Result<HubCheckpoint> {
+/// Resolve a prefix of a Qwen3.5 safetensors model without fetching unused shards.
+pub fn download_model_with_layer_limit(
+    model: &str,
+    num_layers: Option<usize>,
+) -> Result<HubCheckpoint> {
+    download_checkpoint(model, true, num_layers)
+}
+
+fn download_checkpoint(
+    model: &str,
+    allow_safetensors: bool,
+    num_layers: Option<usize>,
+) -> Result<HubCheckpoint> {
     let (repo_id, variant) = parse_model_selector(model)?;
     let (owner, name) = split_id(repo_id);
     ensure!(
@@ -92,7 +104,26 @@ fn download_checkpoint(model: &str, allow_safetensors: bool) -> Result<HubCheckp
             .send()
             .with_context(|| format!("downloading {repo_id}/{path}"))
     };
-    match select_model_files(&paths, variant, allow_safetensors)
+    let selectable = if num_layers.is_some() {
+        ensure!(
+            variant.is_none(),
+            "--num-layers requires safetensors without a GGUF variant"
+        );
+        ensure!(
+            paths
+                .iter()
+                .any(|p| p == "model.safetensors" || p == "model.safetensors.index.json"),
+            "--num-layers requires a safetensors checkpoint"
+        );
+        paths
+            .iter()
+            .filter(|p| !is_model_gguf(p))
+            .cloned()
+            .collect()
+    } else {
+        paths.clone()
+    };
+    match select_model_files(&selectable, variant, allow_safetensors)
         .with_context(|| format!("selecting checkpoint from {repo_id}"))?
     {
         ModelFiles::Gguf(selected) => {
@@ -100,26 +131,55 @@ fn download_checkpoint(model: &str, allow_safetensors: bool) -> Result<HubCheckp
         }
         ModelFiles::Safetensors(checkpoint) => {
             let config_path = fetch("config.json")?;
-            let config = crate::qwen_checkpoint::read_config(&config_path, repo_id)?;
+            let mut config = crate::qwen_checkpoint::read_config(&config_path, repo_id)?;
+            if let Some(count) = num_layers {
+                limit_layers(&mut config, count)?;
+            }
+            let selection = num_layers
+                .map(|_| crate::qwen_checkpoint::TensorSelection::new(&config))
+                .transpose()?;
             let mut filenames = vec![checkpoint, "tokenizer.json", "config.json"];
             for name in ["tokenizer_config.json", "chat_template.jinja"] {
                 if paths.iter().any(|path| path == name) {
                     filenames.push(name);
                 }
             }
-            let root = resolve_files(&filenames, |name| {
-                if name == "config.json" {
-                    Ok(config_path.clone())
-                } else {
-                    fetch(name)
-                }
-            })?;
+            let selected = |name: &str| selection.as_ref().is_none_or(|s| s.contains(name));
+            let root = resolve_files_selected(
+                &filenames,
+                |name| {
+                    if name == "config.json" {
+                        Ok(config_path.clone())
+                    } else {
+                        fetch(name)
+                    }
+                },
+                &selected,
+            )?;
             Ok(HubCheckpoint::Safetensors {
                 path: root.join(checkpoint),
                 config: Box::new(config),
             })
         }
     }
+}
+
+fn limit_layers(config: &mut ModelConfig, count: usize) -> Result<()> {
+    ensure!(
+        config.is_qwen35(),
+        "--num-layers currently requires Qwen3.5 dense or MoE text safetensors"
+    );
+    ensure!(
+        count > 0 && count <= config.num_layers,
+        "--num-layers must be between 1 and {} (got {count})",
+        config.num_layers
+    );
+    eprintln!(
+        "selected {count} of {} transformer layers",
+        config.num_layers
+    );
+    config.num_layers = count;
+    config.validate()
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -515,7 +575,14 @@ fn resolve_hub_files(client: &HFClientSync, model: &str, filenames: &[&str]) -> 
 }
 fn resolve_files(
     filenames: &[&str],
+    fetch: impl FnMut(&str) -> Result<PathBuf>,
+) -> Result<PathBuf> {
+    resolve_files_selected(filenames, fetch, &|_| true)
+}
+fn resolve_files_selected(
+    filenames: &[&str],
     mut fetch: impl FnMut(&str) -> Result<PathBuf>,
+    selected: &dyn Fn(&str) -> bool,
 ) -> Result<PathBuf> {
     use std::collections::BTreeSet;
     let mut pending: Vec<String> = filenames.iter().map(|s| s.to_string()).collect();
@@ -542,7 +609,9 @@ fn resolve_files(
             root = Some(directory.to_owned());
         }
         if name.ends_with(".safetensors.index.json") {
-            let index: SafetensorsIndex = read_json(&path)?;
+            let mut index: SafetensorsIndex = read_json(&path)?;
+            index.shards()?;
+            index.weight_map.retain(|name, _| selected(name));
             for shard in index.shards()? {
                 pending.push(
                     relative
@@ -575,6 +644,159 @@ mod model_files_tests {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
+    #[test]
+    fn layer_limit_validates_and_keeps_the_original_schedule() -> Result<()> {
+        for original in [ModelConfig::qwen35_0_8b(), ModelConfig::qwen36_35b_a3b()] {
+            for n in [1, 3, 4, 5, original.num_layers] {
+                let mut config = original.clone();
+                limit_layers(&mut config, n)?;
+                assert_eq!(config.num_layers, n);
+                for l in 0..n {
+                    assert_eq!(config.layer_type(l), original.layer_type(l));
+                }
+            }
+            for n in [0, original.num_layers + 1] {
+                assert!(limit_layers(&mut original.clone(), n).is_err());
+            }
+        }
+        assert!(limit_layers(&mut ModelConfig::qwen3_0_6b(), 4).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn moe_selection_includes_experts_scales_and_fused_layouts() -> Result<()> {
+        let mut config = ModelConfig::qwen36_35b_a3b();
+        limit_layers(&mut config, 4)?;
+        let selection = crate::qwen_checkpoint::TensorSelection::new(&config)?;
+        for suffix in [
+            "experts.0.gate_proj.weight",
+            "experts.255.up_proj.weight_scale_inv",
+            "experts.255.down_proj.weight_scale_inv",
+            "experts.gate_up_proj",
+            "experts.down_proj",
+            "gate.weight",
+            "shared_expert.gate_proj.weight_scale_inv",
+        ] {
+            assert!(
+                selection.contains(&format!("model.language_model.layers.3.mlp.{suffix}")),
+                "{suffix}"
+            );
+            assert!(
+                !selection.contains(&format!("model.language_model.layers.4.mlp.{suffix}")),
+                "{suffix}"
+            );
+        }
+        assert!(selection.contains("model.language_model.embed_tokens.weight"));
+        assert!(selection.contains("model.language_model.norm.weight"));
+        assert!(selection.contains("lm_head.weight"));
+        assert!(!selection.contains("model.visual.weight"));
+        Ok(())
+    }
+
+    #[test]
+    fn selected_index_fetches_only_required_shards_without_rewriting_it() -> Result<()> {
+        let t = Temp::new("layer-selection");
+        let mut config = ModelConfig::qwen35_0_8b();
+        limit_layers(&mut config, 1)?;
+        let selection = crate::qwen_checkpoint::TensorSelection::new(&config)?;
+        assert!(selection.contains(
+            "model.language_model.language_model.layers.0.linear_attn.in_proj_qkv.weight_scale_inv"
+        ));
+        assert!(!selection.contains("model.language_model.layers.1.input_layernorm.weight"));
+        assert!(!selection.contains("model.visual.weight"));
+        let index = serde_json::json!({"weight_map": {
+            "model.language_model.embed_tokens.weight": "globals.safetensors",
+            "model.language_model.norm.weight": "globals.safetensors",
+            "lm_head.weight": "globals.safetensors",
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight": "shared.safetensors",
+            "model.language_model.layers.0.linear_attn.in_proj_qkv.weight_scale_inv": "shared.safetensors",
+            "model.language_model.layers.1.input_layernorm.weight": "shared.safetensors",
+            "model.language_model.layers.23.input_layernorm.weight": "absent.safetensors",
+            "model.visual.weight": "vision-absent.safetensors"
+        }});
+        let path = t.0.join("model.safetensors.index.json");
+        fs::write(&path, serde_json::to_vec(&index)?)?;
+        for name in ["globals.safetensors", "shared.safetensors"] {
+            fs::write(t.0.join(name), b"fixture")?;
+        }
+        let mut fetched = Vec::new();
+        resolve_files_selected(
+            &["model.safetensors.index.json"],
+            |name| {
+                fetched.push(name.to_owned());
+                let path = t.0.join(name);
+                ensure!(path.is_file(), "unexpected fetch {name}");
+                Ok(path)
+            },
+            &|name| selection.contains(name),
+        )?;
+        fetched.sort();
+        assert_eq!(
+            fetched,
+            [
+                "globals.safetensors",
+                "model.safetensors.index.json",
+                "shared.safetensors"
+            ]
+        );
+        assert_eq!(read_json::<serde_json::Value>(&path)?, index);
+        assert!(
+            resolve_local_files(
+                "unused/model",
+                &["model.safetensors.index.json"],
+                Some(&t.0)
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn selected_loader_does_not_require_omitted_shards_or_expose_omitted_tensors() -> Result<()> {
+        use safetensors::{
+            Dtype,
+            tensor::{TensorView, serialize_to_file},
+        };
+        let t = Temp::new("selected-loader");
+        let path = t.0.join("shared.safetensors");
+        serialize_to_file(
+            [
+                ("keep", TensorView::new(Dtype::BF16, vec![1], &[0, 0x3f])?),
+                ("skip", TensorView::new(Dtype::I64, vec![1], &[255; 8])?),
+            ],
+            None,
+            &path,
+        )?;
+        let index = t.0.join("model.safetensors.index.json");
+        fs::write(
+            &index,
+            serde_json::to_vec(&serde_json::json!({"weight_map": {
+                "keep": "shared.safetensors", "skip": "shared.safetensors", "absent": "absent.safetensors"
+            }}))?,
+        )?;
+        for path in [&path, &index] {
+            let weights = crate::weights::Weights::open_selected(path, &|name| name == "keep")?;
+            assert_eq!(
+                weights
+                    .tensors
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["keep"]
+            );
+            assert_eq!(weights.host_bf16("keep")?, [0x3f00]);
+            assert!(weights.host_bf16("skip").is_err());
+        }
+        assert!(crate::weights::Weights::open(&index).is_err());
+        let bad = t.0.join("bad.index.json");
+        fs::write(
+            &bad,
+            r#"{"weight_map":{"keep":"shared.safetensors","missing":"shared.safetensors"}}"#,
+        )?;
+        assert!(crate::weights::Weights::open_selected(&bad, &|_| true).is_err());
+        Ok(())
+    }
+
     #[test]
     fn prefers_gguf_and_keeps_its_selection_errors() -> Result<()> {
         let mut paths = vec![

@@ -206,6 +206,49 @@ cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 \
 cargo test --all-targets
 ```
 
+For prefix-only testing on a small GPU, `--num-layers N` retains the first N
+transformer layers of a **Qwen3.5 dense or MoE safetensors** checkpoint. The original
+embedding, final normalization, and output head stay in place. For example,
+Qwen3.5-0.8B has 24 layers:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model Qwen/Qwen3.5-0.8B --num-layers 4 --bench --pp 128 --tg 8
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model Qwen/Qwen3.5-0.8B --num-layers 1 --prompt 'Gravity is'
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model surogate/Qwen3.5-0.8B-FP8 --num-layers 4 --prefill-dtype fp8 \
+  --bench --pp 128 --tg 8
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model Qwen/Qwen3.6-35B-A3B-FP8 --num-layers 4 --bench
+```
+
+Counts 1 through the model’s full layer count work, including prefixes with only
+linear attention. Omit the option for the full model. The limit also applies to `--generate-entrypoint`
+and text serving. Benchmark tables report the effective layer count, weight
+bytes, and parameter count. The option currently excludes GGUF, images,
+and System One. Dense FP8 still requires a compatible native FP8 checkpoint.
+The default BF16 execution path expands FP8 checkpoint weights to BF16. For
+Qwen3.6-35B-A3B-FP8, four layers exceed an 8 GiB GPU's memory during weight
+preparation; use three layers on that GPU.
+
+Indexed checkpoints fetch and open only shards containing retained tensors.
+Unused layers are never converted, quantized, GPU-pinned, or uploaded. Shared
+shards and single-file checkpoints download in full; only their metadata and
+retained tensor payloads are accessed by the loader. OS reads and mappings work
+at page granularity. Cached configuration/index files remain unchanged, so a
+later full-model load downloads any missing shards normally. Embedding/head
+memory remains a fixed cost, and generated text from a shortened model is not
+expected to be meaningful.
+
+The layer-prefix CUDA checks compare the selected model with independently
+cropped safetensors checkpoints, including prefill, chunking, and forced decode:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo test -r --test qwen35_layer_limit \
+  -- --ignored --nocapture --test-threads=1
+```
+
 The default tests need no GPU or model downloads. Run the example applications
 above and below to exercise model compilation and GPU execution.
 

@@ -241,12 +241,19 @@ pub(crate) fn header(s: &mut String, name: &str, inputs: &[(&str, &str)], output
 }
 
 pub(crate) fn nested_product(types: &[String]) -> String {
+    if types.is_empty() {
+        return "1".to_owned();
+    }
     if types.len() == 1 {
         return types[0].clone();
     }
     format!("({{{} {}}} *)", types[0], nested_product(&types[1..]))
 }
 pub(crate) fn pack(s: &mut String, names: &[String], output: &str) {
+    if names.is_empty() {
+        writeln!(s, "  (unit.intro [{output}.])").unwrap();
+        return;
+    }
     if names.len() == 1 {
         writeln!(s, "  ([.{}] [{}.] )", names[0], output).unwrap();
         return;

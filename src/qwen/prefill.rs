@@ -451,6 +451,11 @@ pub(super) fn emit(
             "(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-)",
         ),
     ] {
+        let present = (0..cfg.num_layers)
+            .any(|l| (cfg.layer_type(l) == LayerType::FullAttention) == (kind == "full"));
+        if !present {
+            continue;
+        }
         let pair = format!("({{{TRIPLE} ({{{proof} 1}} *)}} *)");
         let mut args = vec![("weights", group)];
         args.extend(common.clone());
@@ -493,68 +498,87 @@ pub(super) fn emit(
         &format!("({{{TRIPLE} (prop.Truth |-)}} *)"),
     );
     fold_prefix(s);
-    call(
-        s,
-        &["full-weights", "index-value"],
-        "stdlib.qwen35.full-weights",
-        "full-selected",
-    );
-    call(
-        s,
-        &["linear-weights", "index-value"],
-        "stdlib.qwen35.linear-weights",
-        "linear-selected",
-    );
-    s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
-    let mut previous = "(const.u32.0x00000000)".to_owned();
-    for (i, layer) in (0..cfg.num_layers)
-        .filter(|&l| cfg.layer_type(l) == LayerType::FullAttention)
-        .enumerate()
-    {
+    let has_full = (0..cfg.num_layers).any(|l| cfg.layer_type(l) == LayerType::FullAttention);
+    let has_linear = (0..cfg.num_layers).any(|l| cfg.layer_type(l) == LayerType::LinearAttention);
+    if !has_full || !has_linear {
+        let kind = if has_full { "full" } else { "linear" };
         call(
             s,
-            &["index-value", &format!("(const.u32.0x{layer:08X})")],
+            &[&format!("{kind}-weights"), "index-value"],
+            &format!("stdlib.qwen35.{kind}-weights"),
+            "selected",
+        );
+        s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
+        let args = ["selected"]
+            .into_iter()
+            .chain(cn.iter().copied())
+            .chain(["state"])
+            .collect::<Vec<_>>();
+        call(s, &args, &format!("stdlib.qwen35.batch.{kind}"), "result");
+    } else {
+        call(
+            s,
+            &["full-weights", "index-value"],
+            "stdlib.qwen35.full-weights",
+            "full-selected",
+        );
+        call(
+            s,
+            &["linear-weights", "index-value"],
+            "stdlib.qwen35.linear-weights",
+            "linear-selected",
+        );
+        s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
+        let mut previous = "(const.u32.0x00000000)".to_owned();
+        for (i, layer) in (0..cfg.num_layers)
+            .filter(|&l| cfg.layer_type(l) == LayerType::FullAttention)
+            .enumerate()
+        {
+            call(
+                s,
+                &["index-value", &format!("(const.u32.0x{layer:08X})")],
+                "stdlib.models.memory.u32.equal",
+                &format!("eq{i}"),
+            );
+            call(
+                s,
+                &[&format!("eq{i}"), "(const.u32.0x00000001)", &previous],
+                "stdlib.models.memory.select-u32",
+                &format!("flag{i}"),
+            );
+            previous = format!("flag{i}");
+        }
+        call(
+            s,
+            &[&previous, "(const.u32.0x00000001)"],
             "stdlib.models.memory.u32.equal",
-            &format!("eq{i}"),
+            "is-full",
         );
+        s.push_str("  ({[.is-full] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])\n");
+        for kind in ["full", "linear"] {
+            call(
+                s,
+                &[format!("{kind}-selected").as_str()]
+                    .into_iter()
+                    .chain(cn.iter().copied())
+                    .collect::<Vec<_>>(),
+                &format!("partial.stdlib.qwen35.batch.branch-{kind}.{}", cn.len() + 1),
+                &format!("{kind}-branch"),
+            );
+        }
         call(
             s,
-            &[&format!("eq{i}"), "(const.u32.0x00000001)", &previous],
-            "stdlib.models.memory.select-u32",
-            &format!("flag{i}"),
-        );
-        previous = format!("flag{i}");
-    }
-    call(
-        s,
-        &[&previous, "(const.u32.0x00000001)"],
-        "stdlib.models.memory.u32.equal",
-        "is-full",
-    );
-    s.push_str("  ({[.is-full] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])\n");
-    for kind in ["full", "linear"] {
-        call(
-            s,
-            &[format!("{kind}-selected").as_str()]
-                .into_iter()
-                .chain(cn.iter().copied())
-                .collect::<Vec<_>>(),
-            &format!("partial.stdlib.qwen35.batch.branch-{kind}.{}", cn.len() + 1),
-            &format!("{kind}-branch"),
+            &[
+                "condition",
+                "state",
+                "full-branch",
+                "linear-branch",
+                "(unit.intro)",
+            ],
+            "core.if",
+            "result",
         );
     }
-    call(
-        s,
-        &[
-            "condition",
-            "state",
-            "full-branch",
-            "linear-branch",
-            "(unit.intro)",
-        ],
-        "core.if",
-        "result",
-    );
     fold_result(s);
     let mut common = vec![
         ("tokens", REF),

@@ -54,16 +54,29 @@ pub struct Weights {
     pub tensors: BTreeMap<String, TensorInfo>,
     converted: BTreeMap<String, MemOwn>,
     mapped: BTreeMap<String, MappedWeight>,
+    map_whole_shards: bool,
 }
 impl Weights {
     pub fn open(checkpoint: &Path) -> Result<Self> {
+        let mut weights = Self::open_selected(checkpoint, &|_| true)?;
+        weights.map_whole_shards = true;
+        Ok(weights)
+    }
+    pub(crate) fn open_selected(
+        checkpoint: &Path,
+        selected: &dyn Fn(&str) -> bool,
+    ) -> Result<Self> {
         let start = std::time::Instant::now();
-        let indexed: Option<crate::hfhub::SafetensorsIndex> =
+        let mut indexed: Option<crate::hfhub::SafetensorsIndex> =
             if checkpoint.to_string_lossy().ends_with(".index.json") {
                 Some(crate::hfhub::read_json(checkpoint)?)
             } else {
                 None
             };
+        if let Some(index) = &mut indexed {
+            index.shards()?; // Validate filenames before filtering the index.
+            index.weight_map.retain(|name, _| selected(name));
+        }
         let paths: Vec<PathBuf> = if let Some(i) = &indexed {
             i.shards()?
                 .into_iter()
@@ -82,6 +95,9 @@ impl Weights {
             let (header, metadata) = SafeTensors::read_metadata(&bytes)
                 .with_context(|| format!("invalid safetensors {}", path.display()))?;
             for (name, t) in metadata.tensors() {
+                if !selected(&name) {
+                    continue;
+                }
                 ensure!(!tensors.contains_key(&name), "duplicate tensor {name}");
                 if let Some(i) = &indexed {
                     let declared = i
@@ -126,6 +142,7 @@ impl Weights {
             tensors,
             converted: BTreeMap::new(),
             mapped: BTreeMap::new(),
+            map_whole_shards: false,
         })
     }
     pub fn validate(&self, name: &str, shape: &[usize]) -> Result<()> {
@@ -232,6 +249,8 @@ impl Weights {
         {
             self.converted
                 .insert(name.to_owned(), runtime.mem_u16(&self.host_bf16(name)?)?);
+        } else if !self.map_whole_shards {
+            self.prepare_bf16_mapping(name)?;
         } else if self.shards[t.file].registration.is_none() {
             self.shards[t.file].registration = Some(GpuRegistration::new(
                 &self.shards[t.file].bytes,

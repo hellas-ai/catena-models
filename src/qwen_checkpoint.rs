@@ -531,9 +531,62 @@ impl Transform {
     }
 }
 
+/// Checkpoint names selected by a text configuration, including FP8 scales.
+/// Canonicalization matches the loader's supported nested language_model wrappers.
+pub(crate) struct TensorSelection(std::collections::BTreeSet<String>);
+impl TensorSelection {
+    pub(crate) fn new(config: &ModelConfig) -> Result<Self> {
+        let mut names = std::collections::BTreeSet::new();
+        for spec in crate::spec::weight_specs(config)? {
+            // MoE checkpoints can store separate expert matrices or fused BF16
+            // gate/up and down tensors instead of the logical projection names.
+            if config.architecture == ModelArchitecture::Qwen35Moe
+                && let Some((prefix, projection)) = spec.name.rsplit_once(".mlp.experts.")
+            {
+                for source in &spec.sources {
+                    names.insert(source.name.clone());
+                    names.insert(format!("{}_scale_inv", source.name));
+                }
+                match projection {
+                    "gate_proj.weight" | "up_proj.weight" => {
+                        names.insert(format!("{prefix}.mlp.experts.gate_up_proj"));
+                    }
+                    "down_proj.weight" => {
+                        names.insert(format!("{prefix}.mlp.experts.down_proj"));
+                    }
+                    _ => {}
+                }
+            }
+            let name = if config.output_weight_tied && spec.name == "lm_head.weight" {
+                "model.embed_tokens.weight".to_owned()
+            } else {
+                spec.name
+            };
+            names.insert(format!("{name}_scale_inv"));
+            names.insert(name);
+        }
+        Ok(Self(names))
+    }
+    pub(crate) fn contains(&self, name: &str) -> bool {
+        if let Some(mut suffix) = name.strip_prefix("model.") {
+            while let Some(nested) = suffix.strip_prefix("language_model.") {
+                suffix = nested;
+            }
+            self.0.contains(&format!("model.{suffix}"))
+        } else {
+            self.0.contains(name)
+        }
+    }
+}
+
 impl QwenWeights {
     pub(crate) fn open(path: &Path, config: &ModelConfig, specs: &[TensorSpec]) -> Result<Self> {
-        let weights = Weights::open(path)?;
+        let weights = if config.is_qwen35() {
+            let selection = TensorSelection::new(config)?;
+            Weights::open_selected(path, &|name| selection.contains(name))?
+        } else {
+            Weights::open(path)?
+        };
         // Some exported checkpoints repeat the language_model wrapper.
         let mut text_prefix = "model.".to_owned();
         if config.is_qwen35() {

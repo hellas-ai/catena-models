@@ -43,6 +43,9 @@ fn fold_prefix(s: &mut String) {
     s.push_str("  ([.pair] *.elim [index rest.])\n  ([.rest] *.elim [state proofs.])\n  ([.proofs] *.elim [less truth.])\n  ([.less] unsafe.discard unit.elim)\n  ([.index] :.forget [index-value.])\n");
 }
 fn selector(s: &mut String, layers: &[usize], group: &str, tree: &str, kind: &str) {
+    if layers.is_empty() {
+        return;
+    }
     let mut selector = String::new();
     emit_layer_selector(&mut selector, layers.len(), group, tree);
     // Select by absolute cache layer index, even though weight groups are compact.
@@ -534,10 +537,13 @@ fn source_with_scope(
     let linear = (0..config.num_layers)
         .filter(|&l| config.layer_type(l) == LayerType::LinearAttention)
         .collect::<Vec<_>>();
-    ensure!(
-        !full.is_empty() && !linear.is_empty(),
-        "Qwen3.5 requires both full and linear layers"
-    );
+    let sole_kind = if full.is_empty() {
+        Some("linear")
+    } else if linear.is_empty() {
+        Some("full")
+    } else {
+        None
+    };
     ensure!(
         config.linear_conv_kernel == Some(4),
         "Qwen3.5 requires four convolution taps"
@@ -868,7 +874,14 @@ fn source_with_scope(
             "(({(master.predicate prop.IsTrue)} stdlib.prelude.prop.Not) |-)",
         ),
     ] {
-        let pair = format!("({{{TRIPLE} ({{{proof} 1}} *)}} *)");
+        if (kind == "full" && full.is_empty()) || (kind == "linear" && linear.is_empty()) {
+            continue;
+        }
+        let pair = if sole_kind.is_some() {
+            TRIPLE.to_owned()
+        } else {
+            format!("({{{TRIPLE} ({{{proof} 1}} *)}} *)")
+        };
         let mut branch_args = vec![
             ("weights", group),
             ("rope", OWN),
@@ -884,11 +897,22 @@ fn source_with_scope(
 
         header(
             &mut s,
-            &format!("stdlib.qwen35.branch-{kind}"),
+            &format!(
+                "stdlib.qwen35.{}-{kind}",
+                if sole_kind.is_some() {
+                    "apply"
+                } else {
+                    "branch"
+                }
+            ),
             &branch_args,
             TRIPLE,
         );
-        s.push_str("  ([.pair] *.elim [state proofs.])\n  ([.proofs] *.elim [proof unit.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.unit] unit.elim)\n");
+        if sole_kind.is_some() {
+            s.push_str("  ([.pair] [state.])\n");
+        } else {
+            s.push_str("  ([.pair] *.elim [state proofs.])\n  ([.proofs] *.elim [proof unit.])\n  ([.proof] unsafe.discard unit.elim)\n  ([.unit] unit.elim)\n");
+        }
         unpack(&mut s, "state", &names(&["cache", "shadow", "hidden"]));
         let ws = (0..if kind == "full" {
             full_count
@@ -960,76 +984,99 @@ fn source_with_scope(
         &format!("({{{TRIPLE} (prop.Truth |-)}} *)"),
     );
     fold_prefix(&mut s);
-    call(
-        &mut s,
-        &["full-weights", "index-value"],
-        "stdlib.qwen35.full-weights",
-        "full-selected",
-    );
-    call(
-        &mut s,
-        &["linear-weights", "index-value"],
-        "stdlib.qwen35.linear-weights",
-        "linear-selected",
-    );
-    s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
-    // Count membership through scalar equality and select; no layout assumptions.
-    let mut previous = "(const.u32.0x00000000)".to_owned();
-    for (i, &l) in full.iter().enumerate() {
+    if let Some(kind) = sole_kind {
         call(
             &mut s,
-            &["index-value", &format!("(const.u32.0x{l:08X})")],
+            &[&format!("{kind}-weights"), "index-value"],
+            &format!("stdlib.qwen35.{kind}-weights"),
+            "selected",
+        );
+        s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
+        let mut args = vec![
+            "selected", "rope", "capacity", "position", "layer", "sequence",
+        ];
+        if moe {
+            args.extend(SCRATCH);
+        }
+        args.push("state");
+        call(
+            &mut s,
+            &args,
+            &format!("stdlib.qwen35.apply-{kind}"),
+            "result",
+        );
+    } else {
+        call(
+            &mut s,
+            &["full-weights", "index-value"],
+            "stdlib.qwen35.full-weights",
+            "full-selected",
+        );
+        call(
+            &mut s,
+            &["linear-weights", "index-value"],
+            "stdlib.qwen35.linear-weights",
+            "linear-selected",
+        );
+        s.push_str("  ([.index-value] stdlib.models.memory.u32.to-u64 [layer.])\n");
+        // Count membership through scalar equality and select; no layout assumptions.
+        let mut previous = "(const.u32.0x00000000)".to_owned();
+        for (i, &l) in full.iter().enumerate() {
+            call(
+                &mut s,
+                &["index-value", &format!("(const.u32.0x{l:08X})")],
+                "stdlib.models.memory.u32.equal",
+                &format!("is-full{i}"),
+            );
+            call(
+                &mut s,
+                &[&format!("is-full{i}"), "(const.u32.0x00000001)", &previous],
+                "stdlib.models.memory.select-u32",
+                &format!("full-flag{i}"),
+            );
+            previous = format!("full-flag{i}");
+        }
+        call(
+            &mut s,
+            &[&previous, "(const.u32.0x00000001)"],
             "stdlib.models.memory.u32.equal",
-            &format!("is-full{i}"),
+            "is-full",
         );
-        call(
-            &mut s,
-            &[&format!("is-full{i}"), "(const.u32.0x00000001)", &previous],
-            "stdlib.models.memory.select-u32",
-            &format!("full-flag{i}"),
-        );
-        previous = format!("full-flag{i}");
-    }
-    call(
-        &mut s,
-        &[&previous, "(const.u32.0x00000001)"],
-        "stdlib.models.memory.u32.equal",
-        "is-full",
-    );
-    s.push_str("  ({[.is-full] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])\n");
-    for kind in ["full", "linear"] {
+        s.push_str("  ({[.is-full] (unit.intro meta.master.predicate)} smolcat.value.named_at :.forget [condition.])\n");
+        for kind in ["full", "linear"] {
+            call(
+                &mut s,
+                &[
+                    &format!("{kind}-selected"),
+                    "rope",
+                    "capacity",
+                    "position",
+                    "layer",
+                    "sequence",
+                ]
+                .into_iter()
+                .chain(if moe { SCRATCH.to_vec() } else { vec![] })
+                .collect::<Vec<_>>(),
+                &format!(
+                    "partial.stdlib.qwen35.branch-{kind}.{}",
+                    if moe { 13 } else { 6 }
+                ),
+                &format!("{kind}-branch"),
+            );
+        }
         call(
             &mut s,
             &[
-                &format!("{kind}-selected"),
-                "rope",
-                "capacity",
-                "position",
-                "layer",
-                "sequence",
-            ]
-            .into_iter()
-            .chain(if moe { SCRATCH.to_vec() } else { vec![] })
-            .collect::<Vec<_>>(),
-            &format!(
-                "partial.stdlib.qwen35.branch-{kind}.{}",
-                if moe { 13 } else { 6 }
-            ),
-            &format!("{kind}-branch"),
+                "condition",
+                "state",
+                "full-branch",
+                "linear-branch",
+                "(unit.intro)",
+            ],
+            "core.if",
+            "result",
         );
     }
-    call(
-        &mut s,
-        &[
-            "condition",
-            "state",
-            "full-branch",
-            "linear-branch",
-            "(unit.intro)",
-        ],
-        "core.if",
-        "result",
-    );
     s.push_str("  ({[.result] [.truth]} *.intro)");
     finish(&mut s);
     emit_entry(
