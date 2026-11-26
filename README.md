@@ -6,12 +6,14 @@ All applications use one compiler backend and explicit Hex GPU kernels.
 
 Model selection uses Hugging Face names. The Hub client manages downloads,
 shards, revisions, and caches. `HF_TOKEN`, `HF_HOME`, and `HF_HUB_CACHE` retain
-their normal meanings. The text loader prefers GGUF and supports dense Qwen3
-and Qwen3.5 safetensors when the repository has no model GGUF. Safetensors
+their normal meanings. The text loader prefers GGUF and supports dense Qwen3,
+dense Qwen3.5, and Qwen3.5 MoE safetensors (including Qwen3.6-35B-A3B)
+when the repository has no model GGUF. Safetensors
 checkpoints can be a single file or an indexed set of shards. LLM image inputs
 require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
-Dense Qwen3 dynamic FP8 safetensors are dequantized to BF16 at load time.
+Dynamic FP8 safetensors for dense Qwen3 and Qwen3.5 MoE are dequantized to
+BF16 at load time.
 
 ## GPU selection
 
@@ -35,6 +37,8 @@ cargo run -r -- --model unsloth/Qwen3.5-0.8B --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3-0.6B --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3-0.6B-FP8 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.6-35B-A3B-GGUF:BF16 --prompt 'Gravity is'
+cargo run -r -- --model Qwen/Qwen3.6-35B-A3B --prompt 'Gravity is'
+cargo run -r -- --model Qwen/Qwen3.6-35B-A3B-FP8 --prompt 'Gravity is'
 cargo run -r -- --model unsloth/Qwen3.5-0.8B-GGUF:BF16 \
   --image photo.jpg --prompt 'Describe this image.'
 ```

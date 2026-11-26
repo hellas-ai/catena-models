@@ -24,11 +24,36 @@ pub struct TensorInfo {
 struct Shard {
     registration: Option<GpuRegistration>,
     bytes: Mmap,
+    file: File,
+}
+
+pub(crate) struct MappedWeight {
+    registration: GpuRegistration,
+    _bytes: Mmap,
+    offset: usize,
+    len: usize,
+}
+
+impl MappedWeight {
+    pub(crate) fn new(bytes: Mmap, offset: usize, len: usize) -> Result<Self> {
+        let registration = GpuRegistration::new(&bytes, GpuDialect::Hip)?;
+        Ok(Self {
+            registration,
+            _bytes: bytes,
+            offset,
+            len,
+        })
+    }
+
+    pub(crate) fn gpu_ref(&self) -> Result<MemRef<'_>> {
+        self.registration.reference(self.offset, self.len)
+    }
 }
 pub struct Weights {
     shards: Vec<Shard>,
     pub tensors: BTreeMap<String, TensorInfo>,
     converted: BTreeMap<String, MemOwn>,
+    mapped: BTreeMap<String, MappedWeight>,
 }
 impl Weights {
     pub fn open(checkpoint: &Path) -> Result<Self> {
@@ -82,6 +107,7 @@ impl Weights {
             shards.push(Shard {
                 registration: None,
                 bytes,
+                file,
             });
         }
         if let Some(i) = indexed {
@@ -99,6 +125,7 @@ impl Weights {
             shards,
             tensors,
             converted: BTreeMap::new(),
+            mapped: BTreeMap::new(),
         })
     }
     pub fn validate(&self, name: &str, shape: &[usize]) -> Result<()> {
@@ -218,9 +245,34 @@ impl Weights {
         self.converted.insert(name.to_owned(), mem);
         Ok(())
     }
+    /// Map only the tensor's pages so unused or repacked tensors stay pageable.
+    pub(crate) fn prepare_bf16_mapping(&mut self, name: &str) -> Result<()> {
+        let t = &self.tensors[name];
+        ensure!(
+            t.dtype == Dtype::BF16 && t.offset % 2 == 0,
+            "{name}: expected aligned BF16"
+        );
+        // SAFETY: sysconf with _SC_PAGESIZE has no pointer arguments.
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        ensure!(page_size > 0, "could not determine the host page size");
+        let offset = t.offset % page_size as usize;
+        // SAFETY: the same immutable file and validated range back the shard mmap.
+        let bytes = unsafe {
+            MmapOptions::new()
+                .offset((t.offset - offset) as u64)
+                .len(offset + t.len)
+                .map(&self.shards[t.file].file)?
+        };
+        self.mapped
+            .insert(name.to_owned(), MappedWeight::new(bytes, offset, t.len)?);
+        Ok(())
+    }
     pub fn gpu_ref(&self, name: &str) -> Result<MemRef<'_>> {
         if let Some(m) = self.converted.get(name) {
             return Ok(m.as_ref());
+        }
+        if let Some(m) = self.mapped.get(name) {
+            return m.gpu_ref();
         }
         let t = self
             .tensors

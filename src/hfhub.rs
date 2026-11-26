@@ -59,7 +59,7 @@ pub fn download_gguf(model: &str) -> Result<HubGguf> {
     }
 }
 
-/// Prefer a model GGUF, otherwise resolve a dense Qwen safetensors checkpoint.
+/// Prefer a model GGUF, otherwise resolve a Qwen safetensors checkpoint.
 pub fn download_model(model: &str) -> Result<HubCheckpoint> {
     download_checkpoint(model, true)
 }

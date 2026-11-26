@@ -1,8 +1,12 @@
-//! Hugging Face dense Qwen weights in the existing text-model ABI.
+//! Hugging Face Qwen weights in the existing text-model ABI.
 use std::{collections::HashSet, path::Path};
 
 use anyhow::{Context, Result, ensure};
-use catena_lang::runtime::{MemRef, Runtime};
+use catena_lang::{
+    codegen::GpuDialect,
+    runtime::{MemOwn, MemRef, Runtime},
+};
+use memmap2::MmapMut;
 use safetensors::Dtype;
 use serde::Deserialize;
 use serde_json::Value;
@@ -10,14 +14,18 @@ use serde_json::Value;
 use crate::{
     hfhub::read_json,
     spec::{ModelArchitecture, ModelConfig, TensorSpec, WeightDtype},
-    weights::{Weights, f32_to_bf16, startup_timing},
+    weights::{MappedWeight, Weights, f32_to_bf16, startup_timing},
 };
 
 #[derive(Deserialize)]
 struct TextConfig {
     vocab_size: usize,
     hidden_size: usize,
-    intermediate_size: usize,
+    intermediate_size: Option<usize>,
+    moe_intermediate_size: Option<usize>,
+    shared_expert_intermediate_size: Option<usize>,
+    num_experts: Option<usize>,
+    num_experts_per_tok: Option<usize>,
     num_hidden_layers: usize,
     num_attention_heads: usize,
     num_key_value_heads: Option<usize>,
@@ -58,25 +66,28 @@ struct RopeConfig {
 
 pub(crate) fn read_config(path: &Path, repo: &str) -> Result<ModelConfig> {
     let root: Value = read_json(path)?;
-    parse_config(root, repo)
-        .with_context(|| format!("reading dense Qwen config from {}", path.display()))
+    parse_config(root, repo).with_context(|| format!("reading Qwen config from {}", path.display()))
 }
 
 fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
-    let architecture = match root["model_type"].as_str() {
-        Some("qwen3") => ModelArchitecture::Qwen3Dense,
-        Some("qwen3_5" | "qwen3_5_text") => ModelArchitecture::Qwen35Dense,
-        other => anyhow::bail!(
-            "unsupported safetensors model type {other:?}; expected dense Qwen3 or Qwen3.5"
-        ),
+    let (architecture, text_type) = match root["model_type"].as_str() {
+        Some("qwen3") => (ModelArchitecture::Qwen3Dense, "qwen3"),
+        Some("qwen3_5" | "qwen3_5_text") => (ModelArchitecture::Qwen35Dense, "qwen3_5_text"),
+        Some("qwen3_5_moe" | "qwen3_5_moe_text") => {
+            (ModelArchitecture::Qwen35Moe, "qwen3_5_moe_text")
+        }
+        other => {
+            anyhow::bail!("unsupported safetensors model type {other:?}; expected Qwen3 or Qwen3.5")
+        }
     };
-    let qwen35 = architecture == ModelArchitecture::Qwen35Dense;
+    let qwen35 = architecture != ModelArchitecture::Qwen3Dense;
+    let moe = architecture == ModelArchitecture::Qwen35Moe;
     let tied = root["tie_word_embeddings"].as_bool();
     fp8_block_size(&root["quantization_config"], architecture)?;
     let text = if qwen35 && !root["text_config"].is_null() {
         let text = root["text_config"].take();
         ensure!(
-            text["model_type"].is_null() || text["model_type"] == "qwen3_5_text",
+            text["model_type"].is_null() || text["model_type"] == text_type,
             "unsupported Qwen3.5 text model type"
         );
         text
@@ -131,7 +142,12 @@ fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
         architecture,
         vocabulary_size: hf.vocab_size,
         hidden_size: hf.hidden_size,
-        intermediate_size: hf.intermediate_size,
+        intermediate_size: if moe {
+            hf.moe_intermediate_size
+                .context("missing moe_intermediate_size")?
+        } else {
+            hf.intermediate_size.context("missing intermediate_size")?
+        },
         num_layers: hf.num_hidden_layers,
         num_nextn_layers: 0,
         num_attention_heads: hf.num_attention_heads,
@@ -142,9 +158,22 @@ fn parse_config(mut root: Value, repo: &str) -> Result<ModelConfig> {
         rope_theta,
         rope_dimension_count: (head_dim as f32 * rotary_fraction) as usize,
         mrope_sections: [0; 3],
-        num_experts: 0,
-        experts_per_token: 0,
-        shared_expert_intermediate_size: None,
+        num_experts: if moe {
+            hf.num_experts.context("missing num_experts")?
+        } else {
+            0
+        },
+        experts_per_token: if moe {
+            hf.num_experts_per_tok
+                .context("missing num_experts_per_tok")?
+        } else {
+            0
+        },
+        shared_expert_intermediate_size: if moe {
+            hf.shared_expert_intermediate_size
+        } else {
+            None
+        },
         full_attention_interval: None,
         linear_conv_kernel: None,
         linear_state_size: None,
@@ -215,10 +244,12 @@ fn fp8_block_size(
         return Ok(None);
     }
     ensure!(
-        architecture == ModelArchitecture::Qwen3Dense
-            && quantization["quant_method"] == "fp8"
+        matches!(
+            architecture,
+            ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Moe
+        ) && quantization["quant_method"] == "fp8"
             && quantization["activation_scheme"] == "dynamic",
-        "quantized Qwen safetensors require dense Qwen3 with dynamic FP8"
+        "quantized Qwen safetensors require dynamic FP8 in Qwen3 dense or Qwen3.5 MoE"
     );
     let block: [usize; 2] = Deserialize::deserialize(&quantization["weight_block_size"])
         .context("FP8 weight_block_size must contain two positive integers")?;
@@ -232,6 +263,7 @@ fn fp8_block_size(
 pub(crate) struct QwenWeights {
     weights: Weights,
     bindings: Vec<Binding>,
+    moe: bool,
 }
 
 struct Binding {
@@ -239,6 +271,33 @@ struct Binding {
     dtype: WeightDtype,
     transform: Transform,
     fp8: Option<Fp8Weight>,
+    experts: Option<ExpertSource>,
+    prepared_expert: Option<ExpertMemory>,
+    elements: usize,
+}
+
+enum ExpertSource {
+    FusedHalf(usize),
+    Separate(Vec<ExpertMatrix>),
+}
+
+struct ExpertMatrix {
+    name: String,
+    fp8: Option<Fp8Weight>,
+}
+
+impl ExpertMatrix {
+    fn to_bf16(&self, weights: &Weights) -> Result<Vec<u16>> {
+        match &self.fp8 {
+            Some(fp8) => fp8.to_bf16(weights, &self.name),
+            None => weights.host_bf16(&self.name),
+        }
+    }
+}
+
+enum ExpertMemory {
+    Device(MemOwn),
+    Mapped(MappedWeight),
 }
 
 struct Fp8Weight {
@@ -387,18 +446,76 @@ impl QwenWeights {
                 .tensors
                 .contains_key("model.language_model.embed_tokens.weight");
         let mut bindings = Vec::with_capacity(specs.len());
-        let mut block_size = None;
+        let block_size = if weights.tensors.values().any(|t| t.dtype == Dtype::F8_E4M3) {
+            let directory = path.parent().context("missing checkpoint directory")?;
+            let root: Value = read_json(directory.join("config.json"))?;
+            let quantization = root
+                .get("quantization_config")
+                .filter(|q| !q.is_null())
+                .unwrap_or(&root["text_config"]["quantization_config"]);
+            fp8_block_size(quantization, config.architecture)?
+        } else {
+            None
+        };
+        let validate = |name: &str, shape: &[usize], dtype| -> Result<Option<Fp8Weight>> {
+            let tensor = weights.validate_shape(name, shape)?;
+            if tensor.dtype == Dtype::F8_E4M3 {
+                ensure!(
+                    dtype == WeightDtype::Bf16 && name.ends_with(".weight"),
+                    "{name}: FP8 requires a BF16 weight matrix"
+                );
+                let block = block_size
+                    .with_context(|| format!("{name}: missing FP8 quantization_config"))?;
+                Ok(Some(Fp8Weight::new(&weights, name, shape, block)?))
+            } else {
+                weights.validate(name, shape)?;
+                Ok(None)
+            }
+        };
+        let checkpoint_name = |name: &str| -> String {
+            match name.strip_prefix("model.") {
+                Some(suffix) if wrapped => format!("model.language_model.{suffix}"),
+                _ => name.into(),
+            }
+        };
         for spec in specs {
             let name = if spec.name == "lm_head.weight" && config.output_weight_tied {
                 "model.embed_tokens.weight"
             } else {
                 spec.name.as_str()
             };
-            let name = match name.strip_prefix("model.") {
-                Some(suffix) if wrapped => format!("model.language_model.{suffix}"),
-                _ => name.into(),
-            };
+            let mut name = checkpoint_name(name);
             let mut shape = spec.shape.clone();
+            let mut experts = None;
+            if config.architecture == ModelArchitecture::Qwen35Moe
+                && let Some((prefix, projection)) = name.rsplit_once(".mlp.experts.")
+            {
+                let first = checkpoint_name(&spec.sources[0].name);
+                if weights.tensors.contains_key(&first) {
+                    let matrices = spec
+                        .sources
+                        .iter()
+                        .map(|source| {
+                            let name = checkpoint_name(&source.name);
+                            let fp8 = validate(&name, &source.shape, spec.dtype)?;
+                            Ok(ExpertMatrix { name, fp8 })
+                        })
+                        .collect::<Result<_>>()?;
+                    experts = Some(ExpertSource::Separate(matrices));
+                } else {
+                    match projection {
+                        "gate_proj.weight" | "up_proj.weight" => {
+                            experts = Some(ExpertSource::FusedHalf(usize::from(
+                                projection == "up_proj.weight",
+                            )));
+                            shape[1] *= 2;
+                            name = format!("{prefix}.mlp.experts.gate_up_proj");
+                        }
+                        "down_proj.weight" => name.truncate(name.len() - ".weight".len()),
+                        _ => {}
+                    }
+                }
+            }
             if spec.name.ends_with(".linear_attn.conv1d.weight")
                 && weights
                     .tensors
@@ -407,49 +524,44 @@ impl QwenWeights {
             {
                 shape.insert(1, 1);
             }
-            let tensor = weights.validate_shape(&name, &shape)?;
-            let fp8 = if tensor.dtype == Dtype::F8_E4M3 {
-                ensure!(
-                    config.architecture == ModelArchitecture::Qwen3Dense
-                        && spec.dtype == WeightDtype::Bf16
-                        && name.ends_with(".weight"),
-                    "{name}: FP8 requires a BF16 matrix in dense Qwen3"
-                );
-                if block_size.is_none() {
-                    let directory = path.parent().context("missing checkpoint directory")?;
-                    let root: Value = read_json(directory.join("config.json"))?;
-                    block_size = fp8_block_size(&root["quantization_config"], config.architecture)?;
+            let fp8 = match experts {
+                Some(ExpertSource::Separate(_)) => None,
+                Some(ExpertSource::FusedHalf(_)) => {
+                    weights.validate(&name, &shape)?;
+                    None
                 }
-                let block = block_size
-                    .with_context(|| format!("{name}: missing FP8 quantization_config"))?;
-                Some(Fp8Weight::new(&weights, &name, &shape, block)?)
-            } else {
-                weights.validate(&name, &shape)?;
-                None
+                None => validate(&name, &shape, spec.dtype)?,
             };
             bindings.push(Binding {
                 name,
                 dtype: spec.dtype,
                 transform: Transform::for_tensor(config, &spec.name),
                 fp8,
+                experts,
+                prepared_expert: None,
+                elements: spec.element_count(),
             });
         }
-        Ok(Self { weights, bindings })
+        Ok(Self {
+            weights,
+            bindings,
+            moe: config.architecture == ModelArchitecture::Qwen35Moe,
+        })
     }
 
     pub(crate) fn prepare(&mut self, runtime: &Runtime) -> Result<usize> {
         let start = std::time::Instant::now();
         let mut prepared = HashSet::new();
         let mut bytes = 0;
-        for binding in &self.bindings {
-            if !prepared.insert(binding.name.as_str()) {
+        let map_tensors = self.moe && runtime.dialect() == GpuDialect::Hip;
+        for binding in &mut self.bindings {
+            if binding.experts.is_none() && !prepared.insert(binding.name.clone()) {
                 continue;
             }
-            let info = &self.weights.tensors[&binding.name];
             let f32_storage = binding.dtype == WeightDtype::F32;
-            bytes += info.shape.iter().product::<usize>() * if f32_storage { 4 } else { 2 };
+            bytes += binding.elements * if f32_storage { 4 } else { 2 };
             binding
-                .prepare(runtime, &mut self.weights)
+                .prepare(runtime, &mut self.weights, map_tensors)
                 .with_context(|| format!("preparing {}", binding.name))?;
         }
         startup_timing("Qwen safetensors preparation", start);
@@ -462,7 +574,18 @@ impl QwenWeights {
     }
 
     pub(crate) fn gpu_ref(&self, index: usize) -> Result<MemRef<'_>> {
-        self.weights.gpu_ref(&self.bindings[index].name)
+        let binding = &self.bindings[index];
+        if binding.experts.is_some() {
+            return match binding
+                .prepared_expert
+                .as_ref()
+                .context("expert weights not prepared")?
+            {
+                ExpertMemory::Device(mem) => Ok(mem.as_ref()),
+                ExpertMemory::Mapped(mem) => mem.gpu_ref(),
+            };
+        }
+        self.weights.gpu_ref(&binding.name)
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -471,14 +594,103 @@ impl QwenWeights {
 }
 
 impl Binding {
-    fn prepare(&self, runtime: &Runtime, weights: &mut Weights) -> Result<()> {
+    fn prepare(
+        &mut self,
+        runtime: &Runtime,
+        weights: &mut Weights,
+        map_tensors: bool,
+    ) -> Result<()> {
         let name = &self.name;
+        if let Some(ExpertSource::Separate(matrices)) = &self.experts {
+            if map_tensors {
+                let len = self.elements * 2;
+                let mut bytes = MmapMut::map_anon(len)?;
+                let expert_bytes = len / matrices.len();
+                for (dst, matrix) in bytes.chunks_exact_mut(expert_bytes).zip(matrices) {
+                    let values = matrix
+                        .to_bf16(weights)
+                        .with_context(|| format!("converting {}", matrix.name))?;
+                    for (dst, value) in dst.chunks_exact_mut(2).zip(values) {
+                        dst.copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                self.prepared_expert = Some(ExpertMemory::Mapped(MappedWeight::new(
+                    bytes.make_read_only()?,
+                    0,
+                    len,
+                )?));
+            } else {
+                let mut values = Vec::with_capacity(self.elements);
+                for matrix in matrices {
+                    values.extend(
+                        matrix
+                            .to_bf16(weights)
+                            .with_context(|| format!("converting {}", matrix.name))?,
+                    );
+                }
+                self.prepared_expert = Some(ExpertMemory::Device(runtime.mem_u16(&values)?));
+            }
+            return Ok(());
+        }
+        if let Some(ExpertSource::FusedHalf(half)) = self.experts {
+            let shape = &weights.tensors[name].shape;
+            let half_len = shape[1] / 2 * shape[2];
+            // The checkpoint stores gate and up together for each expert.
+            let bf16 = weights.tensors[name].dtype == Dtype::BF16;
+            if map_tensors {
+                let len = shape[0] * half_len * 2;
+                let mut bytes = MmapMut::map_anon(len)?;
+                if bf16 {
+                    for (dst, src) in bytes.chunks_exact_mut(half_len * 2).zip(expert_projection(
+                        weights.raw_bytes(name)?,
+                        half_len * 2,
+                        half,
+                    )) {
+                        dst.copy_from_slice(src);
+                    }
+                } else {
+                    for (dst, value) in bytes
+                        .chunks_exact_mut(2)
+                        .zip(expert_projection(&weights.host_bf16(name)?, half_len, half).flatten())
+                    {
+                        dst.copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+                self.prepared_expert = Some(ExpertMemory::Mapped(MappedWeight::new(
+                    bytes.make_read_only()?,
+                    0,
+                    len,
+                )?));
+                return Ok(());
+            }
+            let values = if bf16 {
+                expert_projection(weights.raw_bytes(name)?, half_len * 2, half)
+                    .flat_map(|expert| expert.chunks_exact(2))
+                    .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                    .collect::<Vec<_>>()
+            } else {
+                expert_projection(&weights.host_bf16(name)?, half_len, half)
+                    .flatten()
+                    .copied()
+                    .collect()
+            };
+            self.prepared_expert = Some(ExpertMemory::Device(runtime.mem_u16(&values)?));
+            return Ok(());
+        }
         if let Some(fp8) = &self.fp8 {
-            return weights.insert_prepared(name, runtime.mem_u16(&fp8.to_bf16(weights, name)?)?);
+            let values = fp8.to_bf16(weights, name)?;
+            let values = match self.transform.permutation {
+                Some(order) => order.reorder(&values, weights.tensors[name].shape[1]),
+                None => values,
+            };
+            return weights.insert_prepared(name, runtime.mem_u16(&values)?);
         }
         let transform = self.transform;
         let f32_storage = self.dtype == WeightDtype::F32;
         if transform.permutation.is_none() && !transform.add_one && !transform.negative_exp {
+            if map_tensors && !f32_storage && weights.tensors[name].dtype == Dtype::BF16 {
+                return weights.prepare_bf16_mapping(name);
+            }
             return weights.prepare_tensor(runtime, name, f32_storage);
         }
         let columns = weights.tensors[name]
@@ -511,6 +723,13 @@ impl Binding {
     }
 }
 
+fn expert_projection<T>(packed: &[T], half_len: usize, half: usize) -> impl Iterator<Item = &[T]> {
+    let start = half * half_len;
+    packed
+        .chunks_exact(2 * half_len)
+        .map(move |expert| &expert[start..start + half_len])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -518,6 +737,19 @@ mod tests {
         hfhub::{HubCheckpoint, download_model},
         spec::weight_specs,
     };
+
+    #[test]
+    fn splits_fused_expert_projections_in_expert_order() {
+        let packed = [10, 11, 20, 21, 30, 31, 40, 41];
+        let projection = |half| {
+            expert_projection(&packed, 2, half)
+                .flatten()
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(projection(0), [10, 11, 30, 31]);
+        assert_eq!(projection(1), [20, 21, 40, 41]);
+    }
     use safetensors::{
         Dtype,
         tensor::{TensorView, serialize_to_file},
@@ -814,6 +1046,9 @@ mod tests {
             dtype: WeightDtype::F32,
             transform,
             fp8: None,
+            experts: None,
+            prepared_expert: None,
+            elements: 4,
         };
         let values = [0.0_f32, 1.0, 2.0, 3.0];
         assert_eq!(
@@ -853,6 +1088,77 @@ mod tests {
                 QwenTokenizer::from_gguf(&gguf.primary)?.context("missing GGUF tokenizer")?;
             let prompt = "The capital of France is";
             assert_eq!(tokenizer.encode(prompt)?, gguf_tokenizer.encode(prompt)?);
+        }
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the Qwen3.6-35B-A3B checkpoint"]
+    fn resolves_and_validates_qwen36_moe_safetensors() -> Result<()> {
+        let checkpoint = download_model("Qwen/Qwen3.6-35B-A3B")?;
+        let HubCheckpoint::Safetensors { path, config } = &checkpoint else {
+            anyhow::bail!("expected Qwen3.6 MoE safetensors");
+        };
+        assert!(checkpoint.tokenizer()?.chat_template().is_some());
+        let specs = weight_specs(config)?;
+        assert_eq!(specs, weight_specs(&ModelConfig::qwen36_35b_a3b())?);
+        let weights = QwenWeights::open(path, config, &specs)?;
+        assert_eq!(
+            weights
+                .bindings
+                .iter()
+                .filter(|b| matches!(b.experts, Some(ExpertSource::FusedHalf(_))))
+                .count(),
+            2 * config.num_layers,
+        );
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires the Qwen3.6-35B-A3B-FP8 checkpoint"]
+    fn resolves_and_converts_qwen36_moe_fp8_safetensors() -> Result<()> {
+        let checkpoint = download_model("Qwen/Qwen3.6-35B-A3B-FP8")?;
+        let HubCheckpoint::Safetensors { path, config } = &checkpoint else {
+            anyhow::bail!("expected Qwen3.6 MoE FP8 safetensors");
+        };
+        let weights = QwenWeights::open(path, config, &weight_specs(config)?)?;
+        assert_eq!(
+            weights
+                .bindings
+                .iter()
+                .filter(|b| matches!(b.experts, Some(ExpertSource::Separate(_))))
+                .count(),
+            3 * config.num_layers,
+        );
+
+        let layer = "model.language_model.layers.0";
+        // Independently decoded samples spanning several scale blocks.
+        for (projection, expert, expected) in [
+            ("gate_proj", 0, [0x3b7e, 0x3c6e, 0x39aa, 0x8000, 0x3c68]),
+            ("down_proj", 255, [0x3bc7, 0x8000, 0x8000, 0x8000, 0xbba3]),
+        ] {
+            let name = format!("{layer}.mlp.experts.{projection}.weight");
+            let binding = weights
+                .bindings
+                .iter()
+                .find(|b| b.name == name)
+                .context("missing expert binding")?;
+            let Some(ExpertSource::Separate(matrices)) = &binding.experts else {
+                anyhow::bail!("expected separate expert matrices");
+            };
+            assert_eq!(matrices.len(), config.num_experts);
+            let matrix = &matrices[expert];
+            assert_eq!(
+                matrix.name,
+                format!("{layer}.mlp.experts.{expert}.{projection}.weight")
+            );
+            let values = matrix.to_bf16(&weights.weights)?;
+            let cols = weights.weights.tensors[&matrix.name].shape[1];
+            assert_eq!(
+                [(0, 0), (0, 128), (127, 127), (128, 128), (255, 257)]
+                    .map(|(row, col)| values[row * cols + col]),
+                expected,
+            );
         }
         Ok(())
     }
