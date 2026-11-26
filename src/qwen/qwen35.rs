@@ -523,6 +523,7 @@ fn source_with_scope(
     wmma.fp8 = options.prefill_dtype == crate::catena::PrefillDtype::Fp8;
     if wmma.fp8 {
         wmma.projections = true;
+        wmma.experts = config.architecture == ModelArchitecture::Qwen35Moe;
         wmma.attention = true;
         wmma.safe_scores = false;
         wmma.exact_context = false;
@@ -663,7 +664,7 @@ fn source_with_scope(
     if config.architecture == ModelArchitecture::Qwen35Moe {
         kernels.push_str(include_str!("../catena/qwen35_full_prepare.hex"));
     }
-    if config.architecture == ModelArchitecture::Qwen35Dense && wmma.projections {
+    if (config.architecture == ModelArchitecture::Qwen35Dense && wmma.projections) || wmma.fp8 {
         kernels.push_str(include_str!("../catena/lfm3_wmma.hex"));
         kernels.push_str(include_str!("../catena/qwen35_dense.hex"));
     }
@@ -836,20 +837,18 @@ fn source_with_scope(
     if !moe && key_dim == 128 {
         s = s.replace("} qwen35.delta [", "} qwen35.fused-delta [");
     }
-    let full_count = if moe {
-        16
-    } else if wmma.fp8 {
-        25
-    } else {
-        11
-    };
-    let linear_count = if moe {
-        19
-    } else if wmma.fp8 {
-        26
-    } else {
-        14
-    };
+    let full_count = (if moe { 16 } else { 11 })
+        + if wmma.fp8 {
+            2 * super::fp8_projection_indices(moe, false).len()
+        } else {
+            0
+        };
+    let linear_count = (if moe { 19 } else { 14 })
+        + if wmma.fp8 {
+            2 * super::fp8_projection_indices(moe, true).len()
+        } else {
+            0
+        };
     let full_group = nested_product(&vec![REF.to_owned(); full_count]);
     let linear_group = nested_product(&vec![REF.to_owned(); linear_count]);
     let full_tree = nested_product(&vec![full_group.clone(); full.len()]);
@@ -1508,7 +1507,7 @@ fn emit_entry(
     let specs = weight_specs(config)?;
     let native_count = if fp8 {
         (0..config.num_layers)
-            .map(|l| if full.contains(&l) { 14 } else { 12 })
+            .map(|l| 2 * super::fp8_projection_indices(moe, !full.contains(&l)).len())
             .sum()
     } else {
         0
@@ -1547,7 +1546,7 @@ fn emit_entry(
         };
         let mut group = ws[cursor..cursor + count].to_vec();
         if fp8 {
-            let native = if full.contains(&layer) { 14 } else { 12 };
+            let native = 2 * super::fp8_projection_indices(moe, !full.contains(&layer)).len();
             group.extend_from_slice(&ws[native_cursor..native_cursor + native]);
             native_cursor += native;
         }

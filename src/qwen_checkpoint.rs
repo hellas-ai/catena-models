@@ -270,7 +270,7 @@ pub(crate) struct QwenWeights {
     weights: Weights,
     bindings: Vec<Binding>,
     moe: bool,
-    prefill: Vec<String>,
+    prefill: Vec<usize>,
     prefill_buffers: Vec<MemOwn>,
 }
 
@@ -334,10 +334,11 @@ impl Fp8Weight {
     ) -> Result<(Vec<u8>, Vec<f32>)> {
         let raw = weights.raw_bytes(name)?;
         let scales = weights.host_f32(&self.scale)?;
-        let Some(order) = order else {
-            return Ok((raw.to_vec(), scales));
-        };
         let columns = weights.tensors[name].shape[1];
+        let rows = weights.tensors[name].shape[0];
+        let Some(order) = order else {
+            return Ok((pad_fp8_matrix(raw, rows, columns), scales));
+        };
         let [br, bc] = self.block;
         // Whole-head permutations preserve 128x128 quantization blocks.
         ensure!(
@@ -353,7 +354,7 @@ impl Fp8Weight {
             ..order
         };
         Ok((
-            order.reorder(raw, columns),
+            pad_fp8_matrix(&order.reorder(raw, columns), rows, columns),
             scale_order.reorder(&scales, columns.div_ceil(bc)),
         ))
     }
@@ -388,6 +389,57 @@ impl Fp8Weight {
         }
         Ok(bf16)
     }
+}
+
+fn pad_fp8_matrix(raw: &[u8], rows: usize, cols: usize) -> Vec<u8> {
+    let padded_cols = cols.next_multiple_of(128);
+    if rows.is_multiple_of(128) && cols == padded_cols {
+        return raw.to_vec();
+    }
+    let mut out = vec![0; rows.next_multiple_of(128) * padded_cols];
+    for (dst, src) in out
+        .chunks_exact_mut(padded_cols)
+        .zip(raw.chunks_exact(cols))
+    {
+        dst[..cols].copy_from_slice(src);
+    }
+    out
+}
+
+fn encode_e4m3fn(value: f32) -> u8 {
+    let sign = ((value.to_bits() >> 24) & 0x80) as u8;
+    let x = value.abs().min(448.0);
+    let bits = if x < 1.0 / 64.0 {
+        (x * 512.0).round_ties_even() as u8
+    } else {
+        let bits = x.to_bits();
+        ((bits - (120_u32 << 23) + 0x0007ffff + ((bits >> 20) & 1)) >> 20) as u8
+    };
+    sign | bits
+}
+
+fn quantize_bf16_matrix(values: &[u16], rows: usize, cols: usize) -> Result<(Vec<u8>, Vec<f32>)> {
+    let pc = cols.next_multiple_of(128);
+    let pr = rows.next_multiple_of(128);
+    let mut scales = vec![0.0_f32; pr / 128 * (pc / 128)];
+    for (i, &v) in values.iter().enumerate() {
+        let x = crate::weights::bf16_to_f32(v);
+        ensure!(x.is_finite(), "cannot quantize non-finite FP8 weight");
+        let j = (i / cols) / 128 * (pc / 128) + (i % cols) / 128;
+        scales[j] = scales[j].max(x.abs());
+    }
+    for scale in &mut scales {
+        *scale = if *scale == 0.0 { 1.0 } else { *scale / 448.0 };
+    }
+    let mut raw = vec![0; pr * pc];
+    for (i, &v) in values.iter().enumerate() {
+        let row = i / cols;
+        let col = i % cols;
+        raw[row * pc + col] = encode_e4m3fn(
+            crate::weights::bf16_to_f32(v) / scales[row / 128 * (pc / 128) + col / 128],
+        );
+    }
+    Ok((raw, scales))
 }
 
 fn e4m3fn_to_f32(bits: u8) -> f32 {
@@ -482,10 +534,20 @@ impl Transform {
 impl QwenWeights {
     pub(crate) fn open(path: &Path, config: &ModelConfig, specs: &[TensorSpec]) -> Result<Self> {
         let weights = Weights::open(path)?;
-        let wrapped = config.is_qwen35()
-            && weights
+        // Some exported checkpoints repeat the language_model wrapper.
+        let mut text_prefix = "model.".to_owned();
+        if config.is_qwen35() {
+            while !weights
                 .tensors
-                .contains_key("model.language_model.embed_tokens.weight");
+                .contains_key(&format!("{text_prefix}embed_tokens.weight"))
+            {
+                let nested = format!("{text_prefix}language_model.");
+                if !weights.tensors.keys().any(|name| name.starts_with(&nested)) {
+                    break;
+                }
+                text_prefix = nested;
+            }
+        }
         let mut bindings = Vec::with_capacity(specs.len());
         let block_size = if weights.tensors.values().any(|t| t.dtype == Dtype::F8_E4M3) {
             let directory = path.parent().context("missing checkpoint directory")?;
@@ -515,7 +577,7 @@ impl QwenWeights {
         };
         let checkpoint_name = |name: &str| -> String {
             match name.strip_prefix("model.") {
-                Some(suffix) if wrapped => format!("model.language_model.{suffix}"),
+                Some(suffix) => format!("{text_prefix}{suffix}"),
                 _ => name.into(),
             }
         };
@@ -594,54 +656,34 @@ impl QwenWeights {
 
     pub(crate) fn enable_fp8_prefill(&mut self, config: &ModelConfig) -> Result<()> {
         let mut native_count = 0;
+        let mut cursor = 1;
         for layer in 0..config.num_layers {
-            let suffixes: &[&str] = if config.is_qwen35()
-                && config.layer_type(layer) == crate::spec::LayerType::LinearAttention
-            {
-                &[
-                    "linear_attn.in_proj_qkv",
-                    "linear_attn.in_proj_z",
-                    "linear_attn.out_proj",
-                    "mlp.gate_proj",
-                    "mlp.up_proj",
-                    "mlp.down_proj",
-                ]
-            } else {
-                &[
-                    "self_attn.q_proj",
-                    "self_attn.k_proj",
-                    "self_attn.v_proj",
-                    "self_attn.o_proj",
-                    "mlp.gate_proj",
-                    "mlp.up_proj",
-                    "mlp.down_proj",
-                ]
-            };
-            for suffix in suffixes {
-                let plain = format!("model.layers.{layer}.{suffix}.weight");
-                let wrapped = format!("model.language_model.layers.{layer}.{suffix}.weight");
-                let name = if self.bindings.iter().any(|b| b.name == plain) {
-                    plain
-                } else {
-                    wrapped
-                };
+            let linear = config.layer_type(layer) == crate::spec::LayerType::LinearAttention;
+            for &local in crate::qwen::fp8_projection_indices(self.moe, linear) {
+                let index = cursor + local;
                 let binding = self
                     .bindings
-                    .iter()
-                    .find(|b| b.name == name)
-                    .context("missing dense Qwen projection")?;
+                    .get(index)
+                    .context("missing Qwen projection")?;
                 if let Some(fp8) = &binding.fp8 {
                     ensure!(
                         fp8.block == [128, 128],
-                        "FP8 prefill requires 128x128 weight blocks: {name}"
+                        "FP8 prefill requires 128x128 weight blocks: {}",
+                        binding.name
                     );
                     native_count += 1;
                 }
-                self.prefill.push(name);
+                self.prefill.push(index);
             }
+            cursor += match (self.moe, linear) {
+                (false, false) => 11,
+                (false, true) => 14,
+                (true, false) => 16,
+                (true, true) => 19,
+            };
         }
         ensure!(
-            native_count > 0,
+            self.moe || native_count > 0,
             "FP8 prefill requires an FP8 dense Qwen safetensors checkpoint"
         );
         Ok(())
@@ -662,22 +704,18 @@ impl QwenWeights {
                 .prepare(runtime, &mut self.weights, map_tensors)
                 .with_context(|| format!("preparing {}", binding.name))?;
         }
-        for name in &self.prefill {
-            let binding = self.bindings.iter().find(|b| b.name == *name).unwrap();
-            if let Some(fp8) = &binding.fp8 {
-                let (raw, scales) =
-                    fp8.native_operands(&self.weights, name, binding.transform.permutation)?;
-                bytes += raw.len();
-                let mem = runtime.mem_u8(&raw)?;
+        for &index in &self.prefill {
+            let binding = &self.bindings[index];
+            if let Some((raw, scales)) = binding.native_prefill(&self.weights, self.moe)? {
                 ensure!(
                     scales.iter().all(|s| s.is_finite() && *s >= 0.0),
-                    "invalid scales for {name}"
+                    "invalid scales for {}",
+                    binding.name
                 );
-                bytes += scales.len() * 4;
-                self.prefill_buffers.push(mem);
+                bytes += raw.len() + scales.len() * 4;
+                self.prefill_buffers.push(runtime.mem_u8(&raw)?);
                 self.prefill_buffers.push(runtime.mem_f32(&scales)?);
             } else {
-                // Empty scales select the existing BF16 operand in mixed checkpoints.
                 self.prefill_buffers.push(runtime.mem_u8(&[])?);
                 self.prefill_buffers.push(runtime.mem_f32(&[])?);
             }
@@ -715,6 +753,74 @@ impl QwenWeights {
 }
 
 impl Binding {
+    fn native_prefill(
+        &self,
+        weights: &Weights,
+        quantize_unconverted: bool,
+    ) -> Result<Option<(Vec<u8>, Vec<f32>)>> {
+        if let Some(fp8) = &self.fp8 {
+            ensure!(
+                fp8.block == [128, 128],
+                "FP8 prefill requires 128x128 blocks: {}",
+                self.name
+            );
+            return Ok(Some(fp8.native_operands(
+                weights,
+                &self.name,
+                self.transform.permutation,
+            )?));
+        }
+        if !quantize_unconverted {
+            return Ok(None);
+        }
+        let mut raw = Vec::new();
+        let mut scales = Vec::new();
+        match &self.experts {
+            Some(ExpertSource::Separate(matrices)) => {
+                for matrix in matrices {
+                    let (bytes, blocks) = if let Some(fp8) = &matrix.fp8 {
+                        ensure!(
+                            fp8.block == [128, 128],
+                            "expert FP8 prefill requires 128x128 blocks"
+                        );
+                        fp8.native_operands(weights, &matrix.name, None)?
+                    } else {
+                        let shape = &weights.tensors[&matrix.name].shape;
+                        quantize_bf16_matrix(&weights.host_bf16(&matrix.name)?, shape[0], shape[1])?
+                    };
+                    raw.extend(bytes);
+                    scales.extend(blocks);
+                }
+            }
+            Some(ExpertSource::FusedHalf(half)) => {
+                let shape = &weights.tensors[&self.name].shape;
+                let rows = shape[1] / 2;
+                let cols = shape[2];
+                for values in expert_projection(&weights.host_bf16(&self.name)?, rows * cols, *half)
+                {
+                    let (bytes, blocks) = quantize_bf16_matrix(values, rows, cols)?;
+                    raw.extend(bytes);
+                    scales.extend(blocks);
+                }
+            }
+            None => {
+                let shape = &weights.tensors[&self.name].shape;
+                let rows = shape[shape.len() - 2];
+                let cols = shape[shape.len() - 1];
+                let mut values = weights.host_bf16(&self.name)?;
+                if let Some(order) = self.transform.permutation {
+                    values = order.reorder(&values, cols);
+                }
+                for matrix in values.chunks_exact(rows * cols) {
+                    let (bytes, blocks) = quantize_bf16_matrix(matrix, rows, cols)?;
+                    raw.extend(bytes);
+                    scales.extend(blocks);
+                }
+            }
+        }
+        Ok(Some((raw, scales)))
+    }
+
     fn prepare(
         &mut self,
         runtime: &Runtime,
@@ -876,6 +982,126 @@ mod tests {
         tensor::{TensorView, serialize_to_file},
     };
     use std::fs;
+
+    #[test]
+    fn fp8_encoder_rounds_ties_even_and_pads_partial_blocks() -> Result<()> {
+        for bits in 0_u8..127 {
+            let value = e4m3fn_to_f32(bits);
+            assert_eq!(encode_e4m3fn(value), bits);
+            assert_eq!(encode_e4m3fn(-value), bits | 0x80);
+            if bits < 126 {
+                let midpoint = (value + e4m3fn_to_f32(bits + 1)) * 0.5;
+                let expected = if bits & 1 == 0 { bits } else { bits + 1 };
+                assert_eq!(encode_e4m3fn(midpoint), expected);
+                assert_eq!(encode_e4m3fn(-midpoint), expected | 0x80);
+            }
+        }
+        assert_eq!(encode_e4m3fn(1.0e30), 0x7e);
+        let mut values = vec![0; 136 * 136];
+        for (row, col, x) in [(0, 0, 1.0), (0, 128, 2.0), (128, 0, 3.0), (128, 128, 4.0)] {
+            values[row * 136 + col] = f32_to_bf16(x);
+        }
+        let (raw, scales) = quantize_bf16_matrix(&values, 136, 136)?;
+        assert_eq!(raw.len(), 256 * 256);
+        assert_eq!(
+            scales,
+            vec![1.0 / 448.0, 2.0 / 448.0, 3.0 / 448.0, 4.0 / 448.0]
+        );
+        for row in 0..256 {
+            for col in 0..256 {
+                if row >= 136 || col >= 136 {
+                    assert_eq!(raw[row * 256 + col], 0);
+                }
+            }
+        }
+        let (raw, scales) = quantize_bf16_matrix(&[0; 8 * 32], 8, 32)?;
+        assert!(raw.iter().all(|&x| x == 0));
+        assert_eq!(scales, [1.0]);
+        Ok(())
+    }
+
+    #[test]
+    fn moe_native_expert_operands_preserve_scales_and_split_fused_halves() -> Result<()> {
+        let directory =
+            std::env::temp_dir().join(format!("catena-moe-native-{}", std::process::id()));
+        fs::create_dir_all(&directory)?;
+        let result = (|| {
+            let rows = 136;
+            let cols = 8;
+            let raw: Vec<u8> = (0..rows * cols).map(|i| (i % 120) as u8).collect();
+            let scales: Vec<u8> = [0.125_f32, 0.75]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect();
+            let fused: Vec<u8> = [1.0, 2.0, 3.0, 4.0]
+                .into_iter()
+                .flat_map(|v| vec![f32_to_bf16(v); rows * cols])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let path = directory.join("weights.safetensors");
+            serialize_to_file(
+                [
+                    (
+                        "expert",
+                        TensorView::new(Dtype::F8_E4M3, vec![rows, cols], &raw)?,
+                    ),
+                    (
+                        "expert_scale_inv",
+                        TensorView::new(Dtype::F32, vec![2, 1], &scales)?,
+                    ),
+                    (
+                        "fused",
+                        TensorView::new(Dtype::BF16, vec![2, rows * 2, cols], &fused)?,
+                    ),
+                ],
+                None,
+                &path,
+            )?;
+            let weights = Weights::open(&path)?;
+            let binding = |name: &str, experts| Binding {
+                name: name.into(),
+                dtype: WeightDtype::Bf16,
+                transform: Transform::default(),
+                fp8: None,
+                experts,
+                prepared_expert: None,
+                elements: 2 * rows * cols,
+            };
+            let expert = ExpertMatrix {
+                name: "expert".into(),
+                fp8: Some(Fp8Weight::new(
+                    &weights,
+                    "expert",
+                    &[rows, cols],
+                    [128, 128],
+                )?),
+            };
+            let b = binding("expert", Some(ExpertSource::Separate(vec![expert])));
+            let (bytes, scales) = b.native_prefill(&weights, true)?.unwrap();
+            assert_eq!(scales, [0.125, 0.75]);
+            assert_eq!(bytes, pad_fp8_matrix(&raw, rows, cols));
+            for half in [0, 1] {
+                let b = binding("fused", Some(ExpertSource::FusedHalf(half)));
+                let (bytes, scales) = b.native_prefill(&weights, true)?.unwrap();
+                assert_eq!(bytes.len(), 2 * 256 * 128);
+                for e in 0..2 {
+                    let value = (e * 2 + half + 1) as f32;
+                    assert_eq!(&scales[e * 2..e * 2 + 2], &[value / 448.0; 2]);
+                    for row in 0..256 {
+                        for col in 0..128 {
+                            assert_eq!(
+                                bytes[e * 256 * 128 + row * 128 + col],
+                                if row < rows && col < cols { 0x7e } else { 0 }
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
+    }
 
     #[test]
     fn dynamic_fp8_metadata_accepts_dense_and_moe_checkpoints() -> Result<()> {
@@ -1277,6 +1503,118 @@ mod tests {
             [0, 2, 1, 3].map(|i| -values[i].exp())
         );
         assert!(!Transform::for_tensor(&config, "model.layers.0.linear_attn.norm.weight").add_one);
+    }
+
+    #[test]
+    #[ignore = "requires CUDA and downloads tiny-random/qwen3.6-moe"]
+    fn native_fp8_tiny_moe_prefill_matches_dequantized_weights() -> Result<()> {
+        use crate::{
+            catena::{InferenceOptions, PrefillDtype},
+            model::Model,
+        };
+        use std::collections::BTreeMap;
+        let checkpoint = download_model("tiny-random/qwen3.6-moe")?;
+        let HubCheckpoint::Safetensors { path, config } = checkpoint else {
+            anyhow::bail!("expected safetensors");
+        };
+        let specs = weight_specs(&config)?;
+        let mut qwen = QwenWeights::open(&path, &config, &specs)?;
+        qwen.enable_fp8_prefill(&config)?;
+        // Build a native, separately stored FP8 expert fixture from the tiny
+        // BF16 export, so the BF16 reference dequantizes exactly the same weights.
+        let mut tensors: BTreeMap<String, (Dtype, Vec<usize>, Vec<u8>)> = qwen
+            .weights
+            .tensors
+            .iter()
+            .map(|(name, t)| {
+                Ok((
+                    name.clone(),
+                    (
+                        t.dtype,
+                        t.shape.clone(),
+                        qwen.weights.raw_bytes(name)?.to_vec(),
+                    ),
+                ))
+            })
+            .collect::<Result<_>>()?;
+        for &index in &qwen.prefill {
+            let binding = &qwen.bindings[index];
+            let names: Vec<&str> = match &binding.experts {
+                Some(ExpertSource::Separate(matrices)) => {
+                    matrices.iter().map(|m| m.name.as_str()).collect()
+                }
+                _ => vec![binding.name.as_str()],
+            };
+            for name in names {
+                let shape = &qwen.weights.tensors[name].shape;
+                let [matrix_rows, cols] = *shape.as_slice() else {
+                    anyhow::bail!("tiny fixture expects separate 2D matrices");
+                };
+                let matrix = qwen.weights.host_bf16(name)?;
+                let name = name.to_owned();
+                let (padded, scales) = quantize_bf16_matrix(&matrix, matrix_rows, cols)?;
+                let raw = padded
+                    .chunks_exact(cols.next_multiple_of(128))
+                    .take(matrix_rows)
+                    .flat_map(|row| row[..cols].iter().copied())
+                    .collect();
+                tensors.insert(name.clone(), (Dtype::F8_E4M3, vec![matrix_rows, cols], raw));
+                tensors.insert(
+                    format!("{name}_scale_inv"),
+                    (
+                        Dtype::F32,
+                        vec![matrix_rows.div_ceil(128), cols.div_ceil(128)],
+                        scales.into_iter().flat_map(f32::to_le_bytes).collect(),
+                    ),
+                );
+            }
+        }
+        let directory =
+            std::env::temp_dir().join(format!("catena-native-fp8-moe-{}", std::process::id()));
+        fs::create_dir_all(&directory)?;
+        let result = (|| {
+            let path = directory.join("model.safetensors");
+            let views = tensors
+                .iter()
+                .map(|(name, (dtype, shape, raw))| {
+                    Ok((name.as_str(), TensorView::new(*dtype, shape.clone(), raw)?))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            serialize_to_file(views, None, &path)?;
+            fs::write(
+                directory.join("config.json"),
+                serde_json::to_vec(&serde_json::json!({"quantization_config": {
+                    "quant_method": "fp8", "activation_scheme": "dynamic", "quant_type": "float", "weight_block_size": [128,128]
+                }}))?,
+            )?;
+            let checkpoint = HubCheckpoint::Safetensors { path, config };
+            let reference =
+                Model::load_checkpoint_with_options(&checkpoint, InferenceOptions::default())?;
+            let fp8 = Model::load_checkpoint_with_options(
+                &checkpoint,
+                InferenceOptions::default()
+                    .with_wmma_prefill(true)
+                    .with_prefill_dtype(PrefillDtype::Fp8),
+            )?;
+            for n in [2, 17, 65, 128] {
+                let tokens: Vec<_> = (0..n).map(|i| 100 + i * 17 % 5000).collect();
+                let expected = reference.logits(&tokens)?;
+                let actual = fp8.logits(&tokens)?;
+                let dot: f64 = expected
+                    .iter()
+                    .zip(&actual)
+                    .map(|(&a, &b)| a as f64 * b as f64)
+                    .sum();
+                let norm = |v: &[f32]| v.iter().map(|&x| (x as f64).powi(2)).sum::<f64>().sqrt();
+                let cosine = dot / (norm(&expected) * norm(&actual));
+                eprintln!("native FP8 MoE pp{n}, BF16 dequantized reference cosine={cosine:.8}");
+                assert!(actual.iter().all(|x| x.is_finite()));
+                assert!(cosine > 0.98);
+            }
+            Ok(())
+        })();
+        fs::remove_dir_all(directory)?;
+        result
     }
 
     #[test]

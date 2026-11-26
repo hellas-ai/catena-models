@@ -78,6 +78,29 @@ pub(super) fn append(source: &mut String, config: &ModelConfig, _options: Infere
             fused::append_hex(source, &native);
         }
     }
+    if config.architecture == ModelArchitecture::Qwen35Moe {
+        let mut kernels = include_str!("../catena/qwen35_fp8_moe.hex").to_owned();
+        for (key, value) in [
+            ("EXPERT_COUNT", config.num_experts),
+            ("TOP_K", config.experts_per_token),
+            ("ROUTE_WIDTH", config.experts_per_token + 1),
+            ("HIDDEN_SIZE", config.hidden_size),
+            ("INTERMEDIATE_SIZE", config.intermediate_size),
+            (
+                "SHARED_SIZE",
+                config.shared_expert_intermediate_size.unwrap(),
+            ),
+            (
+                "MAX_INTERMEDIATE",
+                config
+                    .intermediate_size
+                    .max(config.shared_expert_intermediate_size.unwrap()),
+            ),
+        ] {
+            kernels = kernels.replace(&format!("{{{{{key}}}}}"), &format!("{value:016X}"));
+        }
+        fused::append_hex(source, &kernels);
+    }
 }
 
 pub(super) fn supported_attention(config: &ModelConfig) -> bool {

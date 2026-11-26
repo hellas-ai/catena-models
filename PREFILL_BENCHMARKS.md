@@ -603,3 +603,67 @@ At 2 and 17 tokens, logit cosine versus BF16 is 0.99401264 and 0.99851949.
 At 128, 512, and 1024 tokens it remains 0.99642262, 0.99509936, and 0.99821934.
 Natural-language prompts, chunked prefill, and decode continuation also pass;
 single-token prefill and forced decode remain identical to BF16.
+
+### Qwen3.5/3.6 MoE FP8 prefill
+
+`--prefill-dtype fp8` also selects FP8 prefill for Qwen3.5/3.6 MoE text
+safetensors. Full attention is the same mandatory FP8 QK/PV implementation as
+Qwen3.5 dense. Linear layers reuse dense FP8 QKV/Z/output projections and the
+dense DeltaNet scan. Small alpha/beta projections and recurrent updates keep
+existing arithmetic. Decode and persistent KV/state storage remain BF16/FP32.
+
+Routed and shared expert gate/up/down use grouped `mma.sync` E4M3 tiles with
+FP32 accumulation. The tiles reuse the dense FP8 MMA body, gather activations
+through the existing expert groups, and apply per-expert 128x128 block scales.
+The router, top-k selection, activation boundaries, and expert combine use the
+existing MoE helpers. Scheduling uses a safe CTA-count bound and checks the
+actual expert prefix sum on the device, avoiding host readbacks and per-expert
+launches. Partial K/N tiles are padded and row/output tails are masked.
+
+Native FP8 expert matrices retain their bytes and `weight_scale_inv` values.
+Unquantized MoE matrices, including fused BF16 gate/up tensors, are quantized
+once at load time using per-block amax/448, round-to-nearest-even E4M3, and zero
+padding. BF16 copies remain available for decode. The small test checkpoint has
+an 8-wide hidden state and BF16 weights, so it exercises both padding and this
+conversion path. It also has repeated `language_model` wrappers, which the
+safetensors loader resolves automatically.
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model tiny-random/qwen3.6-moe --prefill-dtype fp8 --prompt 'Gravity is'
+CATENA_GPU_DIALECT=cuda cargo test --release --test qwen35_moe_fp8 \
+  -- --ignored --nocapture --test-threads=1
+```
+
+The GPU fixtures cover partial K/N tiles, nonuniform block scales, routed and
+shared experts, empty expert groups, multiple row tiles, and shared/routed
+intermediate widths that differ. They assert FP8 `mma.sync` instructions in the
+compiled CUDA and compare outputs with independent CPU calculations. The
+checkpoint test compares BF16/FP8 logits at 1, 2, 17, 65, and 128 tokens, continues
+forced decode, and checks chunked prefill. These small shapes validate behavior;
+they do not predict throughput for the 35B model.
+
+On this RTX 5050 development machine, the full tiny checkpoint passes the GPU
+fixtures and CLI generation smoke test. Its FP8 prefill logit cosine against the
+original BF16 checkpoint is 0.99749 / 0.97345 / 0.97039 / 0.96860 at 2 / 17 / 65 /
+128 tokens. A native-FP8 copy of the tiny checkpoint, compared with BF16 execution
+of those same dequantized weights, gives 0.99347 / 0.99551 / 0.98698 / 0.99537.
+These are lossy quantized paths; the random model's eight hidden channels are
+not a quality proxy for a trained 35B checkpoint. Forced decode remains finite,
+but against the original BF16 model its cosine can fall to 0.81947 after a
+128-token FP8 prefill. Single-token prefill and three subsequent forced decode
+steps remain bitwise identical to BF16.
+
+FP8 chunked prefill (17 + 111 tokens) versus one-shot prefill gives cosine
+0.99988; subsequent forced decode is also checked against the one-shot FP8
+session (minimum cosine 0.98380 across three forced tokens). The native-FP8 fixture exercises `quant_type: "float"`, separate expert
+matrices, partial blocks, and `weight_scale_inv` through the actual model loader:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo test --release --lib \
+  native_fp8_tiny_moe_prefill_matches_dequantized_weights -- --ignored --nocapture
+```
+
+The cold tiny-model Hex compiles took 180.9 s for SIMT BF16 and 425.7 s for FP8;
+subsequent CLI execution uses the existing compiler caches. The 35B configuration
+passes source generation, but the full checkpoint was not loaded or benchmarked.

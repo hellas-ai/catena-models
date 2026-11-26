@@ -42,7 +42,7 @@ pub(super) fn emit(
 ) {
     let source_start = s.len();
     let moe = cfg.architecture == ModelArchitecture::Qwen35Moe;
-    let dense_blocks = !moe && wmma.projections;
+    let dense_blocks = (!moe || wmma.fp8) && wmma.projections;
     let dense_scan = dense_blocks && cfg.linear_inner_size.unwrap().is_multiple_of(16);
     let project = if dense_blocks {
         "stdlib.qwen35.dense.project"
@@ -51,7 +51,9 @@ pub(super) fn emit(
     } else {
         "stdlib.qwen35.batch.project"
     };
-    let moe_ffn = if wmma.safe_experts {
+    let moe_ffn = if wmma.fp8 {
+        "stdlib.qwen35.fp8.moe.ffn"
+    } else if wmma.safe_experts {
         "stdlib.qwen35.wmma.moe.ffn-safe"
     } else if wmma.exact_gate {
         "stdlib.qwen35.wmma.moe.ffn-exact"
@@ -69,20 +71,18 @@ pub(super) fn emit(
     } else {
         "stdlib.qwen35.batch.staged"
     };
-    let fcount = if moe {
-        16
-    } else if wmma.fp8 {
-        25
-    } else {
-        11
-    };
-    let lcount = if moe {
-        19
-    } else if wmma.fp8 {
-        26
-    } else {
-        14
-    };
+    let fcount = (if moe { 16 } else { 11 })
+        + if wmma.fp8 {
+            2 * super::super::fp8_projection_indices(moe, false).len()
+        } else {
+            0
+        };
+    let lcount = (if moe { 19 } else { 14 })
+        + if wmma.fp8 {
+            2 * super::super::fp8_projection_indices(moe, true).len()
+        } else {
+            0
+        };
     let fg = nested_product(&vec![REF.to_owned(); fcount]);
     let lg = nested_product(&vec![REF.to_owned(); lcount]);
     s.push_str(
@@ -219,7 +219,10 @@ pub(super) fn emit(
     batch_norm(s, "attention-ready", "w7", "ffn-input", cfg);
     if moe {
         let mut args = names(&["ffn-input", "attention-ready"]);
-        args.extend(fw[8..].iter().cloned());
+        args.extend(fw[8..16].iter().cloned());
+        if wmma.fp8 {
+            args.extend(fw[24..].iter().cloned());
+        }
         let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         call(s, &refs, moe_ffn, "final-hidden");
     } else {
@@ -279,7 +282,11 @@ pub(super) fn emit(
         call(
             s,
             &["normalized", w, &c(cfg.hidden_size), &c(size)],
-            project,
+            if wmma.fp8 && cfg.hidden_size < 16 && matches!(out, "alpha" | "beta") {
+                "stdlib.qwen35.batch.project"
+            } else {
+                project
+            },
             out,
         );
     }
@@ -388,7 +395,10 @@ pub(super) fn emit(
     batch_norm(s, "attention-ready", "w10", "ffn-input", cfg);
     if moe {
         let mut args = names(&["ffn-input", "attention-ready"]);
-        args.extend(lw[11..].iter().cloned());
+        args.extend(lw[11..19].iter().cloned());
+        if wmma.fp8 {
+            args.extend(lw[25..].iter().cloned());
+        }
         let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
         call(s, &refs, moe_ffn, "final-hidden");
         finish_state(s, "history-ready", "shadow", "final-hidden");
@@ -661,12 +671,12 @@ pub(super) fn emit(
     finish(s);
     if wmma.fp8 {
         let graph = s.split_off(source_start);
-        s.push_str(&fp8_graph(&graph));
+        s.push_str(&fp8_graph(&graph, moe));
     }
 }
 
 /// Replace only batched projection calls; decode keeps the original operands.
-fn fp8_graph(graph: &str) -> String {
+fn fp8_graph(graph: &str, moe: bool) -> String {
     let mut out = String::new();
     let mut linear = false;
     for line in graph.lines() {
@@ -697,18 +707,20 @@ fn fp8_graph(graph: &str) -> String {
             .unwrap()
             .parse()
             .unwrap();
-        let indices: &[usize] = if linear {
-            &[1, 2, 8, 11, 12, 13]
-        } else {
-            &[1, 2, 3, 4, 8, 9, 10]
-        };
+        let indices = super::super::fp8_projection_indices(moe, linear);
         let Some(index) = indices.iter().position(|&w| w == weight) else {
             // The small alpha/beta projections stay in checkpoint precision.
             out.push_str(line);
             out.push('\n');
             continue;
         };
-        let base = if linear { 14 } else { 11 };
+        let base = if linear {
+            if moe { 19 } else { 14 }
+        } else if moe {
+            16
+        } else {
+            11
+        };
         let native = format!("w{}", base + index * 2);
         let scale = format!("w{}", base + index * 2 + 1);
         let input = args[0]
@@ -733,7 +745,16 @@ fn fp8_graph(graph: &str) -> String {
         let bytes = format!("bytes-{quant_name}");
         let scales = format!("scales-{quant_name}");
         if !shared_input || index == 0 {
-            call(&mut out, &[input], "stdlib.qwen3.fp8.quantize", &quant);
+            if moe {
+                call(
+                    &mut out,
+                    &[input, args[2]],
+                    "stdlib.qwen35.fp8.quantize-matrix",
+                    &quant,
+                );
+            } else {
+                call(&mut out, &[input], "stdlib.qwen3.fp8.quantize", &quant);
+            }
             unpack(&mut out, &quant, &names(&[&bytes, &scales]));
         }
         let mut operands = vec![
@@ -764,7 +785,43 @@ fn fp8_graph(graph: &str) -> String {
         } else {
             "project"
         };
-        if !operation.is_empty() {
+        if !operation.is_empty() && moe {
+            let rows = format!("rows-{output}");
+            call(
+                &mut out,
+                &[input],
+                "stdlib.models.memory.own-count-bf16",
+                &format!("elements-{output}"),
+            );
+            call(
+                &mut out,
+                &[&format!("elements-{output}"), args[2]],
+                "stdlib.models.memory.u64.div",
+                &rows,
+            );
+            let mut native_args = vec![
+                bytes.as_str(),
+                native.as_str(),
+                scales.as_str(),
+                scale.as_str(),
+                rows.as_str(),
+                args[2],
+                args[3],
+            ];
+            if operation == "project-residual" {
+                native_args.push(operands[8]);
+            }
+            call(
+                &mut out,
+                &native_args,
+                if operation == "project-residual" {
+                    "stdlib.qwen35.fp8.tail.project-residual"
+                } else {
+                    "stdlib.qwen35.fp8.tail.project"
+                },
+                &format!("raw-{output}"),
+            );
+        } else if !operation.is_empty() {
             call(
                 &mut out,
                 &operands,

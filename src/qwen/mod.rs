@@ -31,14 +31,26 @@ const REF: &str = "((cap.ref mem) val)";
 const U64: &str = "(u64 val)";
 const STATE: &str = "({((cap.own mem) val) ((cap.own mem) val)} *)";
 
+/// Native projection tail order shared by the loader and generated layer ABI.
+pub(crate) fn fp8_projection_indices(moe: bool, linear: bool) -> &'static [usize] {
+    match (moe, linear) {
+        (false, false) => &[1, 2, 3, 4, 8, 9, 10],
+        (false, true) => &[1, 2, 8, 11, 12, 13],
+        (true, false) => &[1, 2, 3, 4, 9, 10, 11, 13, 14, 15],
+        (true, true) => &[1, 2, 8, 12, 13, 14, 16, 17, 18],
+    }
+}
+
 pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Result<()> {
     if options.prefill_dtype == crate::catena::PrefillDtype::Fp8 {
         ensure!(
             matches!(
                 config.architecture,
-                ModelArchitecture::Qwen3Dense | ModelArchitecture::Qwen35Dense
+                ModelArchitecture::Qwen3Dense
+                    | ModelArchitecture::Qwen35Dense
+                    | ModelArchitecture::Qwen35Moe
             ) && options.wmma_prefill,
-            "FP8 prefill requires dense Qwen3/3.5 and matrix-core prefill; remove --no-wmma-prefill"
+            "FP8 prefill requires Qwen3 or Qwen3.5 dense/MoE and matrix-core prefill; remove --no-wmma-prefill"
         );
         if config.is_qwen35() {
             ensure!(
@@ -52,24 +64,28 @@ pub(crate) fn validate(config: &ModelConfig, options: InferenceOptions) -> Resul
             fp8_prefill::supported_attention(config),
             "FP8 attention requires head dimensions 32, 64, 128, or 256"
         );
-        ensure!(
-            [
-                config.hidden_size,
-                config.intermediate_size,
-                config.query_size(),
-                config.key_value_size()
-            ]
-            .iter()
-            .all(|n| n.is_multiple_of(128)),
-            "FP8 prefill requires projection widths divisible by 128"
-        );
+        if config.architecture != ModelArchitecture::Qwen35Moe {
+            ensure!(
+                [
+                    config.hidden_size,
+                    config.intermediate_size,
+                    config.query_size(),
+                    config.key_value_size()
+                ]
+                .iter()
+                .all(|n| n.is_multiple_of(128)),
+                "FP8 prefill requires projection widths divisible by 128"
+            );
+        }
     }
     if config.architecture == ModelArchitecture::Lfm3 {
         return crate::lfm3::validate(config, options);
     }
     if options.wmma_prefill {
         ensure!(
-            config.hidden_size.is_multiple_of(16),
+            config.hidden_size.is_multiple_of(16)
+                || (config.architecture == ModelArchitecture::Qwen35Moe
+                    && options.prefill_dtype == crate::catena::PrefillDtype::Fp8),
             "WMMA prefill requires a hidden size divisible by 16"
         );
         ensure!(

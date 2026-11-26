@@ -12,10 +12,11 @@ when the repository has no model GGUF. Safetensors
 checkpoints can be a single file or an indexed set of shards. LLM image inputs
 require a GGUF model and companion projector. BF16 and F32 GGUF weights retain
 their native storage.
-Dense Qwen3/3.5 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
+Qwen3/3.5 dynamic FP8 safetensors use BF16 by default. On CUDA SM89+ GPUs,
 `--prefill-dtype fp8` additionally retains native E4M3 weights and block scales
 for prefill projections and attention. Decode keeps its BF16 weights.
-Dynamic FP8 Qwen3.5 MoE weights are dequantized to BF16 at load time.
+Qwen3.5/3.6 MoE also supports FP8 prefill for routed and shared experts; BF16
+MoE checkpoints are quantized to E4M3 at load time when FP8 is selected.
 
 ## GPU selection
 
@@ -65,9 +66,10 @@ CATENA_GPU_DIALECT=cuda cargo run -r -- \
 ```
 
 `--prefill-dtype bf16` selects the existing kernels and is the default. FP8
-supports dense Qwen3 and Qwen3.5 safetensors with dynamic activation quantization,
-E4M3 weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
-`quant_type: "float"` is accepted. Projection widths must be divisible by 128.
+supports Qwen3 dense and Qwen3.5/3.6 dense or MoE safetensors with dynamic
+activation quantization, E4M3 weights, and 128×128 weight blocks with `weight_scale_inv`. An explicit
+`quant_type: "float"` is accepted. Dense projection widths must be divisible by
+128; MoE projections pad partial tiles.
 The option assumes a suitable CUDA toolkit and SM89+ hardware; it does not query
 hardware capabilities. FP8 modules compile for SM89 with forward-compatible PTX.
 All batched prefill uses fused FP8 QK and probability–value attention with FP32
@@ -82,10 +84,19 @@ small alpha/beta projections, convolution, and gated normalization retain their
 existing arithmetic. Qwen3.5 currently requires 128-wide linear key heads.
 KV storage and decode remain BF16, and normalization and softmax reductions
 remain FP32. The vocabulary projection and single-token calls retain their
-existing arithmetic. Mixed checkpoints retain BF16 execution for unquantized
-projection matrices. FP8 cannot be combined with `--no-wmma-prefill`, GGUF, HIP,
-MoE, or image inputs. The extra native weights increase GPU memory usage because
+existing arithmetic. Dense mixed checkpoints retain BF16 execution for unquantized
+projection matrices. MoE quantizes these matrices once at load time, uses grouped
+FP8 MMA for routed and shared gate/up/down projections, and retains the existing
+FP32 router, top-k selection, and expert combine arithmetic. FP8 cannot be combined
+with `--no-wmma-prefill`, GGUF, HIP, or image inputs. The extra native weights increase GPU memory usage because
 both formats are retained.
+
+The small BF16 MoE checkpoint can exercise this path without loading the 35B model:
+
+```bash
+CATENA_GPU_DIALECT=cuda cargo run -r -- \
+  --model tiny-random/qwen3.6-moe --prefill-dtype fp8 --prompt 'Gravity is'
+```
 
 For a Qwen3.5 checkpoint with dynamic blockwise FP8 weights:
 

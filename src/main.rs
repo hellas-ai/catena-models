@@ -33,7 +33,7 @@ struct Args {
     #[arg(long, default_value_t = true, action = clap::ArgAction::SetTrue, conflicts_with = "no_wmma_prefill")]
     wmma_prefill: bool,
 
-    /// Dense Qwen3/3.5 prefill arithmetic; FP8 assumes CUDA SM89+ and an FP8 checkpoint.
+    /// Qwen3 dense and Qwen3.5 dense/MoE prefill arithmetic; FP8 assumes CUDA SM89+.
     #[arg(long, value_enum, default_value_t = PrefillDtype::Bf16)]
     prefill_dtype: PrefillDtype,
 
